@@ -1,0 +1,37 @@
+{
+ "provenance": {
+  "census": "36597762183 eval-slices-4 HOLD D2",
+  "rerun": "local repair rerun HOLD D3",
+  "note": "Defer/Keep briefs use the preamble's Note form; posture appears in ELI10 (census) or the Recommendation reason (rerun)"
+ },
+ "census": {
+  "question": "D2 — R2: Keep or defer the saved-view update endpoint?\nProject/branch/task: gstack-plan-count-PhqSAE on main, HOLD SCOPE review of saved project views.\nELI10: The plan lists four endpoints: create, list, update, delete. \"Update\" is what lets a member rename a view or overwrite its filters after tweaking them. The stated goal (save a named view, reopen it later) still works without it: delete the old view and save a new one. HOLD SCOPE asks me to flag anything deferrable, so this is that flag. Deferring saves one endpoint, one UI flow and their tests; keeping it means a member who adjusts a filter can hit \"update\" instead of rebuilding the view from scratch.\nStakes if we pick wrong: Defer and the pilot's reuse metric may drop because stale views get abandoned instead of fixed; keep and we spend a small amount more before adoption is proven.\nRecommendation: B) Keep because the endpoint reuses the create path's validation and authorization almost verbatim (human: ~half a day / CC: ~5 min), and \"my view drifted, let me fix it\" is the exact moment a user decides whether this feature is worth using.\nNote: options differ in kind, not coverage — no completeness score.\nPros / cons:\nA) Defer update to TODOS.md\n  ✅ Removes one endpoint, one UI flow and two tests from the first ship; smaller diff to review and roll out\n  ✅ Lets the two-week pilot show whether anyone actually edits views before building it\n  ❌ A member whose filters drift has to delete and recreate; stale views quietly stop being used and the reuse metric under-reads\nB) Keep update in scope (recommended)\n  ✅ Rename and overwrite reuse the create endpoint's validation, ownership check and project scoping, so the marginal cost is small\n  ✅ Views stay alive as the project changes (new statuses, new assignees), which is exactly the \"reopen after task changes\" acceptance criterion\n  ❌ Slightly more surface to test: concurrent edits from two tabs and rename-to-duplicate-name need explicit handling\nNet: A trades a small first-ship saving for a real risk of the pilot under-measuring; B costs little because it is mostly the create path again.",
+  "header": "R2 update",
+  "multiSelect": false,
+  "options": [
+   {
+    "label": "Defer update to TODOS.md",
+    "description": "Effort S, risk low. Reuse: none removed. Verification: no update tests. Drops the PATCH endpoint plus rename/overwrite UI to TODOS.md; users delete and re-save. ✅ Smaller first ship. ✅ Pilot decides if editing is wanted. ❌ Stale views get abandoned, reuse metric under-reads."
+   },
+   {
+    "label": "Keep update in scope (recommended)",
+    "description": "Effort S, risk low. Reuse: create path's validation, ownership and project scoping. Verification: PATCH request spec (owner, non-owner, other project, missing view) + UI rename/overwrite flow test. ✅ Marginal cost is small. ✅ Views survive project drift. ❌ Must handle two-tab concurrent edits and duplicate names."
+   }
+  ]
+ },
+ "rerun": {
+  "question": "D3 — UPDATE-EP: Defer the update endpoint (rename / overwrite a saved view) to TODOS.md, or keep it in scope?\nProject/branch/task: main, HOLD SCOPE review of PLAN.md (saved project views).\nELI10: The plan lists create, list, update and delete. Update is the one piece the goal does not strictly need: a member can delete a view and save a new one. Keeping it means one more route, action, UI edit control and test group; dropping it means renaming a view is a two-step chore and \"overwrite this view with my current filters\" is impossible until it ships later.\nStakes if we pick wrong: Defer wrongly and pilot users hit a papercut on the first rename; keep wrongly and you spend ~10% more effort on a feature whose reuse you are still measuring.\nRecommendation: B) Keep because update is already in the written plan, HOLD SCOPE preserves stated scope by default, and the extra cost is small (human: ~half a day / CC: ~5 min) while the UX cost of a missing rename shows up in the very pilot you are measuring.\nNote: options differ in kind, not coverage — no completeness score.\nNet: a small effort saving now vs. a visible papercut during the pilot.",
+  "header": "Update endpoint",
+  "multiSelect": false,
+  "options": [
+   {
+    "label": "Defer update endpoint to TODOS.md",
+    "description": "Ship create/list/delete only; members rename by delete + re-save. Effort S (removes work), risk low, reuse n/a, verification: existing create/list/delete tests. ✅ Fewer routes, actions and UI states to build and test during the pilot. ✅ Smallest possible surface if the pilot shows nobody reuses views. ❌ Renaming or updating a view becomes a two-step chore that pilot users will notice and report."
+   },
+   {
+    "label": "Keep update endpoint in scope (recommended)",
+    "description": "Keep rename + overwrite-filters as written, with its own tests. Effort S (human: ~half a day / CC: ~5 min), risk low, reuse: same controller and policy as the other three actions, verification: rename, overwrite, cross-member 403, stale-name 404 tests. ✅ Matches the plan as written; no scope change to explain to the team. ✅ \"Save current filters to this view\" is the natural gesture once someone tweaks a view. ❌ One more action, edit affordance and test group before the pilot can start."
+   }
+  ]
+ }
+}

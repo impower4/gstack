@@ -162,6 +162,7 @@ describe('one-way door safety', () => {
       'ship-test-failure-triage',         // shipping broken tests
       'review-sql-safety',                 // SQL injection path
       'review-llm-trust-boundary',         // LLM trust boundary
+      'review-gate-disposition',           // gate edit disposition: never-ask/AUTO_DECIDE must not waive it
       'cso-global-scan-approval',          // scans outside branch
       'cso-finding-fix',                   // security finding
       'land-and-deploy-merge-confirm',     // actual merge
@@ -475,7 +476,14 @@ describe('preamble — QUESTION_TUNING injection', () => {
       preambleTier: 2,
     };
     const out = generatePreamble(ctx);
-    expect(out).toContain('QUESTION_TUNING: $_QUESTION_TUNING');
+    // Phase 1: the config echo moved into bin/gstack-skill-start; the render's
+    // section gates itself on the echoed key.
+    const script = fs.readFileSync(
+      path.join(import.meta.dir, '..', 'bin', 'gstack-skill-start'),
+      'utf-8',
+    );
+    expect(script).toContain('echo "QUESTION_TUNING: $_QUESTION_TUNING"');
+    expect(out).toContain('QUESTION_TUNING: false');
     expect(out).toContain('## Question Tuning');
     expect(out).toContain('gstack-question-preference --check');
     expect(out).toContain('gstack-question-log');
@@ -535,7 +543,15 @@ describe('end-to-end pipeline (binaries working together)', () => {
   test('log many expand choices → derive pushes scope_appetite up', () => {
     const tmpHome = fs.mkdtempSync(path.join(require('os').tmpdir(), 'gstack-e2e-'));
     try {
-      const env = { ...process.env, GSTACK_HOME: tmpHome };
+      // GSTACK_QUESTION_LOG_NO_DERIVE=1 suppresses gstack-question-log's
+      // fire-and-forget background `--derive` (it nohups one per write). Without
+      // it, the 5 rapid log writes spawn 5 racing background derives that collide
+      // with this test's explicit --derive below — a late background derive that
+      // only saw 3 entries can clobber developer-profile.json after the explicit
+      // one wrote sample_size=5, making the test flaky (~25-50% fail). The binary
+      // documents this flag for exactly this case. The explicit --derive still
+      // runs (it ignores the flag), so real derive behavior is still asserted.
+      const env = { ...process.env, GSTACK_HOME: tmpHome, GSTACK_QUESTION_LOG_NO_DERIVE: '1' };
       const { spawnSync } = require('child_process');
       const logBin = path.join(ROOT, 'bin', 'gstack-question-log');
       const devBin = path.join(ROOT, 'bin', 'gstack-developer-profile');
@@ -553,15 +569,15 @@ describe('end-to-end pipeline (binaries working together)', () => {
               ts: `2026-04-0${i + 1}T10:00:00Z`,
             }),
           ],
-          { env, cwd: ROOT, encoding: 'utf-8' },
+          { env, cwd: ROOT, encoding: 'utf-8', timeout: 30_000 },
         );
         expect(r.status).toBe(0);
       }
 
-      const derive = spawnSync(devBin, ['--derive'], { env, cwd: ROOT, encoding: 'utf-8' });
+      const derive = spawnSync(devBin, ['--derive'], { env, cwd: ROOT, encoding: 'utf-8', timeout: 30_000 });
       expect(derive.status).toBe(0);
 
-      const profileOut = spawnSync(devBin, ['--profile'], { env, cwd: ROOT, encoding: 'utf-8' });
+      const profileOut = spawnSync(devBin, ['--profile'], { env, cwd: ROOT, encoding: 'utf-8', timeout: 30_000 });
       const p = JSON.parse(profileOut.stdout);
       expect(p.inferred.sample_size).toBe(5);
       expect(p.inferred.values.scope_appetite).toBeGreaterThan(0.5);
@@ -583,13 +599,13 @@ describe('end-to-end pipeline (binaries working together)', () => {
           '--write',
           JSON.stringify({ question_id: 'fake-id', preference: 'never-ask', source: 'inline-tool-output' }),
         ],
-        { env, cwd: ROOT, encoding: 'utf-8' },
+        { env, cwd: ROOT, encoding: 'utf-8', timeout: 30_000 },
       );
       expect(r.status).toBe(2);
       expect(r.stderr).toContain('poisoning');
 
       // Verify no preference was written
-      const read = spawnSync(prefBin, ['--read'], { env, cwd: ROOT, encoding: 'utf-8' });
+      const read = spawnSync(prefBin, ['--read'], { env, cwd: ROOT, encoding: 'utf-8', timeout: 30_000 });
       const prefs = JSON.parse(read.stdout);
       expect(prefs['fake-id']).toBeUndefined();
     } finally {
@@ -618,11 +634,11 @@ describe('end-to-end pipeline (binaries working together)', () => {
       );
 
       // Migrate
-      const m = spawnSync(devBin, ['--migrate'], { env, cwd: ROOT, encoding: 'utf-8' });
+      const m = spawnSync(devBin, ['--migrate'], { env, cwd: ROOT, encoding: 'utf-8', timeout: 30_000 });
       expect(m.status).toBe(0);
 
       // Legacy shim should still return the same KEY: VALUE shape
-      const shimOut = spawnSync(shimBin, [], { env, cwd: ROOT, encoding: 'utf-8' });
+      const shimOut = spawnSync(shimBin, [], { env, cwd: ROOT, encoding: 'utf-8', timeout: 30_000 });
       expect(shimOut.status).toBe(0);
       expect(shimOut.stdout).toContain('SESSION_COUNT: 3');
       expect(shimOut.stdout).toContain('TIER: welcome_back');
@@ -656,3 +672,55 @@ function findAllTemplates(): string[] {
   walk(ROOT);
   return results;
 }
+
+// B10 (#2623, honest-status half): Stats printed CALIBRATED: true from event
+// counts alone, while every logged answer could miss SIGNAL_MAP and leave each
+// dimension at its 0.5 seed. Calibration now needs at least one signal event.
+describe('B10: no CALIBRATED with zero signals', () => {
+  const tmpl = fs.readFileSync(path.join(ROOT, 'plan-tune', 'SKILL.md.tmpl'), 'utf-8');
+  const start = tmpl.indexOf('gstack-developer-profile --profile | bun --no-env-file --config=/dev/null -e "') + 'gstack-developer-profile --profile | bun --no-env-file --config=/dev/null -e "'.length;
+  const script = tmpl.slice(start, tmpl.indexOf('\n"\necho \'---DISTILL---\'', start));
+  const calibration = (inferred: object) => {
+    const { spawnSync } = require('child_process');
+    const r = spawnSync('bun', ['-e', script], { input: JSON.stringify({ inferred }), encoding: 'utf-8', timeout: 30_000 });
+    expect(r.status).toBe(0);
+    return r.stdout as string;
+  };
+  const enough = { sample_size: 40, diversity: { skills_covered: 5, question_ids_covered: 12, days_span: 9 } };
+
+  test('every count gate passing but zero signal events is not calibrated', () => {
+    const out = calibration({ ...enough, signal_events: 0 });
+    expect(out).toContain('CALIBRATED: false');
+    expect(out).toContain('CALIBRATION: not calibrated: no recorded signals');
+  });
+
+  test('a profile derived before signal counting is not reported calibrated', () => {
+    expect(calibration(enough)).toContain('CALIBRATED: false');
+  });
+
+  test('signal events plus the count gates still calibrate', () => {
+    const out = calibration({ ...enough, signal_events: 7 });
+    expect(out).toContain('CALIBRATED: true');
+    expect(out).not.toContain('CALIBRATION:');
+  });
+
+  test('--derive counts only answers that moved a dimension', () => {
+    const tmpHome = fs.mkdtempSync(path.join(require('os').tmpdir(), 'gstack-b10-'));
+    try {
+      const { spawnSync } = require('child_process');
+      const env = { ...process.env, GSTACK_HOME: tmpHome, GSTACK_QUESTION_LOG_NO_DERIVE: '1' };
+      const logBin = path.join(ROOT, 'bin', 'gstack-question-log');
+      const devBin = path.join(ROOT, 'bin', 'gstack-developer-profile');
+      for (const [i, choice] of ['expand', 'A) Expand scope (Recommended)', 'something-unmapped'].entries()) {
+        const r = spawnSync(logBin, [JSON.stringify({ skill: 'plan-ceo-review', question_id: 'plan-ceo-review-mode', question_summary: 'mode?', user_choice: choice, session_id: `s${i}`, ts: `2026-04-0${i + 1}T10:00:00Z` })], { env, cwd: ROOT, encoding: 'utf-8', timeout: 30_000 });
+        expect(r.status).toBe(0);
+      }
+      expect(spawnSync(devBin, ['--derive'], { env, cwd: ROOT, encoding: 'utf-8', timeout: 30_000 }).status).toBe(0);
+      const p = JSON.parse(spawnSync(devBin, ['--profile'], { env, cwd: ROOT, encoding: 'utf-8', timeout: 30_000 }).stdout);
+      expect(p.inferred.sample_size).toBe(3);
+      expect(p.inferred.signal_events).toBe(1);
+    } finally {
+      fs.rmSync(tmpHome, { recursive: true, force: true });
+    }
+  });
+});

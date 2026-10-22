@@ -1,0 +1,56 @@
+diff --git a/scripts/prune_logs.py b/scripts/prune_logs.py
+index 2a285ee..b81d713 100644
+--- a/scripts/prune_logs.py
++++ b/scripts/prune_logs.py
+@@ -5,12 +5,15 @@ import time
+ from pathlib import Path
+ 
+ 
+-def prune(log_dir: Path, days: int) -> list[Path]:
++def prune(log_dir: Path, days: int, dry_run: bool = False) -> list[Path]:
+     cutoff = time.time() - days * 86400
+     removed = []
+     for path in sorted(log_dir.glob("*.log")):
+         if path.stat().st_mtime < cutoff:
+-            path.unlink()
++            if dry_run:
++                print(f"would delete {path}")
++            else:
++                path.unlink()
+             removed.append(path)
+     return removed
+ 
+@@ -19,9 +22,12 @@ def main(argv=None) -> int:
+     parser = argparse.ArgumentParser(description=__doc__)
+     parser.add_argument("log_dir", type=Path)
+     parser.add_argument("--days", type=int, default=14)
++    parser.add_argument("--dry-run", action="store_true",
++                        help="list files that would be deleted without deleting them")
+     args = parser.parse_args(argv)
+-    removed = prune(args.log_dir, args.days)
+-    print(f"removed {len(removed)} file(s)")
++    removed = prune(args.log_dir, args.days, dry_run=args.dry_run)
++    verb = "would remove" if args.dry_run else "removed"
++    print(f"{verb} {len(removed)} file(s)")
+     return 0
+ 
+ 
+diff --git a/tests/test_prune_logs.py b/tests/test_prune_logs.py
+index de79c78..9165d62 100644
+--- a/tests/test_prune_logs.py
++++ b/tests/test_prune_logs.py
+@@ -18,3 +18,14 @@ def test_removes_only_old_logs(tmp_path):
+     assert main([str(tmp_path), "--days", "14"]) == 0
+     assert not old.exists()
+     assert new.exists()
++
++
++def test_dry_run_lists_but_keeps_files(tmp_path, capsys):
++    old = tmp_path / "old.log"
++    old.write_text("x")
++    _old(old, 30)
++    assert main([str(tmp_path), "--days", "14", "--dry-run"]) == 0
++    assert old.exists()
++    out = capsys.readouterr().out
++    assert f"would delete {old}" in out
++    assert "would remove 1 file(s)" in out

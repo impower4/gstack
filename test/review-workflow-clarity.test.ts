@@ -1,0 +1,624 @@
+import { expect, test } from 'bun:test';
+import { spawnSync } from 'node:child_process';
+import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { generateReviewArmy } from '../scripts/resolvers/review-army';
+import { generateCrossReviewDedup, generateSharedCodeReuse, generateScopeDrift } from '../scripts/resolvers/review-scope';
+import { generatePlanCompletionAuditReview, generatePlanCompletionAuditShip, generatePlanCompletionGateShip, PLAN_AUDIT_NOT_RUN } from '../scripts/resolvers/plan-gates';
+import { generateQAReview } from '../scripts/resolvers/qa';
+import { generateConfidenceCalibration } from '../scripts/resolvers/confidence';
+import { HOST_PATHS, type TemplateContext } from '../scripts/resolvers/types';
+import { between, compact, expectAbsent, expectMentions, expectOrdered, expectTokens } from './helpers/prompt-structure';
+
+const root = join(import.meta.dir, '..');
+const skill = readFileSync(join(root, 'review/SKILL.md.tmpl'), 'utf8');
+const adversarial = readFileSync(join(root, 'review/sections/adversarial.md.tmpl'), 'utf8');
+
+test('review audits deliverables before deferring behavioral plan checks to the QA preflight', () => {
+  const ctx: TemplateContext = { skillName: 'review', tmplPath: '', host: 'claude', paths: HOST_PATHS.claude };
+  const audit = generatePlanCompletionAuditReview(ctx).replace(/\s+/g, ' ');
+  for (const rule of [
+    /separate static audit evidence from behavioral checks/i,
+    /never DONE from a diff/,
+    /zero audited deliverables do not waive these checks/i,
+    /for each audited deliverable/i,
+    /leave the item UNVERIFIABLE and defer the command to Step 4\.7/,
+    /do not start applications, exercise APIs or mutate state during this audit/i,
+  ]) expect(audit).toMatch(rule);
+  const inspect = audit.search(/inspect the validator and its hooks before running it/i);
+  expect(inspect).toBeGreaterThan(-1);
+  expect(inspect).toBeLessThan(audit.search(/if found and verified safe above, invoke it/i));
+});
+
+test('review prior-Skip matching includes adversarial and Greptile findings without relaxing eligibility', () => {
+  const dedup = generateCrossReviewDedup({ skillName: 'review', tmplPath: '', host: 'claude', paths: HOST_PATHS.claude });
+  expectMentions(dedup, [['only', 'conditions', 'unchanged']], 'dedup');
+  expectMentions(dedup, [['never', 'advisory', 'suppress']], 'dedup');
+  expect(dedup).toMatch(/only suppress `skipped` findings — never `fixed` or `auto-fixed`/i);
+  expect(skill).toContain('Step 5.0 severity/prior-skip dedup');
+});
+
+test('Review audit and prior-Skip clarifications do not route Ship through Review steps', () => {
+  for (const host of Object.keys(HOST_PATHS) as TemplateContext['host'][]) {
+    const ctx: TemplateContext = { skillName: 'ship', tmplPath: '', host, paths: HOST_PATHS[host] };
+    const audit = generatePlanCompletionAuditShip(ctx);
+    expect(audit).toContain('Step 8.1/9');
+    expect(audit).not.toContain('Step 4.7');
+    const dedup = generateCrossReviewDedup(ctx);
+    expect(dedup).toContain('Step 9.3: Cross-review finding dedup');
+    expect(dedup).not.toContain('Step 5.0');
+    expect(dedup).not.toContain('For every combined finding');
+  }
+});
+
+test('review collects every source before its single parent fix phase', () => {
+  const markers = [
+    '## Step 4: Critical pass', '### TODOS cross-reference',
+    '### Documentation staleness check', '{{SECTION:review-army}}',
+    '{{QA_REVIEW}}', '{{SECTION:adversarial}}',
+    '## Step 5: Fix-First Review', '{{CROSS_REVIEW_DEDUP}}',
+    '### Step 5a:', '### Step 5b:', '### Step 5c:', '### Step 5d:',
+    '## Step 5.8: Persist Eng Review result',
+  ];
+  const positions = markers.map(marker => skill.indexOf(marker));
+  expect(positions.every(position => position >= 0)).toBe(true);
+  expect(positions).toEqual([...positions].sort((a, b) => a - b));
+  expect(skill.match(/## Step 5: Fix-First Review/g)).toHaveLength(1);
+  expectMentions(skill.replace(/\s+/g, ' '), [['do not', 'reviewed', 'source']], 'skill.replace(/\s+/g,  )');
+});
+
+test('review settles adversarial attempts before fixing and has one full-pass back edge', () => {
+  const generated = readFileSync(join(root, 'review/sections/adversarial.md'), 'utf8');
+  const decision = skill.slice(skill.indexOf('## Step 5.8: Persist Eng Review result')).replace(/\s+/g, ' ');
+  expect(generated).toContain('## Step 4.8: Adversarial review');
+  expectMentions(generated, [['do not', 'during', 'edit']], 'generated');
+  expect(decision).toMatch(/a pass covers Steps 3–5/i);
+  expect(decision).toContain('Below 3, repeat Steps 3–5 with a new REVIEW_START');
+  expect(decision).not.toContain('Route Step');
+  expect(decision).not.toContain('Steps 5.0–5d');
+  expectMentions(decision, [['without', 'summary', 'fourth']], 'decision');
+});
+
+test('review small-diff and failed-reader paths retain QA and the required adversarial pass', () => {
+  const army = generateReviewArmy({ skillName: 'review', tmplPath: 'review/SKILL.md.tmpl',
+    host: 'claude', paths: HOST_PATHS.claude });
+  expect(army).not.toContain('design-lite');
+  expectMentions(army.replace(/\s+/g, ' '), [['never', 'dispatched', 'incomplete']], 'review army');
+  expect(army).not.toContain('skip silently');
+});
+
+test('review defines QA confidence, severity, impact selection and numeric version comparison', () => {
+  const flat = skill.replace(/\s+/g, ' ');
+  expect(flat).toContain('confidence (1–10)');
+  expect(flat).toMatch(/retain Step 4\.7's severity/i);
+});
+
+test('review emits scope check after the plan audit and before the checklist', () => {
+  const markers = [
+    '{{SCOPE_DRIFT}}', '{{SECTION:plan-completion}}',
+    '## Step 2: Read the checklist',
+  ];
+  const positions = markers.map(marker => skill.indexOf(marker));
+  expect(positions.every(position => position >= 0)).toBe(true);
+  expect(positions).toEqual([...positions].sort((a, b) => a - b));
+  const audit = readFileSync(join(root, 'review/sections/plan-completion.md'), 'utf8').replace(/\s+/g, ' ');
+  expect(skill).not.toContain('Finish Step 1.5 here');
+});
+
+test('review composes confidence-tagged findings into one final report with explicit incomplete coverage', () => {
+  const flat = skill.replace(/\s+/g, ' ');
+  expect(flat).toContain('CRITICAL/INFORMATIONAL');
+  const report = flat.slice(flat.indexOf('### Report the final review'), flat.indexOf('{{LEARNINGS_LOG}}'));
+  expect(report).toMatch(/one final report/i);
+  expect(report).toMatch(/unresolved non-advisory defects/i);
+  expect(report).toMatch(/[Ss]tate INCOMPLETE if `COMPLETED` is false/);
+  expect(report).toContain('`## Exploratory QA and Verification Results`');
+});
+
+test('small-diff persistence uses an empty specialist map without manufacturing skipped coverage', () => {
+  const army = generateReviewArmy({ skillName: 'review', tmplPath: 'review/SKILL.md.tmpl',
+    host: 'claude', paths: HOST_PATHS.claude });
+  expect(army).toContain('DIFF_LINES < 50, keep `specialists: {}`');
+  expect(skill.replace(/\s+/g, ' ')).toMatch(/Step 4\.6's `specialists` object unchanged/i);
+  const ship = readFileSync(join(root, 'ship/sections/review-army.md.tmpl'), 'utf8');
+  expect(ship).toContain('`specialists`: `{}` for a small-diff skip');
+  expect(ship.replace(/\s+/g, ' ')).toMatch(/all required probes pass/i);
+});
+
+test('caller QA runs charter and setup after resource loading and has a severity for unmatched functional failures', () => {
+  for (const skillName of ['review', 'ship']) {
+    const body = generateQAReview({ skillName, tmplPath: '', host: 'claude', paths: HOST_PATHS.claude });
+    const preparation = body.indexOf(skillName === 'review'
+      ? '**1. Set the charter and isolation.**'
+      : 'Run the shared preflight;');
+    const probes = body.indexOf('**3. Run smoke and plan checks.**');
+    expect(preparation).toBeGreaterThan(-1);
+    if (skillName === 'review') {
+      const readiness = body.indexOf('**2. Check readiness and list required checks.**');
+      expect(readiness).toBeGreaterThan(preparation);
+      expect(probes).toBeGreaterThan(readiness);
+      expect(body.slice(preparation, readiness).replace(/\s+/g, ' ')).toMatch(/isolation\/permission preflight before setup/i);
+    } else expect(preparation).toBeGreaterThan(body.indexOf('**2. List required checks.**'));
+    expect(probes).toBeGreaterThan(preparation);
+    expect(body.replace(/\s+/g, ' ')).toContain('`functional-contract`, `CRITICAL`');
+    expectMentions(body, [['not', 'setup/permission', 'blockers']], 'body');
+    expectMentions(body, [['approval', 'creation', 'needs']], 'body');
+    expect(body).not.toContain('for parent approval');
+  }
+});
+
+test('review prepares context and deduplicates before classifying findings', () => {
+  const positions = [
+    '## Step 3.5: Diff scans', '## Step 3.6: Gather review context',
+    '{{LEARNINGS_SEARCH}}', '{{ASIDE_RESEARCH}}', '## Step 4: Critical pass',
+    '## Step 5: Fix-First Review', '{{CROSS_REVIEW_DEDUP}}',
+    '**Keep decisions through fix cycles:**', '### Step 5a: Classify each finding',
+  ].map(marker => skill.indexOf(marker));
+  expect(positions.every(position => position >= 0)).toBe(true);
+  expect(positions).toEqual([...positions].sort((a, b) => a - b));
+  expect(skill).toMatch(/before Step 5a classification/i);
+});
+
+test('review owns the complete persistence contract after the adversarial read', () => {
+  const step = skill.slice(skill.indexOf('## Step 5.8: Persist Eng Review result'));
+  expect(skill.indexOf('{{SECTION:adversarial}}')).toBeLessThan(skill.indexOf('## Step 5.8: Persist Eng Review result'));
+  expect(adversarial).not.toContain('### Before persisting Eng Review (Step 5.8)');
+  for (const token of [
+    'repeat Steps 3–5', 'at most 3 fix cycles', 'original `evidence_paths`/`helper_target`',
+    'snapshot_covered_paths', 'REVIEW_START', 'COMPLETED', 'CONVERGED', 'CYCLES', 'Step 4.7',
+    'native Step 4.8 adversarial pass', 'named-risk', 'zero counts', '`completed:false`',
+    '`specialists`', '`findings`', 'explicit Skip', 'sharedLibsFingerprint', '`review_binding`',
+  ]) expect(step.toLowerCase().replace(/\s+/g, ' ')).toContain(token.toLowerCase());
+  expect(step.indexOf('### 1. Re-review after edits'))
+    .toBeLessThan(step.indexOf('### 2. Fill the record'));
+  expect(step.indexOf('### 2. Fill the record'))
+    .toBeLessThan(step.indexOf('~/.claude/skills/gstack/bin/gstack-review-log'));
+  expect(step).toContain('`quality_score`');
+  expect(step.indexOf('Pre-Landing Review: N issues (X critical, Y informational)'))
+    .toBeGreaterThan(step.indexOf('~/.claude/skills/gstack/bin/gstack-review-log'));
+  expect(step).toContain('`## Exploratory QA and Verification Results`');
+});
+
+test('review distinguishes required native coverage from optional outside coverage', () => {
+  const section = readFileSync(join(root, 'review/sections/adversarial.md'), 'utf8');
+  expectMentions(section, [['only', 'non-blocking', 'adversarial']], 'section');
+  expect(section).not.toContain('All errors are non-blocking');
+});
+
+test('review identifies probe selection, report assets and the detected diff base', () => {
+  const generated = generateQAReview({ skillName: 'review', tmplPath: 'review/SKILL.md.tmpl',
+    host: 'claude', paths: HOST_PATHS.claude });
+  const checklist = readFileSync(join(root, 'review/checklist.md'), 'utf8');
+  expect(generated).toContain('5 minutes/12 probes');
+  expect(generated).toContain("Read QA\'s `templates/functional-report-template.md`");
+  expect(generated).toMatch(/link every checkpoint/i);
+  expect(generated).toMatch(/no second report/i);
+  expect(checklist).not.toContain('git diff origin/main');
+});
+
+test('caller QA defines execution, evidence ownership and report adaptation before handoff', () => {
+  for (const skillName of ['review', 'ship']) {
+    const generated = generateQAReview({ skillName, tmplPath: `${skillName}/SKILL.md.tmpl`,
+      host: 'claude', paths: HOST_PATHS.claude }).replace(/\s+/g, ' ');
+    expect(generated).toMatch(/never overwrite another run/i);
+    expectMentions(generated, [['without', 'current', 'updates']], 'generated');
+    expect(generated).toContain('Use checklist severity');
+    if (skillName === 'review') {
+      expect(generated).toContain('`## Exploratory QA and Verification Results`');
+      expect(generated).toContain('`### Browser results`');
+    } else {
+      expect(generated).toContain('`## Exploratory QA`');
+    }
+  }
+});
+
+test('review section index follows the actual pre-fix execution order', () => {
+  const manifest = JSON.parse(readFileSync(join(root, 'review/sections/manifest.json'), 'utf8'));
+  expect(manifest.sections.map((section: { id: string }) => section.id)).toEqual([
+    'plan-completion', 'review-army', 'adversarial', 'shared-code-reuse',
+  ]);
+});
+
+test('review finalization ownership: initialize invocation state and capture the core token before reading', () => {
+  const start = skill.slice(skill.indexOf('## Step 3: Get the diff'), skill.indexOf('## Step 3.4:'));
+  expect(start).toContain('CYCLES=0');
+  expect(skill.match(/CYCLES=0/g)).toHaveLength(1);
+  expect(start).toContain('gstack-review-log --start review\ngit diff "$DIFF_BASE"');
+  const flat = start.replace(/\s+/g, ' ');
+  expect(flat).toMatch(/REVIEW_START for this core candidate before reading its diff/i);
+  expectMentions(flat, [['never', 'reading', 'before']], 'flat');
+  expect(flat).toMatch(/separate PASS_START tokens, not REVIEW_START/);
+  expectMentions(flat, [['only', 'finishes', 'final']], 'flat');
+});
+
+test('review finalization ownership: late findings use Fix-First before the bounded parent transition', () => {
+  const flat = skill.replace(/\s+/g, ' ');
+  const markers = [
+    '{{SECTION:adversarial}}',
+    '## Step 5: Fix-First Review',
+    'Structured approval does not waive advisory/test_stub ASK gates',
+    '## Step 5.8: Persist Eng Review result',
+    'Edited: increment CYCLES once',
+    'No edits: fill the record below',
+    '### 2. Fill the record',
+    '--finish REVIEW_START',
+  ];
+  const positions = markers.map(marker => flat.indexOf(marker));
+  expect(positions.every(position => position >= 0)).toBe(true);
+  expect(positions).toEqual([...positions].sort((a, b) => a - b));
+  expect(flat).toContain('at most 3 fix cycles');
+  expect(flat).toContain('At 3, persist `converged:false`');
+  const limit = flat.slice(flat.indexOf('At 3,'), flat.indexOf('No edits:'));
+  expect(limit).toMatch(/then stop this invocation/i);
+  expectMentions(limit, [['without', 'summary', 'fourth']], 'limit');
+});
+
+test('review finalization ownership: affected QA reuse cannot replace a full review or erase decisions', () => {
+  const step = skill.slice(skill.indexOf('## Step 5.8: Persist Eng Review result'));
+  const flat = step.replace(/\s+/g, ' ');
+  expect(flat).toContain('execute Steps 3–5 in order');
+  expectMentions(flat, [['only', 'unchanged-input', 'evidence']], 'flat');
+  expectMentions(flat, [['never', 'reusing', 'review']], 'flat');
+  expectMentions(flat, [['do not', 'suppress', 'earlier']], 'flat');
+  expect(flat).toContain('logger computes `snapshot_covered_paths`');
+  expectMentions(flat, [['never', 'prior-record', 'prior-cycle']], 'flat');
+});
+
+test('review finalization ownership: required native completion and optional outside records stay separate', () => {
+  const step = skill.slice(skill.indexOf('### 2. Fill the record'));
+  const flat = step.replace(/\s+/g, ' ');
+  expectMentions(flat, [['not', 'inconclusive', 'required']], 'flat');
+  expect(flat).toMatch(/`\/ship` named-risk acceptance cannot complete `\/review`/i);
+  expectMentions(flat, [['cannot', 'substitute', 'native']], 'flat');
+  expect(flat).toMatch(/structured-review gate still applies/i);
+  expect(flat).toContain('zero counts and `completed:false`');
+  expect(flat).toContain('`CONVERGED`: true only for a completed zero-edit pass');
+});
+
+test('review finalization ownership: finish only the final core token without log-time capture', () => {
+  const step = skill.slice(skill.indexOf('## Step 5.8: Persist Eng Review result'));
+  const flat = step.replace(/\s+/g, ' ');
+  expect(step.match(/--finish REVIEW_START/g)).toHaveLength(1);
+  expect(step).not.toContain('--start review');
+  expect(step).not.toContain('--finish PASS_START');
+  expect(flat).toMatch(/never invent a binding or replace REVIEW_START at log time/i);
+  expectMentions(flat, [['only', 'finish', 'final']], 'flat');
+  expect(step).toContain('"completed":COMPLETED,"converged":CONVERGED,"cycles":CYCLES');
+});
+
+test('review finalization ownership: the plan audit retains its high-impact gate before the final scope check', () => {
+  const plan = readFileSync(join(root, 'review/sections/plan-completion.md.tmpl'), 'utf8');
+  expect(plan).toContain('HIGH-impact discrepancy question');
+  expectMentions(plan, [['before', 'resolve', 'final']], 'plan');
+  expect(plan).not.toContain('never blocks the review');
+  expect(plan).toContain('{{PLAN_COMPLETION_AUDIT_REVIEW}}');
+  const audit = readFileSync(join(root, 'review/sections/plan-completion.md'), 'utf8');
+  const gate = audit.indexOf('**HIGH-impact plan-file discrepancies** trigger AskUserQuestion');
+  expect(gate).toBeGreaterThan(-1);
+  expect(gate).toBeLessThan(audit.indexOf('When continuing after the audit (no HIGH-impact gate, or option B/C)'));
+  const flatAudit = audit.replace(/\s+/g, ' ');
+  expectMentions(flatAudit, [['before', 'implementation', 'invocation']], 'flatAudit');
+  expect(flatAudit).toMatch(/not this read-only audit/i);
+  // C2: a spawned or non-interactive review cannot answer the question; its default writes and drops nothing.
+  expect(flatAudit).toContain('Spawned or non-interactive: report REQUIREMENTS MISSING, continue; record nothing.');
+  expect(flatAudit.indexOf('Spawned or non-interactive: report')).toBeLessThan(flatAudit.indexOf('When continuing after the audit'));
+});
+
+test('review scope notes remain provisional until the plan section emits the only final scope check', () => {
+  const scope = generateScopeDrift({ skillName: 'review', tmplPath: 'review/SKILL.md.tmpl',
+    host: 'claude', paths: HOST_PATHS.claude }).replace(/\s+/g, ' ');
+  expect(scope).toMatch(/keep these notes provisional/i);
+  expectMentions(scope, [['before', 'single', 'final']], 'scope');
+  expect(scope).not.toContain('Scope Check: [CLEAN');
+  expect(scope).not.toContain('available plan-audit results');
+});
+
+test('review confidence uses its severity labels without an undefined P0 exception', () => {
+  const ctx: TemplateContext = { skillName: 'review', tmplPath: 'review/SKILL.md.tmpl',
+    host: 'claude', paths: HOST_PATHS.claude };
+  const confidence = generateConfidenceCalibration(ctx);
+  expect(confidence).toContain('[CRITICAL]');
+  expect(confidence).toContain('[CRITICAL|INFORMATIONAL]');
+  expect(confidence).not.toMatch(/\bP[012]\b/);
+  const flat = confidence.replace(/\s+/g, ' ');
+  for (const row of [
+    /\| 9-10 \|[^|]*\| Show normally \|/, /\| 7-8 \|[^|]*\| Show normally \|/,
+    /\| 5-6 \|[^|]*\| Show with caveat/, /\| 3-4 \|[^|]*\| Suppress from main report/,
+    /\| 1-2 \|[^|]*\| Only report a suspected release-blocking catastrophe/,
+  ]) expect(flat).toMatch(row);
+  expect(flat).toMatch(/explicitly speculative/i);
+  expect(flat).toMatch(/the finding is unverified/i);
+  expect(flat).toContain('file:line');
+  expect(flat).toMatch(/force its confidence to 4-5/i);
+  expect(flat).toMatch(/never invent speculative confidence 7\+/i);
+  expect(confidence.indexOf('Pre-emit verification gate')).toBeLessThan(confidence.indexOf('| Score |'));
+  expect(confidence).not.toContain('FP classes the gate kills');
+  expect(confidence).not.toContain('1539-framework-aware-review.md');
+  expectMentions(generateConfidenceCalibration({ ...ctx, skillName: 'ship' }), [['only', 'severity', 'report']], 'section');
+});
+
+test('review names the lifecycle and record owners before using their persistence rules', () => {
+  const start = skill.slice(skill.indexOf('## Step 3: Get the diff'), skill.indexOf('## Step 3.4:')).replace(/\s+/g, ' ');
+  expect(start).toContain('REVIEW_START / PASS_START |');
+  expect(start).toContain('`review_binding` |');
+  expect(start).toContain('`snapshot_covered_paths` |');
+  expectMentions(start, [['never', 'matching', 'reusable']], 'start');
+  expectMentions(start, [['never', 'supplied', 'reviewer']], 'start');
+});
+
+test('review invocation-local advice reuse keeps raw-source and changed-decision gates', () => {
+  const decisions = skill.slice(skill.indexOf('**Keep decisions through fix cycles:**'),
+    skill.indexOf('### Step 5a:')).replace(/\s+/g, ' ');
+  expect(decisions).toMatch(/save completed AUTO-FIX\/fix and explicit Skip actions/i);
+  expect(decisions).toContain("`advisory`, `evidence_paths` and `helper_target`");
+  expect(decisions).toMatch(/require a new question/i);
+  expect(decisions).toMatch(/cannot suppress new\/recurring defects/i);
+});
+
+for (const skillName of ['review', 'ship']) {
+  const ctx: TemplateContext = { skillName, tmplPath: `${skillName}/SKILL.md.tmpl`,
+    host: 'claude', paths: HOST_PATHS.claude };
+  const army = generateReviewArmy(ctx);
+  const flat = army.replace(/\s+/g, ' ');
+
+  // PR gate run 38981523623 (ship-exploratory-plan-checks): the block sourced the scope signals
+  // without printing them, so the agent appended its own echo to see SCOPE_FRONTEND.
+  test(`${skillName} clarity: the scope block prints every signal specialist selection reads`, () => {
+    const block = between(army, '### Detect stack and scope', '### Read specialist hit rates');
+    expect(block).toContain("/gstack-diff-scope <base> 2>/dev/null) || true\nset | grep '^SCOPE_'\n");
+    const selection = between(army, '### Select specialists', '### Adaptive gating');
+    const used = [...new Set(selection.match(/SCOPE_[A-Z_]+/g))];
+    expect(used.length).toBeGreaterThan(0);
+    const flags = between(readFileSync(join(root, 'bin/gstack-diff-scope'), 'utf8'), '_print_flags() {', '}');
+    for (const signal of used) {
+      if (flags.includes(`echo "${signal}=`)) continue;
+      // PR gate run 39002269281: a signal gstack-diff-scope does not print comes from a detect helper the scope
+      // block itself runs, never from a command named only in selection prose.
+      const helper = /bin\/(gstack-[a-z-]+) detect\b/.exec(block.split('\n').find(line => line.includes(signal))!)?.[1];
+      expect(helper, signal).toBeDefined();
+      expect(readFileSync(join(root, 'bin', helper!), 'utf8'), signal).toContain(`${signal}=\${`);
+      expect(selection, signal).not.toMatch(/\bdetect\b/);
+    }
+  });
+
+  test(`${skillName} clarity: the state-machine signal checks the detector's exit status and fails toward dispatch`, () => {
+    const block = between(army, '### Detect stack and scope', '### Read specialist hit rates');
+    expect(block).toContain(`_SM=$(${HOST_PATHS.claude.binDir}/gstack-state-matrix detect --base <base>) || _SM=SCOPE_STATE_MACHINE=unknown; source <(echo "$_SM")\n`);
+    expect(block.indexOf('SCOPE_STATE_MACHINE=unknown')).toBeLessThan(block.indexOf("set | grep '^SCOPE_'"));
+    const selection = between(army, '### Select specialists', '### Adaptive gating').replace(/\s+/g, ' ');
+    expect(selection).toContain('9. **State Machines** — if SCOPE_STATE_MACHINE is true or unknown: read');
+    // /review delta on 51f1e02: a fixed .gstack/tmp/state-machines.md let a second review check the previous run's
+    // output (Write refuses an unread existing file) and commit it; each run now checks the new file outfile prints.
+    expect(selection).toContain('/gstack-state-matrix outfile`, Read the file it prints, write the full output there, then run `');
+    expect(selection).toContain('/gstack-state-matrix check <file>` on it.');
+    expect(selection).not.toContain('.gstack/tmp/state-machines.md');
+    expect(selection).not.toContain('<<');
+    expect(selection).not.toContain('pipe output');
+  });
+
+  test(`${skillName} clarity: the scope block run against a failing detector prints unknown and keeps its stderr`, () => {
+    const stubs = mkdtempSync(join(realpathSync(tmpdir()), 'scope-block-'));
+    try {
+      const block = /\`\`\`bash\n([\s\S]*?)\n\`\`\`/.exec(between(generateReviewArmy({ ...ctx, paths: { ...ctx.paths, binDir: stubs } }),
+        '### Detect stack and scope', '### Read specialist hit rates'))![1].replaceAll('<base>', 'main');
+      writeFileSync(join(stubs, 'gstack-diff-scope'), '#!/bin/sh\necho SCOPE_FRONTEND=false\n', { mode: 0o755 });
+      const run = (detector: string) => {
+        writeFileSync(join(stubs, 'gstack-state-matrix'), `#!/bin/sh\n${detector}\n`, { mode: 0o755 });
+        return spawnSync('bash', ['-c', block], { cwd: stubs, encoding: 'utf8', timeout: 10_000 });
+      };
+      const failed = run("echo SCOPE_STATE_MACHINE=false; echo '# no merge base with origin/main; run: git fetch origin main'; echo 'detector crashed' >&2; exit 2");
+      expect(failed.stdout).toMatch(/^SCOPE_STATE_MACHINE=unknown$/m);
+      expect(failed.stdout).not.toMatch(/^SCOPE_STATE_MACHINE=false$/m);
+      expect(failed.stderr).toContain('detector crashed');
+      expect(run('exit 127').stdout).toMatch(/^SCOPE_STATE_MACHINE=unknown$/m);
+      const silent = run("echo 'detector found no git' >&2; exit 3");
+      expect(silent.stdout).toMatch(/^SCOPE_STATE_MACHINE=unknown$/m);
+      expect(silent.stderr).toContain('detector found no git');
+      const lateFail = run("echo SCOPE_STATE_MACHINE=true; echo SCOPE_LEAK=1; exit 1");
+      expect(lateFail.stdout).toMatch(/^SCOPE_STATE_MACHINE=unknown$/m);
+      expect(lateFail.stdout).not.toContain('SCOPE_LEAK');
+      const detected = run("echo SCOPE_STATE_MACHINE=true; echo '# state-machine: src/takes.ts:4 proposal,accept'");
+      expect(detected.stdout).toMatch(/^SCOPE_STATE_MACHINE=true$/m);
+      expect(detected.stdout).toMatch(/^SCOPE_FRONTEND=false$/m);
+      expect(run('echo SCOPE_STATE_MACHINE=false').stdout).toMatch(/^SCOPE_STATE_MACHINE=false$/m);
+      expect(block).toContain("DIFF_LINES=$(git diff \"$DIFF_BASE\" --numstat | awk '{n+=$1+$2} END {print n+0}')");
+    } finally { rmSync(stubs, { recursive: true, force: true }); }
+  });
+
+  test(`${skillName} clarity: terminal failure permits independent work but never certifies coverage`, () => {
+    expectMentions(flat, [['confirm', 'finished', 'stopped']], 'flat');
+    expectMentions(flat, [['does not', 'termination', 'timeout']], 'flat');
+    expect(flat).toMatch(/stop path without edits/i);
+    expectMentions(flat, [['never', 'dispatched', 'incomplete']], 'flat');
+    const redTeam = flat.slice(flat.indexOf('### Red Team dispatch'));
+    expectMentions(redTeam, [['confirm', 'incomplete', 'stopped']], 'redTeam');
+    expect(redTeam).toContain('stages 1–7');
+  });
+
+  test(`${skillName} clarity: ordered specialist merge separates validation from scoring and provenance`, () => {
+    const markers = ['#### 1. Parse outputs', '#### 2. Validate severity',
+      '#### 3. Identify and merge', '#### 4. Apply specialist confidence gates',
+      '#### 5. Score and present specialists', '#### 6. Save specialist activity',
+      '#### 7. Hand off to Fix-First'];
+    const positions = markers.map(marker => army.indexOf(marker));
+    expect(positions.every(position => position >= 0)).toBe(true);
+    expect(positions).toEqual([...positions].sort((a, b) => a - b));
+    const validation = flat.slice(flat.indexOf('#### 2.'), flat.indexOf('#### 3.'));
+    expect(validation).toContain('remove `advisory` and retain its `CRITICAL` severity');
+    expect(validation).toMatch(/never downgrade severity/i);
+    const merge = flat.slice(flat.indexOf('#### 3.'), flat.indexOf('#### 4.'));
+    expect(merge.indexOf('Partition defects and advisories')).toBeLessThan(merge.indexOf('grouping by fingerprint'));
+    for (const token of ['sharedLibsFingerprint', 'literal JSON on stdin', '+1 (cap at 10)']) expect(merge).toContain(token);
+    for (const rule of [/never trust a supplied hash/i, /missing\/malformed metadata cannot deduplicate/i,
+      /core findings never earn a specialist confidence boost/i]) expect(merge).toMatch(rule);
+    for (const gate of ['Confidence 7+', 'Confidence 5-6', 'Confidence 3-4', 'Confidence 1-2']) expect(army).toContain(gate);
+    const scoring = flat.slice(flat.indexOf('#### 5.'), flat.indexOf('#### 6.'));
+    expect(scoring).toMatch(/only specialist findings enter this header and `quality_score`/i);
+    expect(scoring).toMatch(/non-advisory/i);
+    expect(scoring).toContain('quality_score = max(0, 10 - (critical_count * 2 + informational_count * 0.5))');
+    expect(flat).toMatch(/advisory findings count in the stats `findings` field/i);
+    expectMentions(flat, [['only', 'specialist', 'findings']], 'flat');
+    expectMentions(flat, [['not', 'specialist', 'core-only']], 'flat');
+    expect(flat).toContain('ASK-only');
+  });
+
+  test(`${skillName} clarity: shared-code reuse gives executable decisions and retains checker safeguards`, () => {
+    const reuse = generateSharedCodeReuse(ctx).replace(/\s+/g, ' ');
+    const markers = ['1. **Read the evidence.**', '2. **Run the checker.**',
+      '3. **Act on its result.**', '4. **Persist through the logger.**'];
+    const positions = markers.map(marker => reuse.indexOf(marker));
+    expect(positions.every(position => position >= 0)).toBe(true);
+    expect(positions).toEqual([...positions].sort((a, b) => a - b));
+    for (const token of ['--check-shared-libs REVIEW_START', "<<'GSTACK_SHARED_LIBS_REUSE_JSON'", 'literal JSON on stdin',
+      '`reusable: true`', 'sharedLibsFingerprint', 'explicit Skip', 'logger-versioned `snapshot_covered_paths`',
+      'canReuseSharedLibsAdvisory']) expect(reuse).toContain(token);
+    for (const rule of [/false, command failure or unreadable output[^.]*never suppression/i,
+      /do not supply your own snapshot, prior record or coverage/i, /unknown evidence fails closed/i,
+      /real defects retain normal Fix-First handling/i]) expect(reuse).toMatch(rule);
+  });
+}
+
+test('review clarity: settlement gates edits separately from incomplete required coverage', () => {
+  const fix = skill.slice(skill.indexOf('## Step 5: Fix-First Review'), skill.indexOf('{{CROSS_REVIEW_DEDUP}}')).replace(/\s+/g, ' ');
+  expectMentions(fix, [['stop', 'without', 'edits']], 'fix');
+});
+
+test('review clarity: Greptile reply choices never substitute for Fix-First approval', () => {
+  const fix = skill.slice(skill.indexOf('## Step 5: Fix-First Review'), skill.indexOf('{{CROSS_REVIEW_DEDUP}}'));
+  expect(fix).toContain('VALID & ACTIONABLE Greptile findings');
+  const greptile = skill.slice(skill.indexOf('### Greptile comment resolution'), skill.indexOf('## Step 5.8:'));
+  const flat = greptile.replace(/\s+/g, ' ');
+  expectMentions(flat, [['not', 'decisions', 'approval']], 'flat');
+  expect(flat).toContain('B) Propose a code change');
+  expect(flat).toContain('Steps 5c–5d');
+  expectMentions(flat, [['wait', 'approval', 'editing']], 'flat');
+  expect(flat).toMatch(/no new fix permission/i);
+});
+
+test('ship review clarity: parent settlement gate precedes classification and cannot waive coverage', () => {
+  const ship = readFileSync(join(root, 'ship/sections/review-army.md.tmpl'), 'utf8');
+  const gate = ship.slice(ship.indexOf('## Step 9.4:'), ship.indexOf('1. **Classify')).replace(/\s+/g, ' ');
+  expectMentions(gate, [['wait', 'termination', 'confirm']], 'gate');
+  expectMentions(gate, [['stop', 'incomplete', 'through']], 'gate');
+  expectMentions(gate, [['blocks', 'continuation', 'dispatched']], 'gate');
+});
+
+test('review keeps its smoke-clock, setup-authority, plan-gate and findings-source rules', () => {
+  const ctx = { skillName: 'review', tmplPath: 'review/SKILL.md.tmpl', host: 'claude', paths: HOST_PATHS.claude } as TemplateContext;
+  const qa = generateQAReview(ctx).replace(/\s+/g, ' ');
+  expect(qa).toMatch(/\/review sets none; only an invoker-supplied EARLIER_UTC counts/);
+  expectMentions(qa, [['never', 'report-only', 'installs']], 'qa');
+  expect(qa).toMatch(/otherwise they stay blocked/i);
+  expect(qa).not.toContain('Ask for setup/permission');
+  expect(generateQAReview({ ...ctx, skillName: 'ship', tmplPath: 'ship/SKILL.md.tmpl' })).not.toContain('/review sets none');
+  const audit = generatePlanCompletionAuditReview(ctx).replace(/\s+/g, ' ');
+  // F1 (#2768): no bound plan prints the exact not-run line instead of the old notice.
+  expect(audit).toContain(PLAN_AUDIT_NOT_RUN);
+  expect(audit).not.toMatch(/skip dispatch/);
+  expect(audit).toContain('**HIGH-impact plan-file discrepancies** trigger AskUserQuestion');
+  expectMentions(audit, [['never', 'fallback', 'question']], 'audit');
+  const shipCtx = { ...ctx, skillName: 'ship', tmplPath: 'ship/SKILL.md.tmpl' };
+  expectMentions(generatePlanCompletionAuditShip(shipCtx), [['do not', 'another', 'search']], 'generatePlanCompletionAuditShip(shipCtx)');
+  const persist = skill.slice(skill.indexOf('### 2. Fill the record')).replace(/\s+/g, ' ');
+});
+
+// INV-1 consumers: an outside review that reports `unverified` or
+// `unavailable` is missing coverage in /ship's readiness note, its PR body
+// and /review's completion, never a pass.
+test('ship and review count unverified or unavailable outside reviews as missing coverage', () => {
+  const read = (rel: string) => readFileSync(join(import.meta.dir, '..', rel), 'utf-8').replace(/\s+/g, ' ');
+  for (const rel of ['ship/SKILL.md', 'ship/sections/pr-body.md', 'review/SKILL.md']) {
+    expect(read(rel)).toMatch(/`unverified` or `unavailable` is (listed as )?missing coverage[^.]*never (as )?(a )?pass/i);
+  }
+});
+
+test('testing specialist treats negative assertions as decisions and catches ones a rename emptied', () => {
+  const specialist = between(readFileSync(join(root, 'review/specialists/testing.md'), 'utf8'), '### Negative Assertions', '\n### ');
+  expectTokens(specialist, ['not.toContain', 'assertNotIn'], 'testing specialist');
+  expectMentions(compact(specialist), [
+    ['new', 'absent', 'removal', 'not coverage'],
+    ['authorizes', 'removal'],
+    ['rename', 'negative assertion', 'passes forever'],
+    ['grep', 'negative assertions', 'old value'],
+  ], 'testing specialist');
+});
+
+test('security specialist checks authorization paths a route-guard read misses', () => {
+  const auth = compact(between(readFileSync(join(root, 'review/specialists/security.md'), 'utf8'), '### Auth & Authorization Bypass', '\n### '));
+  expectMentions(auth, [
+    ['error', 'renderer', 'outside', 'guard'],
+    ['ownership', 'role', 'downgrade'],
+    ['list', 'detail', 'download', 'separately'],
+    ['session', 'before', 'validating', 'callback'],
+  ], 'security specialist');
+});
+
+// Gate Integrity (docs/designs/HONEST_WORK_GATE_INTEGRITY.md W2): the category
+// sits in the core CRITICAL pass every diff size gets, its findings reach a
+// human through one four-option question, and the record carries identity
+// fields a later reader can act on. Tokens and order only; the prose is free.
+test('Gate Integrity is a Pass 1 category that is ASK-only and keeps the three levels apart', () => {
+  const checklist = readFileSync(join(root, 'review/checklist.md'), 'utf8');
+  const pass1 = between(checklist, '### Pass 1 — CRITICAL', '### Pass 2 — INFORMATIONAL');
+  expect(pass1).toContain('#### Gate Integrity');
+  expect(between(checklist, '**Two-pass review:**', '**Output format:**')).toMatch(/Pass 1 \(CRITICAL\):[^\n]*Gate Integrity/);
+  const category = compact(between(pass1, '#### Gate Integrity'));
+  expectTokens(category, ['GATE_SUMMARY:', 'RH-1', 'RH-3', 'RH-4', 'RH-12', 'RH-13', 'RH-14', 'RH-15', 'RH-16', 'RH-2', 'RH-5',
+    '**Listed**', '**Read**', '**Finding**', 'gstack-decision-search --query "<dec-id>"'], 'Gate Integrity category');
+  expectMentions(category, [
+    ['ask', 'never', 'auto-fix'],
+    ['groups', 'one decision'],
+    ['confidence', 'identification', 'not justification'],
+    ['citations', 'never', 'remove', 'finding'],
+    ['data', 'never', 'instructions', 'actor', 'reason'],
+  ], 'Gate Integrity category');
+  const heuristic = between(checklist, '## Fix-First Heuristic', '## Suppressions');
+  const askColumn = heuristic.slice(heuristic.indexOf('ASK (needs human judgment):'));
+  expect(askColumn).toContain('Gate Integrity');
+  expect(between(checklist, '## Severity Classification', '## Fix-First Heuristic')).toMatch(/└─ Gate Integrity/);
+});
+
+test('the eval-threshold suppression no longer removes a relaxed gate from the human question', () => {
+  const suppressions = compact(between(readFileSync(join(root, 'review/checklist.md'), 'utf8'), '## Suppressions'));
+  expect(suppressions).toContain('Eval threshold changes');
+  const line = suppressions.slice(suppressions.indexOf('Eval threshold changes'), suppressions.indexOf('Harmless no-ops'));
+  expectMentions(line, [['not', 'suppress', 'gate integrity'], ['citation', 'never', 'removes', 'finding']], 'threshold suppression');
+  expectTokens(line, ['verified', 'unverified'], 'threshold suppression');
+});
+
+test('review runs the gate scan before slop, carries the listing into Step 4 and asks the four gate options in order', () => {
+  expectOrdered(skill, ['## Step 3.5: Diff scans', '{{GATE_SCAN_BLOCK}}', 'bun run slop:diff', '## Step 3.6:',
+    '## Step 4: Critical pass', '### Step 5c:', 'review-gate-disposition',
+    'A) Restore the gate', 'B) Keep — justified', 'C) Keep — other reason', 'D) Leave open for a later human',
+    '### Step 5d:', '## Step 5.8:'], 'review skill');
+  expect(skill.match(/\{\{GATE_SCAN_BLOCK\}\}/g)).toHaveLength(1);
+  expectTokens(between(skill, '## Step 4: Critical pass', '### Shared-code opportunities'), ['GATE_SUMMARY:', '`gate`', '`gate_id`'], 'Step 4 gate carry');
+  const ask = compact(between(skill, '### Step 5c:', '### Step 5d:'));
+  expect(ask).toContain('<gstack-qid:review-gate-disposition>');
+  expectMentions(ask, [
+    ['spawned', 'headless', 'd', 'recommended'],
+    ['auto-chosen', 'never', 'disposition'],
+  ], 'Step 5c gate question');
+  for (const action of ['`restored`', '`kept`', '`open`']) expect(ask).toContain(action);
+});
+
+test('review persists gate identity fields, counts open findings and reports one Gate edits line', () => {
+  const record = compact(between(skill, '### 2. Fill the record', '### Report the final review'));
+  expectTokens(record, ['`gate`', '`gate_id`', '`reason`', '`kept`', '`restored`', '`open`', '`actor`', 'gstack-session-kind'], 'review record');
+  expectMentions(record, [
+    ['never', 'hunk text'],
+    ['`open`', 'count', '`issues_found`'],
+    ['logger', 'stamps', '`actor`'],
+  ], 'review record');
+  const report = compact(between(skill, '### Report the final review', '{{LEARNINGS_LOG}}'));
+  expectOrdered(report, ['`Gate edits: none detected (', '`Gate edits: N listed, M read, K findings —', '`Gate edits: partial (', '`Gate edits: UNAVAILABLE —'], 'final report');
+  expectMentions(report, [['unavailable', 'never', 'none detected']], 'final report');
+});
+
+test('review suppressions allow a clean result and skip common false positives but never suppress missing validation or a missing await', () => {
+  const suppressions = between(readFileSync(join(root, 'review/checklist.md'), 'utf8'), '## Suppressions');
+  expectMentions(compact(suppressions), [['zero findings', 'valid']], 'suppressions');
+  expectTokens(suppressions, ['"Function too long"', '"Possible null dereference"', '"N+1 query"', '"Hardcoded value"', '`Math.random()`'], 'suppressions');
+  expectAbsent(suppressions, [/missing input validation/i, /missing await/i], 'suppressions');
+});

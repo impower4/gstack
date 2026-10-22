@@ -1,0 +1,12 @@
+[
+  {
+    "file": "codex/SKILL.md.tmpl",
+    "text": "\"Codex authentication failed. Run `codex login` in your terminal to authenticate via ChatGPT.\"",
+    "reason": "The /codex skill's own direct CLI auth error, not an outside-voice fallback inside another skill."
+  },
+  {
+    "file": "codex/SKILL.md.tmpl",
+    "text": "\"Codex returned no response. Check stderr for errors.\"",
+    "reason": "The /codex skill's own direct CLI empty-response error, not an outside-voice fallback inside another skill."
+  }
+]

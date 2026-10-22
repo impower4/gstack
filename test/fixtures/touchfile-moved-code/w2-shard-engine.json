@@ -1,0 +1,25 @@
+{
+  "workstream": "W2 shared shard engine",
+  "recordedAt": "96764e80",
+  "sources": {
+    "scripts/test-strict-output.ts": {
+      "e2e": "global",
+      "llmJudge": "global"
+    },
+    "scripts/test-free-shards.ts": {
+      "e2e": [],
+      "llmJudge": []
+    },
+    "scripts/test-paid-shards.ts": {
+      "e2e": "global",
+      "llmJudge": "global"
+    }
+  },
+  "modules": {
+    "scripts/lib/shard-engine.ts": [
+      "scripts/test-strict-output.ts",
+      "scripts/test-free-shards.ts",
+      "scripts/test-paid-shards.ts"
+    ]
+  }
+}

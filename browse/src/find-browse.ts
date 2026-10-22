@@ -5,8 +5,8 @@
  * Outputs the absolute path to the browse binary on stdout, or exits 1 if not found.
  */
 
-import { existsSync } from 'fs';
-import { join } from 'path';
+import { accessSync, constants, readFileSync } from 'fs';
+import { dirname, join } from 'path';
 import { homedir } from 'os';
 
 // ─── Binary Discovery ───────────────────────────────────────────
@@ -14,6 +14,7 @@ import { homedir } from 'os';
 function getGitRoot(): string | null {
   try {
     const proc = Bun.spawnSync(['git', 'rev-parse', '--show-toplevel'], {
+    windowsHide: true,
       stdout: 'pipe',
       stderr: 'pipe',
     });
@@ -22,6 +23,35 @@ function getGitRoot(): string | null {
   } catch {
     return null;
   }
+}
+
+// Probe a path for executability. accessSync(X_OK) checks the executable
+// bit on Linux/macOS and degrades to an existence check on Windows (no
+// true execute bit). Mirrors lib/aside-render.ts executable() /
+// make-pdf/src/pdftotext.ts.
+function isExecutable(p: string): boolean {
+  try {
+    accessSync(p, constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// Resolve a bare binary path to the actual file on disk. On Windows, `bun
+// build --compile` appends `.exe` to the output filename, so `browse` on
+// disk is actually `browse.exe`. After a bare-path probe, try the Windows
+// extensions. Linux/macOS behavior is unchanged. Mirrors the helper in
+// lib/aside-render.ts (executable) and make-pdf/src/pdftotext.ts.
+function findExecutable(base: string): string | null {
+  if (isExecutable(base)) return base;
+  if (process.platform === 'win32') {
+    for (const ext of ['.exe', '.cmd', '.bat']) {
+      const withExt = base + ext;
+      if (isExecutable(withExt)) return withExt;
+    }
+  }
+  return null;
 }
 
 export function locateBinary(): string | null {
@@ -33,14 +63,26 @@ export function locateBinary(): string | null {
   if (root) {
     for (const m of markers) {
       const local = join(root, m, 'skills', 'gstack', 'browse', 'dist', 'browse');
-      if (existsSync(local)) return local;
+      const found = findExecutable(local);
+      if (found) return found;
     }
+
+    // Source-checkout fallback (no installed skill layout — the binary
+    // lives directly at <repo>/browse/dist/browse[.exe]). Hit by:
+    // - gstack repo dev workflow before `./setup` runs
+    // - the windows-setup-e2e.yml CI workflow which builds binaries
+    //   in place but never installs them under a marker dir
+    // - make-pdf consumers running from a sibling source checkout
+    const sourceCheckout = join(root, 'browse', 'dist', 'browse');
+    const sourceFound = findExecutable(sourceCheckout);
+    if (sourceFound) return sourceFound;
   }
 
   // Global fallback
   for (const m of markers) {
     const global = join(home, m, 'skills', 'gstack', 'browse', 'dist', 'browse');
-    if (existsSync(global)) return global;
+    const found = findExecutable(global);
+    if (found) return found;
   }
 
   return null;
@@ -49,6 +91,13 @@ export function locateBinary(): string | null {
 // ─── Main ───────────────────────────────────────────────────────
 
 function main() {
+  // setup's and gstack-doctor's launch probe (#2595): no git, no discovery.
+  if (process.argv[2] === '--version') {
+    let version = 'unknown';
+    try { version = readFileSync(join(dirname(process.execPath), '.version'), 'utf8').trim() || version; } catch {}
+    console.log(version);
+    process.exit(0);
+  }
   const bin = locateBinary();
   if (!bin) {
     process.stderr.write('ERROR: browse binary not found. Run: cd <skill-dir> && ./setup\n');

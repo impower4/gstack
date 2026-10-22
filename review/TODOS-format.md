@@ -1,6 +1,6 @@
 # TODOS.md Format Reference
 
-Shared reference for the canonical TODOS.md format. Referenced by `/ship` (Step 5.5) and `/plan-ceo-review` (TODOS.md updates section) to ensure consistent TODO item structure.
+Shared reference for the canonical TODOS.md format. Referenced by `/ship` (Step 14) and `/plan-ceo-review` (TODOS.md updates section) to ensure consistent TODO item structure.
 
 ---
 
@@ -59,4 +59,3 @@ When an item is completed, move it to the `## Completed` section preserving its 
 
 ```markdown
 **Completed:** vX.Y.Z (YYYY-MM-DD)
-```

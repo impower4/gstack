@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+# gstack-ceo-plan-find — print the CEO plan a plan review should read.
+#
+# Usage: gstack-ceo-plan-find <slug> <branch>
+#
+# Prints one absolute path, or nothing when no CEO plan exists. Exit 0 either
+# way; exit 2 on a usage error. A plan from another branch (precedence 2) is
+# disclosed on stderr: "CEO plan found (from branch <b>, not <branch>): <path>".
+#
+# /plan-ceo-review saves each plan as
+# $GSTACK_STATE_ROOT/projects/<slug>/ceo-plans/<YYYY-MM-DD>-<feature>.md with a
+# "Branch: <branch> | Mode: ..." header line. Precedence:
+#   1. newest plan whose Branch line names <branch>, compared the way
+#      gstack-slug writes BRANCH ("/" becomes "-")
+#   2. else the newest plan, disclosed on stderr
+# Only top-level ceo-plans/*.md counts: the same set /design-html and
+# /plan-ceo-review's prior-plans query read.
+set -u
+
+if [ "$#" -ne 2 ] || [ -z "$1" ]; then
+  echo "usage: gstack-ceo-plan-find <slug> <branch>" >&2
+  exit 2
+fi
+SLUG=$1
+BRANCH=$2
+
+eval "$("$(dirname "$0")/gstack-paths")"; : "${GSTACK_STATE_ROOT:?gstack-paths failed; reinstall with ./setup or /gstack-upgrade}"
+
+plan_branch() {
+  awk '/^Branch: /{ sub(/^Branch: /, ""); sub(/\|.*/, ""); print; exit }' "$1" | tr '/' '-' | tr -cd 'a-zA-Z0-9._-'
+}
+
+NEWEST=""
+FOR_BRANCH=""
+for plan in "$GSTACK_STATE_ROOT/projects/$SLUG/ceo-plans/"*.md; do
+  [ -f "$plan" ] || continue
+  if [ -z "$NEWEST" ] || [ "$plan" -nt "$NEWEST" ]; then NEWEST=$plan; fi
+  if [ -n "$BRANCH" ] && [ "$(plan_branch "$plan")" = "$BRANCH" ]; then
+    if [ -z "$FOR_BRANCH" ] || [ "$plan" -nt "$FOR_BRANCH" ]; then FOR_BRANCH=$plan; fi
+  fi
+done
+
+PLAN=${FOR_BRANCH:-$NEWEST}
+[ -n "$PLAN" ] || exit 0
+if [ -z "$FOR_BRANCH" ]; then
+  FROM=$(awk '/^Branch: /{ sub(/^Branch: /, ""); sub(/ *\|.*/, ""); print; exit }' "$PLAN" | LC_ALL=C tr -d '\000-\037\177')
+  echo "CEO plan found (from branch ${FROM:-unknown}, not ${BRANCH:-unknown}): $PLAN" >&2
+fi
+printf '%s\n' "$PLAN"
+exit 0

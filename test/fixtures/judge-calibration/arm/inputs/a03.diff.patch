@@ -1,0 +1,22 @@
+diff --git a/scripts/daily-report.sh b/scripts/daily-report.sh
+index 2280a7f..5085e46 100644
+--- a/scripts/daily-report.sh
++++ b/scripts/daily-report.sh
+@@ -1,6 +1,10 @@
+ #!/usr/bin/env bash
+ set -uo pipefail
+ 
++section() {
++  printf '\n== %s ==\n' "$1"
++}
++
+ echo "Daily report for $(hostname) — $(date +%F)"
+ 
+ echo
+@@ -14,3 +18,6 @@ systemctl --failed --no-legend || echo "unavailable"
+ echo
+ echo "== Root filesystem =="
+ df -h / | tail -n 1
++
++section "/var/log usage"
++du -sh /var/log 2>/dev/null || echo "unavailable"

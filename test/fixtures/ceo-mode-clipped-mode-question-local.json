@@ -1,0 +1,84 @@
+{
+  "source": "Local paid proof run 2026-09-30 (mode routing, SCOPE EXPANSION case, Claude Code 2.1.251): one native call asked the mode then Learnings. After both tabs were answered, the Submit review was taller than the viewport; the mode question start and the review heading never rendered, and the lossy accumulated text could not authenticate them. The harness never submitted.",
+  "screen": " │   A) SELECTIVE EXPANSION (recommended)\n │     ✅ Keeps table + CRUD + picker fixed while you decide each add-on (shared views, default view, share links)\n │   individually\n │     ✅ Still runs the full HOLD rigor: error map, stale-filter failure modes, tests, observability\n │     ❌ More questions than HOLD; each add-on is a separate accept/defer/skip decision\n │   B) SCOPE EXPANSION\n │     ✅ Designs views as first-class objects from day one: personal, shared, defaults, automation targets\n │     ✅ Avoids a later schema migration if shared views are inevitable\n │     ❌ Likely pushes past 15 files and past the two-week pilot the plan budgets for\n │   C) HOLD SCOPE\n │     ✅ Fastest path to the pilot; maximum rigor on exactly the four bullets you wrote\n │     ✅ Cleanest read on whether members reuse views at all before adding surface area\n │     ❌ Locks in per-member-only schema; shared views become a migration if the pilot asks for them\n │   D) SCOPE REDUCTION\n │     ✅ Would strip to the smallest testable core (save + re…\n   → SCOPE EXPANSION\n │ ● D3 — Enable cross-project learnings search?\n │   Project/branch/task: gstack-plan-count on main; one-time gstack config, not a plan decision.\n │   ELI10: gstack keeps notes from past sessions (quirks, pitfalls, patterns). With this on, reviews on this machine\n │   can also read notes written while working on your other projects. Everything stays local.\n │   Stakes if we pick wrong: Off means slower compounding across projects. On means notes from one client's codebase\n │   could surface while working on another's.\n │   Recommendation: Enable because this looks like a solo setup and local-only recall is low risk.\n │   Note: options differ in kind, not coverage — no completeness score.\n │   Pros / cons:\n │   A) Enable cross-project learnings (recommended)\n │     ✅ Patterns learned in one repo carry into reviews on the next one automatically\n │     ✅ Stays on this machine; nothing is uploaded or shared\n │     ❌ Not ideal if you juggle multiple client codebases that must stay separate\n │   B) Keep learnings project-scoped\n │     ✅ Hard wall between projects; no cross-contamination of notes\n │     ✅ Simplest mental model for multi-client work\n │     ❌ Each project relearns the same lessons from scratch\n │   Net: Compounding across projects versus strict per-project isolation.\n   → Enable cross-project learnings (recommended)\n\nReady to submit your answers?\n  \n❯ 1. Submit answers\n  2. Cancel",
+  "transcript": {
+    "status": "ready",
+    "calls": [
+      {
+        "sessionId": "2db5ee57-7fe2-4d95-8b3f-8ad9334707f2",
+        "toolUseId": "toolu_0177nMqQ7xt94y33cWHGb1qe",
+        "questions": [
+          {
+            "question": "gstack works best when your project's CLAUDE.md includes skill routing rules. Add them?\n\nD1 — Add gstack skill routing rules to CLAUDE.md?\nProject/branch/task: gstack-plan-count on main, starting /plan-ceo-review of PLAN.md (saved project views).\nELI10: gstack ships a dozen skills (review, ship, investigate, etc.). A short routing table in CLAUDE.md tells Claude which skill to reach for when you say things like \"ship this\" or \"why is this broken\". Without it you invoke each skill by name yourself.\nStakes if we pick wrong: Mostly convenience. Without routing, skills only run when you type them; with it, Claude may auto-invoke a skill you did not want.\nRecommendation: A because this is a one-time, reversible append and it makes the rest of gstack discoverable from plain-English requests.\nNote: options differ in kind, not coverage — no completeness score.\nPros / cons:\nA) Add routing rules (recommended)\n  ✅ Plain-English requests like \"review this diff\" route to the right skill without memorizing names\n  ✅ One short section appended to CLAUDE.md, trivially removable later\n  ❌ Adds a committed CLAUDE.md change to the repo; in plan mode this is queued until the plan is approved\nB) No thanks, invoke manually\n  ✅ No repo changes; CLAUDE.md stays exactly as the fixture defines it\n  ✅ Full control over when a skill runs\n  ❌ You must remember and type each /skill name yourself\nNet: Convenience and discoverability versus a small committed change to CLAUDE.md.",
+            "header": "Routing",
+            "multiSelect": false,
+            "options": [
+              {
+                "label": "Add routing rules (recommended)",
+                "description": "Append the gstack skill-routing section to CLAUDE.md and commit it. ✅ Plain-English requests route to the right skill automatically. ✅ Small, reversible append. ❌ Adds a committed CLAUDE.md change (deferred while plan mode is active)."
+              },
+              {
+                "label": "No thanks, invoke manually",
+                "description": "Record routing_declined=true in gstack config; re-enable later via gstack-config. ✅ No repo changes. ✅ Full manual control over skill invocation. ❌ You type each /skill name yourself."
+              }
+            ]
+          }
+        ],
+        "answered": true,
+        "failed": false,
+        "answers": {
+          "gstack works best when your project's CLAUDE.md includes skill routing rules. Add them?\n\nD1 — Add gstack skill routing rules to CLAUDE.md?\nProject/branch/task: gstack-plan-count on main, starting /plan-ceo-review of PLAN.md (saved project views).\nELI10: gstack ships a dozen skills (review, ship, investigate, etc.). A short routing table in CLAUDE.md tells Claude which skill to reach for when you say things like \"ship this\" or \"why is this broken\". Without it you invoke each skill by name yourself.\nStakes if we pick wrong: Mostly convenience. Without routing, skills only run when you type them; with it, Claude may auto-invoke a skill you did not want.\nRecommendation: A because this is a one-time, reversible append and it makes the rest of gstack discoverable from plain-English requests.\nNote: options differ in kind, not coverage — no completeness score.\nPros / cons:\nA) Add routing rules (recommended)\n  ✅ Plain-English requests like \"review this diff\" route to the right skill without memorizing names\n  ✅ One short section appended to CLAUDE.md, trivially removable later\n  ❌ Adds a committed CLAUDE.md change to the repo; in plan mode this is queued until the plan is approved\nB) No thanks, invoke manually\n  ✅ No repo changes; CLAUDE.md stays exactly as the fixture defines it\n  ✅ Full control over when a skill runs\n  ❌ You must remember and type each /skill name yourself\nNet: Convenience and discoverability versus a small committed change to CLAUDE.md.": "Add routing rules (recommended)"
+        },
+        "unansweredQuestionIndices": [],
+        "answeredAt": "2026-09-30T12:15:11.359Z"
+      },
+      {
+        "sessionId": "2db5ee57-7fe2-4d95-8b3f-8ad9334707f2",
+        "toolUseId": "toolu_018Q8WiyPK8HAoyU89dWYwp8",
+        "questions": [
+          {
+            "question": "D2 — Which review mode for the saved project views plan?\nProject/branch/task: gstack-plan-count on main, reviewing PLAN.md (saved project views).\nELI10: The mode sets my posture for the rest of the review. Expansion means I push for the bigger product. Selective means I harden what you wrote and offer add-ons one at a time for you to accept or reject. Hold means I only stress-test what is there. Reduction means I look for what to cut.\nStakes if we pick wrong: Too big and the review buries a 2-week feature under a quarter of platform work; too small and we ship personal-only views, then migrate the schema later when the team asks for shared ones.\nRecommendation: SELECTIVE EXPANSION because the plan is an added capability at ~12-14 files, and its one real gap (goal says team-wide pain, schema says per-member) is exactly the kind of cherry-pick this mode is built for: hold the CRUD core, offer shared views and deep links as opt-ins, reject the rest.\nNote: options differ in kind, not coverage — no completeness score.\nPros / cons:\nA) SELECTIVE EXPANSION (recommended)\n  ✅ Keeps table + CRUD + picker fixed while you decide each add-on (shared views, default view, share links) individually\n  ✅ Still runs the full HOLD rigor: error map, stale-filter failure modes, tests, observability\n  ❌ More questions than HOLD; each add-on is a separate accept/defer/skip decision\nB) SCOPE EXPANSION\n  ✅ Designs views as first-class objects from day one: personal, shared, defaults, automation targets\n  ✅ Avoids a later schema migration if shared views are inevitable\n  ❌ Likely pushes past 15 files and past the two-week pilot the plan budgets for\nC) HOLD SCOPE\n  ✅ Fastest path to the pilot; maximum rigor on exactly the four bullets you wrote\n  ✅ Cleanest read on whether members reuse views at all before adding surface area\n  ❌ Locks in per-member-only schema; shared views become a migration if the pilot asks for them\nD) SCOPE REDUCTION\n  ✅ Would strip to the smallest testable core (save + reopen, no update endpoint)\n  ✅ Useful if the pilot is purely a demand test\n  ❌ The plan is already small; cutting further removes rename/edit that users expect on day one\nNet: How much of the shared-view question we settle now versus after the pilot.",
+            "header": "Review mode",
+            "multiSelect": false,
+            "options": [
+              {
+                "label": "SELECTIVE EXPANSION (recommended)",
+                "description": "Hold the submitted core; offer each expansion (shared views, default view, share links) as a separate add/defer/skip. ✅ Core stays fixed. ✅ Full HOLD rigor still applies. ❌ More decisions than HOLD."
+              },
+              {
+                "label": "SCOPE EXPANSION",
+                "description": "Rethink views as first-class objects; recommend expansions enthusiastically. ✅ No later schema migration. ✅ Closer to the 12-month ideal now. ❌ Likely exceeds 15 files and the two-week pilot."
+              },
+              {
+                "label": "HOLD SCOPE",
+                "description": "Preserve the four bullets exactly; maximum rigor on failures, edge cases, tests, observability. ✅ Fastest to pilot. ✅ Clean demand signal. ❌ Per-member-only schema locked in."
+              },
+              {
+                "label": "SCOPE REDUCTION",
+                "description": "Propose the minimum viable core and cut only with your approval. ✅ Smallest testable slice. ✅ Pure demand test. ❌ Plan is already small; cuts remove expected edit/rename."
+              }
+            ]
+          },
+          {
+            "question": "D3 — Enable cross-project learnings search?\nProject/branch/task: gstack-plan-count on main; one-time gstack config, not a plan decision.\nELI10: gstack keeps notes from past sessions (quirks, pitfalls, patterns). With this on, reviews on this machine can also read notes written while working on your other projects. Everything stays local.\nStakes if we pick wrong: Off means slower compounding across projects. On means notes from one client's codebase could surface while working on another's.\nRecommendation: Enable because this looks like a solo setup and local-only recall is low risk.\nNote: options differ in kind, not coverage — no completeness score.\nPros / cons:\nA) Enable cross-project learnings (recommended)\n  ✅ Patterns learned in one repo carry into reviews on the next one automatically\n  ✅ Stays on this machine; nothing is uploaded or shared\n  ❌ Not ideal if you juggle multiple client codebases that must stay separate\nB) Keep learnings project-scoped\n  ✅ Hard wall between projects; no cross-contamination of notes\n  ✅ Simplest mental model for multi-client work\n  ❌ Each project relearns the same lessons from scratch\nNet: Compounding across projects versus strict per-project isolation.",
+            "header": "Learnings",
+            "multiSelect": false,
+            "options": [
+              {
+                "label": "Enable cross-project learnings (recommended)",
+                "description": "Set cross_project_learnings=true. ✅ Lessons carry across your repos. ✅ Local only. ❌ Less suitable for separate client codebases."
+              },
+              {
+                "label": "Keep learnings project-scoped",
+                "description": "Set cross_project_learnings=false. ✅ Strict per-project isolation. ✅ Simple for multi-client work. ❌ Each project relearns from zero."
+              }
+            ]
+          }
+        ],
+        "answered": false,
+        "failed": false
+      }
+    ],
+    "assistantMessages": []
+  }
+}

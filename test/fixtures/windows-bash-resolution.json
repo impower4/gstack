@@ -1,0 +1,109 @@
+{
+  "$comment": "One table for Windows bash discovery (#3197). Drives lib/script-invocation.ts resolveWindowsBash in test/script-invocation.test.ts. Paths in `exists` are the forward-slashed form the resolver checks. `which` maps a command to its PATH hit; `uname` is what that PATH bash reports for `uname -s`.",
+  "rows": [
+    {
+      "name": "override",
+      "env": { "GSTACK_GIT_BASH": "D:\\tools\\git\\bin\\bash.exe" },
+      "exists": ["D:/tools/git/bin/bash.exe", "C:/Program Files/Git/bin/bash.exe"],
+      "gitExecPath": "C:/Program Files/Git/mingw64/libexec/git-core",
+      "expect": { "bash": "D:/tools/git/bin/bash.exe", "source": "GSTACK_GIT_BASH" }
+    },
+    {
+      "name": "alias",
+      "env": { "GSTACK_BASH": "D:\\tools\\git\\bin\\bash.exe" },
+      "exists": ["D:/tools/git/bin/bash.exe", "C:/Program Files/Git/bin/bash.exe"],
+      "expect": { "bash": "D:/tools/git/bin/bash.exe", "source": "GSTACK_BASH" }
+    },
+    {
+      "name": "override and alias differ: the canonical name wins, with a warning",
+      "env": { "GSTACK_GIT_BASH": "D:/a/bash.exe", "GSTACK_BASH": "D:/b/bash.exe" },
+      "exists": ["D:/a/bash.exe", "D:/b/bash.exe"],
+      "expect": { "bash": "D:/a/bash.exe", "source": "GSTACK_GIT_BASH" },
+      "warning": "GSTACK_GIT_BASH (D:/a/bash.exe) and the deprecated GSTACK_BASH (D:/b/bash.exe) differ; using GSTACK_GIT_BASH"
+    },
+    {
+      "name": "override and alias agree: no warning",
+      "env": { "GSTACK_GIT_BASH": "D:\\a\\bash.exe", "GSTACK_BASH": "D:/a/bash.exe" },
+      "exists": ["D:/a/bash.exe"],
+      "expect": { "bash": "D:/a/bash.exe", "source": "GSTACK_GIT_BASH" },
+      "warning": null
+    },
+    {
+      "name": "override that does not exist is refused, never skipped",
+      "env": { "GSTACK_GIT_BASH": "D:/gone/bash.exe" },
+      "exists": ["C:/Program Files/Git/bin/bash.exe"],
+      "expect": { "refused": true, "mentions": ["GSTACK_GIT_BASH D:/gone/bash.exe: does not exist"] }
+    },
+    {
+      "name": "scoop shim: git --exec-path resolves through the shim",
+      "env": { "USERPROFILE": "C:\\Users\\u" },
+      "which": { "git": "C:\\Users\\u\\scoop\\shims\\git.exe" },
+      "gitExecPath": "C:\\Users\\u\\scoop\\apps\\git\\current\\mingw64\\libexec\\git-core",
+      "exists": ["C:/Users/u/scoop/apps/git/current/bin/bash.exe"],
+      "expect": { "bash": "C:/Users/u/scoop/apps/git/current/bin/bash.exe", "source": "git --exec-path" }
+    },
+    {
+      "name": "per-user Git",
+      "env": { "LOCALAPPDATA": "C:\\Users\\u\\AppData\\Local" },
+      "gitExecPath": "C:/Users/u/AppData/Local/Programs/Git/mingw64/libexec/git-core",
+      "exists": ["C:/Users/u/AppData/Local/Programs/Git/bin/bash.exe"],
+      "expect": { "bash": "C:/Users/u/AppData/Local/Programs/Git/bin/bash.exe", "source": "git --exec-path" }
+    },
+    {
+      "name": "per-user Git without git on PATH: the known install path",
+      "env": { "LOCALAPPDATA": "C:\\Users\\u\\AppData\\Local" },
+      "exists": ["C:/Users/u/AppData/Local/Programs/Git/bin/bash.exe"],
+      "expect": { "bash": "C:/Users/u/AppData/Local/Programs/Git/bin/bash.exe", "source": "install path" }
+    },
+    {
+      "name": "portable Git",
+      "gitExecPath": "D:/PortableGit/mingw64/libexec/git-core",
+      "exists": ["D:/PortableGit/bin/bash.exe"],
+      "expect": { "bash": "D:/PortableGit/bin/bash.exe", "source": "git --exec-path" }
+    },
+    {
+      "name": "Git for Windows on arm64",
+      "gitExecPath": "C:/Program Files/Git/clangarm64/libexec/git-core",
+      "exists": ["C:/Program Files/Git/usr/bin/bash.exe"],
+      "expect": { "bash": "C:/Program Files/Git/usr/bin/bash.exe", "source": "git --exec-path" }
+    },
+    {
+      "name": "standard install, git missing from PATH",
+      "exists": ["C:/Program Files/Git/bin/bash.exe"],
+      "expect": { "bash": "C:/Program Files/Git/bin/bash.exe", "source": "install path" }
+    },
+    {
+      "name": "MSYS2 bash on PATH",
+      "which": { "bash": "C:\\msys64\\usr\\bin\\bash.exe" },
+      "uname": "MSYS_NT-10.0-22631",
+      "exists": ["C:/msys64/usr/bin/bash.exe"],
+      "expect": { "bash": "C:/msys64/usr/bin/bash.exe", "source": "PATH" }
+    },
+    {
+      "name": "WSL rejection: System32 bash.exe",
+      "which": { "bash": "C:\\Windows\\System32\\bash.exe" },
+      "uname": "Linux",
+      "exists": ["C:/Windows/System32/bash.exe"],
+      "expect": { "refused": true, "mentions": ["PATH C:/Windows/System32/bash.exe: WSL launcher, not Git Bash", "GSTACK_GIT_BASH"] }
+    },
+    {
+      "name": "WSL rejection: WindowsApps bash.exe",
+      "which": { "bash": "C:\\Users\\u\\AppData\\Local\\Microsoft\\WindowsApps\\bash.exe" },
+      "uname": "Linux",
+      "exists": ["C:/Users/u/AppData/Local/Microsoft/WindowsApps/bash.exe"],
+      "expect": { "refused": true, "mentions": ["WSL launcher, not Git Bash"] }
+    },
+    {
+      "name": "a non-MSYS PATH bash is no longer used",
+      "which": { "bash": "C:\\cygwin64\\bin\\bash.exe" },
+      "uname": "CYGWIN_NT-10.0",
+      "exists": ["C:/cygwin64/bin/bash.exe"],
+      "expect": { "refused": true, "mentions": ["PATH C:/cygwin64/bin/bash.exe: uname -s reports CYGWIN_NT-10.0, not MSYS/MINGW"] }
+    },
+    {
+      "name": "missing: every candidate is listed with its reason",
+      "exists": [],
+      "expect": { "refused": true, "mentions": ["GSTACK_GIT_BASH (unset): not set", "git --exec-path (git): git not found or failed", "install path C:/Program Files/Git/bin/bash.exe: not found", "PATH bash: not on PATH", "(BASH_UNAVAILABLE)"] }
+    }
+  ]
+}

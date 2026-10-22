@@ -1,0 +1,677 @@
+#!/usr/bin/env -S bun --no-env-file --config=/dev/null
+/**
+ * gstack-evidence — verification-evidence ledger: the mechanical arm of /ship's
+ * IRON LAW ("no completion claims without fresh verification evidence").
+ *
+ *   gstack-evidence run --label <L> -- <cmd...>
+ *   gstack-evidence check [--label <L> [--expect-cmd <exact string>]]... | --all
+ *                         [--max-age <hours>] [--allow-paths <csv>]
+ *   gstack-evidence bundle --out <file> [--label <L>]... [--require <csv>] [--selection L=<text>]...
+ *                          [--run-url L=<url>]... [--import <json>] [--base <branch>]   (plan C3; lib/evidence-bundle.ts)
+ *   gstack-evidence ancestor <sha>... | --from-policy [--base <branch>]                 (plan C7)
+ *   gstack-evidence verify <bundle> [--rerun] [--out <file>] [--json]                   (plan E2)
+ *
+ * `run` is a TRANSPARENT wrapper: it streams the child's output through
+ * unchanged, tees it to a 0600 log (2MB cap with a truncation marker), and
+ * appends {ts, label, command, cmd_sha256, exit, duration_s, commit, tree,
+ * dirty, wtree, log_path, tests_ran} to ~/.gstack/projects/<slug>/<branch>-evidence.jsonl.
+ *
+ * `tests_ran` (zero-run green, W3 of docs/designs/HONEST_WORK_GATE_INTEGRITY.md)
+ * is parsed from a bounded tail of the streamed output for the supported
+ * runners only: bun (shard-engine's summary parser where importable; executed =
+ * pass + fail, so an all-skip run is 0), jest, vitest, pytest, rspec, and Go's
+ * zero-only case (every package `[no test files]`). The last summary per
+ * runner wins; anything else is "unknown". Three states, never merged:
+ * a count, 0 (ZERO-RUN, graded like STALE by `check`) and unknown (non-blocking).
+ *
+ * TRANSPARENCY INVARIANT (load-bearing): the child's exit code is ALWAYS the
+ * wrapper's exit code. Every bookkeeping failure — ledger append, log dir,
+ * non-git context, redact scan — is a stderr warning, never a failure. The
+ * wrapper must never turn green tests red.
+ *
+ * Freshness binds to `wtree`, the working-tree content fingerprint from
+ * bin/gstack-wtree: evidence recorded on uncommitted code stays FRESH after
+ * the exact tested content is committed, and an untracked new source file
+ * invalidates it. `cmd_sha256` = sha256 of the exact command string, no
+ * normalization — the same convention as bin/gstack-verify-gate (which hashes
+ * for TRUST; this ledger hashes for FRESHNESS).
+ *
+ * MACHINE-LOCAL by design: neither the ledger nor the logs are brain-synced.
+ * A synced record citing an unsynced log would grade FRESH on a machine where
+ * the log doesn't exist.
+ *
+ * `check` is read-only and never throws into the calling skill flow: any git
+ * failure (gc'd stored tree, not a repo) degrades to STALE/MISSING. Call sites
+ * must name expected labels explicitly — `--all` checks only labels that exist
+ * in the ledger; it cannot prove that an expected lane ever ran.
+ */
+
+import { openSync, writeSync, closeSync, readdirSync, statSync, unlinkSync, chmodSync, readFileSync } from "fs";
+import { mkdirpSync } from "../lib/fs-utils";
+import { join, dirname } from "path";
+import { spawnSync } from "child_process";
+import { appendJsonl, readJsonl } from "../lib/jsonl-store";
+import { resolveStateRoot } from "../lib/state-root";
+import { scan, applyRedactions } from "../lib/redact-engine";
+import { buildBundle, checkAncestors, readBundle, renderVerification, verifyBundle } from "../lib/evidence-bundle";
+import { resultLine } from "../lib/result-codes";
+import { isUnavailable, loadPolicyFromBase, resolveBaseBranch } from "../lib/ship-policy";
+import { versionAtRef } from "../lib/restamp";
+import { bashCommandInvocation, runScriptSync, wtreeFingerprint } from "../lib/script-invocation";
+
+const BIN_DIR = dirname(Bun.fileURLToPath(import.meta.url));
+const LOG_MAX_BYTES = 2 * 1024 * 1024;
+const LOG_PRUNE_DAYS = 30;
+
+interface EvidenceRecord {
+  ts: string;
+  label: string;
+  command: string;
+  cmd_sha256: string;
+  exit: number;
+  duration_s: number;
+  commit?: string;
+  tree?: string;
+  dirty?: boolean;
+  wtree?: string;
+  log_path?: string;
+  redacted?: boolean;
+  /** Executed tests per the runner's own summary; "unknown" when no supported summary was seen. */
+  tests_ran?: number | "unknown";
+}
+
+/** Bytes of streamed output kept for the tests_ran parse (the 2MB log would truncate the summary). */
+const TAIL_MAX_BYTES = 64 * 1024;
+
+/**
+ * Ring of the last TAIL_MAX_BYTES of each child stream, kept per stream: the
+ * pumps interleave by arrival, so a stderr summary read while stdout still has
+ * pipe-buffered bytes behind it would otherwise be pushed out of a shared ring.
+ */
+class OutputTail {
+  private readonly decoders = { stdout: new TextDecoder("utf-8"), stderr: new TextDecoder("utf-8") };
+  private readonly text = { stdout: "", stderr: "" };
+  push(chunk: Uint8Array, origin: "stdout" | "stderr"): void {
+    this.text[origin] += this.decoders[origin].decode(chunk, { stream: true });
+    if (this.text[origin].length > TAIL_MAX_BYTES * 2) this.text[origin] = this.text[origin].slice(-TAIL_MAX_BYTES);
+  }
+  end(): string {
+    const tails = (["stdout", "stderr"] as const).map((origin) => {
+      const text = this.text[origin] + this.decoders[origin].decode();
+      return text.length > TAIL_MAX_BYTES ? text.slice(-TAIL_MAX_BYTES) : text;
+    });
+    return tails.join("\n");
+  }
+}
+
+const ANSI = /\u001B\[[0-?]*[ -/]*[@-~]/g;
+const strip = (l: string) => l.replace(ANSI, "").replace(/\r$/, "");
+const count = (text: string, word: string): number => Number(new RegExp(`(\\d+) ${word}\\b`).exec(text)?.[1] ?? 0);
+
+/** Bun: the last "Ran N tests across M files" block; executed = its " N pass" + " N fail" lines. */
+async function bunTestsRan(lines: string[]): Promise<{ at: number; ran: number } | null> {
+  let isTerminal = (l: string) => /^Ran \d+ tests? across \d+ files?\. \[/.test(l);
+  try {
+    const engine = await import("../scripts/lib/shard-engine");
+    isTerminal = (l: string) => engine.parseBunTerminalSummary(l) !== null;
+  } catch {
+    warn("shard-engine classifier not importable; using the built-in bun summary parser");
+  }
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (!isTerminal(lines[i])) continue;
+    let pass = 0;
+    let fail = 0;
+    for (let j = i - 1; j >= 0 && j >= i - 12; j--) {
+      if (isTerminal(lines[j])) break;
+      const p = /^\s*(\d+) pass$/.exec(lines[j]);
+      const f = /^\s*(\d+) fail$/.exec(lines[j]);
+      if (p) pass = Number(p[1]);
+      if (f) fail = Number(f[1]);
+    }
+    return { at: i, ran: pass + fail };
+  }
+  return null;
+}
+
+function otherRunnersTestsRan(lines: string[]): { at: number; ran: number } | null {
+  const hits: { at: number; ran: number }[] = [];
+  const last = (re: RegExp) => {
+    for (let i = lines.length - 1; i >= 0; i--) if (re.test(lines[i])) return i;
+    return -1;
+  };
+  // jest: "Tests:       1 failed, 2 passed, 3 total" / "No tests found"
+  let i = last(/^Tests:\s+.*\d+ total/);
+  if (i >= 0) hits.push({ at: i, ran: count(lines[i], "passed") + count(lines[i], "failed") });
+  i = last(/^No tests found/);
+  if (i >= 0) hits.push({ at: i, ran: 0 });
+  // vitest: "      Tests  3 passed | 1 skipped (4)" / "No test files found"
+  i = last(/^\s*Tests\s+\d+ .*\(\d+\)\s*$/);
+  if (i >= 0) hits.push({ at: i, ran: count(lines[i], "passed") + count(lines[i], "failed") });
+  i = last(/^No test files found/);
+  if (i >= 0) hits.push({ at: i, ran: 0 });
+  // pytest: "===== 3 passed, 1 skipped in 0.12s =====" / "no tests ran in 0.01s"
+  i = last(/^=+ .* in [\d.]+s(?: \([^)]*\))? =+$/);
+  if (i >= 0) {
+    const t = lines[i];
+    hits.push({ at: i, ran: /\bno tests ran\b/.test(t) ? 0 : count(t, "passed") + count(t, "failed") + count(t, "errors?") + count(t, "xfailed") + count(t, "xpassed") });
+  }
+  // rspec: "12 examples, 0 failures, 2 pending"
+  i = last(/^\d+ examples?, \d+ failures?/);
+  if (i >= 0) hits.push({ at: i, ran: count(lines[i], "examples?") - count(lines[i], "pending") });
+  // go test: zero-only — every package "[no test files]" and no ok/FAIL package line
+  const goNoTests = lines.filter((l) => /^\?\s+\S+\s+\[no test files\]$/.test(l));
+  const goRan = lines.some((l) => /^(?:ok|FAIL|---)\s/.test(l));
+  if (goNoTests.length > 0 && !goRan) hits.push({ at: last(/\[no test files\]$/), ran: 0 });
+  if (hits.length === 0) return null;
+  return hits.reduce((a, b) => (b.at > a.at ? b : a));
+}
+
+/** The executed-test count from the output tail, or "unknown". Never throws into the caller's exit path. */
+async function parseTestsRan(tail: string): Promise<number | "unknown"> {
+  if (process.env.GSTACK_EVIDENCE_FAULT === "tests_ran") throw new Error("injected tests_ran parser fault");
+  const lines = tail.split("\n").map(strip);
+  const candidates = [await bunTestsRan(lines), otherRunnersTestsRan(lines)].filter((c): c is { at: number; ran: number } => c !== null);
+  if (candidates.length === 0) return "unknown";
+  return candidates.reduce((a, b) => (b.at > a.at ? b : a)).ran;
+}
+
+function warn(msg: string): void {
+  console.error(`gstack-evidence: warning: ${msg}`);
+}
+
+function sha256(text: string): string {
+  const h = new Bun.CryptoHasher("sha256");
+  h.update(text);
+  return h.digest("hex");
+}
+
+function git(args: string[]): string | undefined {
+  try {
+    const r = spawnSync("git", args, { encoding: "utf-8", timeout: 15000 });
+    if (r.status !== 0) return undefined;
+    const out = (r.stdout || "").trim();
+    return out || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+let wtreeWarned = false;
+/** Content fingerprint (SHA-1 or SHA-256 tree id); undefined grades STALE, with the reason printed once. */
+function currentWtree(): string | undefined {
+  const fp = wtreeFingerprint({ cwd: process.cwd(), timeoutMs: 30000 });
+  if ("tree" in fp) return fp.tree;
+  if (!wtreeWarned) warn(`working-tree fingerprint unavailable (${fp.error}) — evidence recorded without it (will grade STALE)`);
+  wtreeWarned = true;
+  return undefined;
+}
+
+function ledgerPath(): { dir: string; file: string; logsDir: string } {
+  const home = resolveStateRoot();
+  // No resolvable home: skip bookkeeping (the relative ".gstack" fallback would
+  // land inside the repo and perturb the fingerprint it exists to compute).
+  if (home === ".gstack") throw new Error("no GSTACK_HOME/HOME — bookkeeping skipped");
+  // ONE gstack-slug spawn: its output carries both SLUG= and BRANCH= lines
+  // (same branch→filename sanitization as reviews.jsonl).
+  const slugOut = runScriptSync(join(BIN_DIR, "gstack-slug"), [], { encoding: "utf-8", timeout: 30000 });
+  const sm = (slugOut.stdout || "").match(/^SLUG=(.+)$/m);
+  const bm = (slugOut.stdout || "").match(/^BRANCH=(.+)$/m);
+  const slug = sm ? sm[1].trim() : "unknown";
+  const branch = bm ? bm[1].trim() : "no-branch";
+  const dir = join(home, "projects", slug);
+  return { dir, file: join(dir, `${branch}-evidence.jsonl`), logsDir: join(dir, "logs") };
+}
+
+/** Redact-engine pass over the command string. HIGH finding → store redacted. */
+function safeCommandForRecord(command: string): { command: string; redacted: boolean } {
+  try {
+    const { findings } = scan(command);
+    const high = findings.filter((f) => f.tier === "HIGH");
+    if (high.length === 0) return { command, redacted: false };
+    const redactedBody = applyRedactions(command, findings.map((f) => f.id)).body;
+    const still = scan(redactedBody).findings.some((f) => f.tier === "HIGH");
+    return { command: still ? "<redacted: HIGH credential in command>" : redactedBody, redacted: true };
+  } catch {
+    return { command, redacted: false };
+  }
+}
+
+/** Opportunistic prune of logs older than LOG_PRUNE_DAYS. Best-effort. */
+function pruneOldLogs(logsDir: string): void {
+  try {
+    const cutoff = Date.now() - LOG_PRUNE_DAYS * 24 * 3600 * 1000;
+    for (const name of readdirSync(logsDir)) {
+      const p = join(logsDir, name);
+      try {
+        if (statSync(p).mtimeMs < cutoff) unlinkSync(p);
+      } catch {}
+    }
+  } catch {}
+}
+
+/** Exclusive-open a collision-safe log file. Returns undefined on failure. */
+function openLog(logsDir: string, label: string, cmdSha: string): { fd: number; path: string } | undefined {
+  try {
+    mkdirpSync(logsDir);
+    pruneOldLogs(logsDir);
+    const ts = new Date().toISOString().replace(/[:.]/g, "-");
+    const base = `${ts}-${label}-${process.pid}-${cmdSha.slice(0, 8)}`;
+    for (let i = 0; i < 3; i++) {
+      const p = join(logsDir, i === 0 ? `${base}.log` : `${base}-${i}.log`);
+      try {
+        const fd = openSync(p, "ax", 0o600);
+        return { fd, path: p };
+      } catch {}
+    }
+  } catch (e: any) {
+    warn(`log setup failed (${e?.message ?? e}) — running unlogged`);
+  }
+  return undefined;
+}
+
+async function cmdRun(argv: string[]): Promise<number> {
+  let label = "default";
+  const li = argv.indexOf("--label");
+  const sep = argv.indexOf("--");
+  if (li >= 0 && li + 1 < argv.length && (sep < 0 || li < sep)) label = argv[li + 1];
+  if (sep < 0 || sep + 1 >= argv.length) {
+    console.error("usage: gstack-evidence run --label <L> -- <cmd...>");
+    return 2;
+  }
+  const cmdArgv = argv.slice(sep + 1);
+  // Compound/piped commands pass as ONE string via bash -c; a multi-token argv
+  // runs directly. The hashed command string is exact, no normalization.
+  const commandString = cmdArgv.length === 1 ? cmdArgv[0] : cmdArgv.join(" ");
+  const shell = cmdArgv.length === 1 ? bashCommandInvocation(cmdArgv[0]) : null;
+  const cmdSha = sha256(commandString);
+  label = label.replace(/[^a-zA-Z0-9._-]/g, "_");
+
+  // Bookkeeping context — every piece is optional; failures only warn.
+  let paths: ReturnType<typeof ledgerPath> | undefined;
+  try {
+    paths = ledgerPath();
+    mkdirpSync(paths.dir);
+  } catch (e: any) {
+    warn(`ledger setup failed (${e?.message ?? e}) — result will not be recorded`);
+  }
+  const log = paths ? openLog(paths.logsDir, label, cmdSha) : undefined;
+
+  // Fingerprint the content BEFORE the child runs: a working-tree edit made
+  // DURING a long suite must not be certified as "the tested content".
+  const wtreeBefore = currentWtree();
+
+  const started = Date.now();
+  let exitCode: number;
+  let proc: ReturnType<typeof Bun.spawn> | undefined;
+  try {
+    if (shell && !shell.ok) throw new Error(shell.error);
+    const spawnArgv = shell?.ok ? [shell.cmd, ...shell.argv] : cmdArgv;
+    proc = Bun.spawn(spawnArgv, { stdin: "inherit", stdout: "pipe", stderr: "pipe" });
+  } catch (e: any) {
+    // Spawn failure (ENOENT on argv-direct form): record exit 127, propagate 127.
+    exitCode = 127;
+    warn(`spawn failed: ${e?.message ?? e}`);
+    record(paths, log?.path, label, commandString, cmdSha, exitCode, started, wtreeBefore);
+    return exitCode;
+  }
+
+  // Stream-tee: forward chunks as they arrive (never buffer — E2E logs are MBs).
+  const tail = new OutputTail();
+  let logBytes = 0;
+  let truncated = false;
+  const teeToLog = (chunk: Uint8Array) => {
+    if (!log || truncated) return;
+    try {
+      if (logBytes + chunk.byteLength > LOG_MAX_BYTES) {
+        const room = LOG_MAX_BYTES - logBytes;
+        if (room > 0) writeSync(log.fd, chunk.subarray(0, room));
+        writeSync(log.fd, Buffer.from("\n\n[gstack-evidence: log truncated at 2MB — output continued on console]\n"));
+        truncated = true;
+      } else {
+        writeSync(log.fd, chunk);
+        logBytes += chunk.byteLength;
+      }
+    } catch {
+      truncated = true; // stop teeing on any write failure; console stream continues
+      try {
+        writeSync(log.fd, Buffer.from("\n\n[gstack-evidence: log ended early (write failure) — output continued on console]\n"));
+      } catch {}
+    }
+  };
+  const pump = async (stream: ReadableStream<Uint8Array> | undefined, out: NodeJS.WriteStream, origin: "stdout" | "stderr") => {
+    if (!stream) return;
+    for await (const chunk of stream) {
+      // Honor backpressure: when the console consumer is slower than the child
+      // (piped into a pager/log collector), wait for drain instead of queueing
+      // unbounded chunks in the WriteStream buffer.
+      if (!out.write(chunk)) {
+        // Race drain against error: a dying consumer (EPIPE from `| head`)
+        // never drains — resolve either way and stop forwarding on error.
+        await new Promise<void>((r) => {
+          const done = () => {
+            out.off("drain", done);
+            out.off("error", done);
+            r();
+          };
+          out.once("drain", done);
+          out.once("error", done);
+        });
+      }
+      teeToLog(chunk);
+      try {
+        tail.push(chunk, origin);
+      } catch (e: any) {
+        warn(`output tail failed (${e?.message ?? e}) — tests_ran will be unknown`);
+      }
+    }
+  };
+  try {
+    await Promise.all([pump(proc.stdout as any, process.stdout, "stdout"), pump(proc.stderr as any, process.stderr, "stderr")]);
+    exitCode = await proc.exited;
+    if (exitCode === null || exitCode === undefined) exitCode = 1;
+  } catch (e: any) {
+    warn(`stream error: ${e?.message ?? e}`);
+    try {
+      exitCode = await proc.exited;
+    } catch {
+      exitCode = 1;
+    }
+  } finally {
+    if (log) {
+      try {
+        closeSync(log.fd);
+      } catch {}
+    }
+  }
+
+  // TRANSPARENCY INVARIANT: the parse runs AFTER the exit code is fixed and
+  // can only change the receipt, never the code this wrapper returns.
+  let testsRan: number | "unknown" = "unknown";
+  try {
+    testsRan = await parseTestsRan(tail.end());
+  } catch (e: any) {
+    warn(`tests_ran parse failed (${e?.message ?? e}) — recorded as unknown; the command result stands`);
+  }
+  record(paths, log?.path, label, commandString, cmdSha, exitCode, started, wtreeBefore, testsRan);
+  return exitCode;
+}
+
+function record(
+  paths: { dir: string; file: string } | undefined,
+  logPath: string | undefined,
+  label: string,
+  commandString: string,
+  cmdSha: string,
+  exitCode: number,
+  startedMs: number,
+  wtreeBefore: string | undefined,
+  testsRan: number | "unknown" = "unknown",
+): void {
+  if (!paths) return;
+  try {
+    const { command, redacted } = safeCommandForRecord(commandString);
+    const rec: EvidenceRecord = {
+      ts: new Date().toISOString(),
+      label,
+      command,
+      cmd_sha256: cmdSha,
+      exit: exitCode,
+      duration_s: Math.round((Date.now() - startedMs) / 100) / 10,
+      tests_ran: testsRan,
+    };
+    if (redacted) rec.redacted = true;
+    const commit = git(["rev-parse", "HEAD"]);
+    if (commit) {
+      rec.commit = commit;
+      rec.tree = git(["rev-parse", "HEAD^{tree}"]);
+      rec.dirty = (git(["status", "--porcelain", "-uno"]) ?? "") !== "";
+      // TOCTOU guard: the fingerprint is only trustworthy when the content was
+      // IDENTICAL before and after the run. A mid-run edit omits wtree, so
+      // check grades STALE instead of certifying content the suite never ran.
+      const wtreeAfter = currentWtree();
+      if (wtreeBefore && wtreeAfter && wtreeBefore === wtreeAfter) {
+        rec.wtree = wtreeAfter;
+      } else if (wtreeBefore || wtreeAfter) {
+        warn("working-tree content changed during the run — evidence recorded without a content fingerprint (will grade STALE)");
+      }
+    }
+    if (logPath) rec.log_path = logPath;
+    appendJsonl(paths.file, rec, { mode: 0o600 });
+    try {
+      chmodSync(paths.file, 0o600);
+    } catch {}
+    // Summary line on stderr so calling agents get the exit + log path even
+    // when the lane ran backgrounded. Never on stdout (stays transparent).
+    console.error(`gstack-evidence: recorded label=${label} exit=${exitCode} tests_ran=${testsRan} log=${logPath ?? "-"}`);
+  } catch (e: any) {
+    warn(`ledger append failed (${e?.message ?? e}) — the command result stands`);
+  }
+}
+
+function cmdCheck(argv: string[]): number {
+  // Parse: repeated --label, each optionally followed (anywhere later) by its
+  // own --expect-cmd; pairing is positional — an --expect-cmd binds to the most
+  // recent --label before it.
+  const wanted: { label: string; expectCmd?: string }[] = [];
+  let all = false;
+  let maxAgeHours: number | undefined;
+  let allowPaths: string[] = [];
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (a === "--label") wanted.push({ label: argv[++i] ?? "" });
+    else if (a === "--expect-cmd") {
+      if (wanted.length === 0) {
+        console.error("gstack-evidence: --expect-cmd requires a preceding --label");
+        return 2;
+      }
+      wanted[wanted.length - 1].expectCmd = argv[++i] ?? "";
+    } else if (a === "--all") all = true;
+    else if (a === "--max-age") {
+      maxAgeHours = Number(argv[++i]);
+      if (!Number.isFinite(maxAgeHours) || maxAgeHours <= 0) {
+        // A typo must never silently drop the age gate (fail open) on a
+        // freshness checker: it is a usage error.
+        console.error(`gstack-evidence: --max-age must be a positive number of hours, got: ${JSON.stringify(argv[i])}`);
+        return 2;
+      }
+    }
+    else if (a === "--allow-paths") allowPaths = (argv[++i] ?? "").split(",").map((s) => s.trim()).filter(Boolean);
+  }
+  if (!all && wanted.length === 0) {
+    console.error("usage: gstack-evidence check [--label <L> [--expect-cmd <s>]]... | --all  [--max-age <hrs>] [--allow-paths <csv>]");
+    return 2;
+  }
+
+  let records: EvidenceRecord[] = [];
+  try {
+    records = readJsonl<EvidenceRecord>(ledgerPath().file);
+  } catch {
+    records = [];
+  }
+
+  const labels = all
+    ? [...new Set(records.map((r) => r.label))].map((label) => ({ label, expectCmd: undefined as string | undefined }))
+    : wanted;
+  if (all && labels.length === 0) {
+    console.log("EVIDENCE: MISSING (ledger empty — no labels recorded)");
+    return 1;
+  }
+
+  const wtreeNow = currentWtree();
+  let allFresh = true;
+  for (const { label, expectCmd } of labels) {
+    const latest = records.findLast((r) => r.label === label);
+    if (!latest) {
+      console.log(`EVIDENCE: MISSING label=${label}`);
+      allFresh = false;
+      continue;
+    }
+    const testsRan = typeof latest.tests_ran === "number" ? latest.tests_ran : "unknown";
+    const detail = `label=${label} exit=${latest.exit} tests_ran=${testsRan} ts=${latest.ts}${latest.log_path ? ` log=${latest.log_path}` : ""}`;
+    let verdict: "FRESH" | "STALE" | "ZERO-RUN" = "FRESH";
+    let reason = "";
+    if (latest.exit !== 0) {
+      verdict = "STALE";
+      reason = "recorded run failed";
+    } else if (testsRan === 0) {
+      // Zero-run green: exit 0 with nothing executed (all skipped, empty
+      // selection, "No tests found"). Graded like STALE under its own label;
+      // "unknown" (no recognised runner summary) stays non-blocking.
+      verdict = "ZERO-RUN";
+      reason = "runner reported 0 executed tests";
+    } else if (maxAgeHours !== undefined) {
+      const ageMs = Date.now() - Date.parse(latest.ts);
+      if (!(ageMs >= 0 && ageMs <= maxAgeHours * 3600 * 1000)) {
+        verdict = "STALE";
+        reason = `older than ${maxAgeHours}h`;
+      }
+    }
+    if (verdict === "FRESH" && expectCmd !== undefined && sha256(expectCmd) !== latest.cmd_sha256) {
+      verdict = "STALE";
+      reason = "command changed (cmd_sha256 mismatch)";
+    }
+    if (verdict === "FRESH") {
+      // Content binding: identical working-tree fingerprint, or a diff confined
+      // to the allow-list. Any git failure (gc'd tree, not a repo) → STALE —
+      // never an error into the calling flow.
+      if (!latest.wtree || !/^[0-9a-f]{40}$/.test(latest.wtree) || !wtreeNow) {
+        // Stored fingerprints are re-validated before reaching git argv — a
+        // forged/corrupt ledger line must degrade, never inject options.
+        verdict = "STALE";
+        reason = !latest.wtree
+          ? "record has no content fingerprint"
+          : !/^[0-9a-f]{40}$/.test(latest.wtree)
+            ? "record has malformed fingerprint"
+            : "current fingerprint unavailable";
+      } else if (latest.wtree !== wtreeNow) {
+        const diff = git(["diff", "--name-only", latest.wtree, wtreeNow]);
+        if (diff === undefined) {
+          verdict = "STALE";
+          reason = "content changed (fingerprint diff unavailable)";
+        } else {
+          const changed = diff.split("\n").map((s) => s.trim()).filter(Boolean);
+          const outside = changed.filter((f) => !allowPaths.some((a) => f === a || f.startsWith(a.replace(/\/$/, "") + "/")));
+          if (changed.length === 0 || outside.length === 0) {
+            reason = changed.length ? `diff confined to allow-paths (${changed.length} file(s))` : "";
+          } else {
+            verdict = "STALE";
+            reason = `content changed: ${outside.slice(0, 5).join(", ")}${outside.length > 5 ? ", ..." : ""}`;
+          }
+        }
+      }
+    }
+    console.log(`EVIDENCE: ${verdict} ${detail}${reason ? ` reason=${reason}` : ""}`);
+    if (verdict !== "FRESH") allFresh = false;
+  }
+  return allFresh ? 0 : 1;
+}
+
+/** C3: export the ledger's latest record per label plus the execution identity as a portable bundle. */
+function cmdBundle(argv: string[]): number {
+  const labels: string[] = [];
+  const selections: Record<string, string> = {};
+  const runUrls: Record<string, string> = {};
+  let out: string | undefined;
+  let required: string[] | undefined;
+  let imported: Record<string, unknown>[] = [];
+  let base: string | undefined;
+  const kv = (into: Record<string, string>, raw: string) => { const i = raw.indexOf("="); if (i > 0) into[raw.slice(0, i)] = raw.slice(i + 1); };
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (a === "--label") labels.push(argv[++i] ?? "");
+    else if (a === "--out") out = argv[++i];
+    else if (a === "--require") required = (argv[++i] ?? "").split(",").map((s) => s.trim()).filter(Boolean);
+    else if (a === "--selection") kv(selections, argv[++i] ?? "");
+    else if (a === "--run-url") kv(runUrls, argv[++i] ?? "");
+    else if (a === "--base") base = argv[++i];
+    else if (a === "--import") {
+      try { const parsed = JSON.parse(readFileSync(argv[++i] ?? "", "utf-8")); imported = Array.isArray(parsed) ? parsed : [parsed]; }
+      catch (e: any) { console.error(`gstack-evidence bundle: --import unreadable (${e?.message ?? e})`); return 2; }
+    }
+  }
+  if (!out) { console.error("usage: gstack-evidence bundle --out <file> [--label <L>]... [--require <csv>] [--selection L=<text>]... [--run-url L=<url>]... [--import <json>]"); return 2; }
+  const repoRoot = git(["rev-parse", "--show-toplevel"]) ?? process.cwd();
+  let records: Record<string, unknown>[] = [];
+  try { records = readJsonl<Record<string, unknown>>(ledgerPath().file); } catch { records = []; }
+  const policy = loadPolicyFromBase(repoRoot, resolveBaseBranch(repoRoot, base));
+  const p = isUnavailable(policy) ? null : policy.policy;
+  const head = versionAtRef(repoRoot, "HEAD");
+  const comparison = {
+    version_rel: "rel" in head ? head.rel : "VERSION", version: "version" in head ? head.version : null,
+    changelog: p?.changelog ?? "CHANGELOG.md", stamp_paths: p?.stamp_paths ?? [], release_outputs: p?.release_outputs ?? [],
+  };
+  let gstackVersion: string | null = null;
+  try { gstackVersion = readFileSync(join(BIN_DIR, "..", "VERSION"), "utf-8").trim(); } catch {}
+  const built = buildBundle({ repoRoot, ledgerRecords: records, labels, required, selections, runUrls, imported, comparison, gstackVersion });
+  for (const e of built.errors) console.error(resultLine("gstack-evidence bundle", e.code, e.message));
+  if (!built.bundle) return 1;
+  mkdirpSync(dirname(out));
+  const { writeFileSync } = require("fs") as typeof import("fs");
+  writeFileSync(out, JSON.stringify(built.bundle, null, 2) + "\n");
+  const verified = built.bundle.lanes.filter((l) => l.verified).length;
+  console.log(`EVIDENCE_BUNDLE: ${out} tree=${built.bundle.repo.tree} lanes=${built.bundle.lanes.length} verified=${verified} imported=${built.bundle.imported.length}${built.bundle.repo.dirty ? " dirty=yes (committed heads only; lanes on a dirty tree are not verified)" : ""}`);
+  return built.errors.length ? 1 : 0;
+}
+
+/** C7: every preregistration sha must be an ancestor of HEAD. */
+function cmdAncestor(argv: string[]): number {
+  const repoRoot = git(["rev-parse", "--show-toplevel"]) ?? process.cwd();
+  let shas = argv.filter((a) => !a.startsWith("--") && argv[argv.indexOf(a) - 1] !== "--base");
+  if (argv.includes("--from-policy")) {
+    const loaded = loadPolicyFromBase(repoRoot, resolveBaseBranch(repoRoot, argv[argv.indexOf("--base") + 1]));
+    if (isUnavailable(loaded)) { console.error(resultLine("gstack-evidence ancestor", "POLICY_SOURCE_UNAVAILABLE", loaded.detail)); return 3; }
+    shas = [...shas, ...loaded.policy.preregistration_shas];
+  }
+  if (shas.length === 0) { console.log("ANCESTOR: none (no preregistration_shas)"); return 0; }
+  const results = checkAncestors(repoRoot, shas);
+  for (const r of results) {
+    if (r.ok) console.log(`ANCESTOR: ok ${r.sha} (${r.detail})`);
+    else console.log(`ANCESTOR: missing ${r.sha} (${r.detail}) — fix: merge or rebase so it is in the branch history, or drop it from the policy (PREREGISTRATION_NOT_ANCESTOR)`);
+  }
+  return results.every((r) => r.ok) ? 0 : 1;
+}
+
+/** E2: rerun each lane's probe on the bundle's tree, or mark each claim from this machine's ledger. */
+function cmdVerify(argv: string[]): number {
+  const file = argv.find((a, i) => !a.startsWith("--") && argv[i - 1] !== "--out");
+  if (!file) { console.error("usage: gstack-evidence verify <bundle.json> [--rerun] [--out <file>] [--json]"); return 2; }
+  const read = readBundle(file);
+  if (!read.bundle) { console.error(resultLine("gstack-evidence verify", read.error!.code, read.error!.message)); return 1; }
+  const repoRoot = git(["rev-parse", "--show-toplevel"]) ?? process.cwd();
+  let records: Record<string, unknown>[] = [];
+  try { records = readJsonl<Record<string, unknown>>(ledgerPath().file); } catch { records = []; }
+  const v = verifyBundle({ repoRoot, bundle: read.bundle, bundlePath: file, rerun: argv.includes("--rerun"), ledgerRecords: records });
+  const outIdx = argv.indexOf("--out");
+  if (outIdx >= 0 && argv[outIdx + 1]) {
+    const { writeFileSync } = require("fs") as typeof import("fs");
+    mkdirpSync(dirname(argv[outIdx + 1]!));
+    writeFileSync(argv[outIdx + 1]!, JSON.stringify({ ...read.bundle, verification: v }, null, 2) + "\n");
+  }
+  if (argv.includes("--json")) console.log(JSON.stringify(v)); else process.stdout.write(renderVerification(v));
+  for (const c of v.claims) if (c.verdict === "unverified" && c.required) console.error(resultLine("gstack-evidence verify", "EVIDENCE_UNVERIFIED", `${c.label}: ${c.reason}`));
+  return v.required_unverified.length ? 1 : 0;
+}
+
+const [, , sub, ...rest] = process.argv;
+try {
+  if (sub === "run") {
+    process.exit(await cmdRun(rest));
+  } else if (sub === "check") {
+    process.exit(cmdCheck(rest));
+  } else if (sub === "bundle") {
+    process.exit(cmdBundle(rest));
+  } else if (sub === "ancestor") {
+    process.exit(cmdAncestor(rest));
+  } else if (sub === "verify") {
+    process.exit(cmdVerify(rest));
+  } else {
+    console.error("usage: gstack-evidence run|check|bundle|ancestor|verify ...");
+    process.exit(2);
+  }
+} catch (e: any) {
+  // Never let the wrapper's own failure look like a command failure in a way
+  // that breaks a skill flow: `run` propagates the child's code from inside
+  // cmdRun; reaching here means bookkeeping blew up outside it.
+  warn(`unexpected error: ${e?.message ?? e}`);
+  process.exit(1);
+}

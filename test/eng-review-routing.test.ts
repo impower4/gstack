@@ -1,0 +1,225 @@
+import { describe, expect, test } from 'bun:test';
+import { readFileSync } from 'node:fs';
+import { ALL_HOST_CONFIGS } from '../hosts';
+import { generateBrainWriteBack } from '../scripts/resolvers/gbrain';
+import { generateAskUserFormat } from '../scripts/resolvers/preamble/generate-ask-user-format';
+import { generateTestCoverageAuditPlan, generateTestCoverageAuditShip } from '../scripts/resolvers/testing';
+import { HOST_PATHS, type TemplateContext } from '../scripts/resolvers/types';
+import { generateReviewDashboard, generatePlanFileReviewReport } from '../scripts/resolvers/review-dashboard';
+import { generateExitPlanModeGate } from '../scripts/resolvers/plan-gates';
+import { ENG_REVIEW_EXCERPT } from './helpers/workflow-excerpt';
+import { expectMentions } from './helpers/prompt-structure';
+
+const entry = readFileSync('plan-eng-review/SKILL.md.tmpl', 'utf8');
+const section = readFileSync('plan-eng-review/sections/review-sections.md.tmpl', 'utf8');
+const compact = (text: string) => text.replace(/\s+/g, ' ');
+
+function between(text: string, start: string, end: string): string {
+  const from = text.indexOf(start);
+  const to = text.indexOf(end, from + start.length);
+  expect(from).toBeGreaterThanOrEqual(0);
+  expect(to).toBeGreaterThan(from);
+  return text.slice(from, to);
+}
+
+function ordered(text: string, stages: string[]) {
+  const positions = stages.map(stage => text.indexOf(stage));
+  expect(positions.every(position => position >= 0)).toBe(true);
+  expect(positions).toEqual([...positions].sort((a, b) => a - b));
+}
+
+const scope = section.split('## Scope Challenge\n')[1]?.split('## Review Sections')[0] ?? '';
+const assessment = scope.split('### A. Assess the target')[1]?.split('### B. Resolve complexity selectors')[0] ?? '';
+const complexity = scope.split('### B. Resolve complexity selectors')[1]?.split('### C. Resolve findings')[0] ?? '';
+const findings = scope.split('### C. Resolve findings')[1] ?? '';
+const recovery = entry.split('## Recovery routing')[1]?.split('{{EXIT_PLAN_MODE_GATE}}')[0] ?? '';
+
+describe('engineering review routing contracts', () => {
+  test('the bounded engineering excerpt includes the recovery rules it references', () => {
+    const excerpt = between(entry, ENG_REVIEW_EXCERPT.startMarker, ENG_REVIEW_EXCERPT.endMarker);
+    ordered(excerpt, ['{{SECTION:review-sections}}', '## Recovery routing', '**Paused question:**',
+      '**Repairable write/read failure:**', '**Late change or missing work:**', '**Blocked outcome:**']);
+    expect(compact(entry.slice(entry.indexOf(ENG_REVIEW_EXCERPT.endMarker)))).toMatch(/use Recovery routing above/i);
+  });
+
+  test('preparation establishes permission and evidence before applying review rules', () => {
+    ordered(section, ['## Review preparation', '## Review record and write policy', '{{LEARNINGS_SEARCH}}',
+      '## Retrospective learning', '{{CONFIDENCE_CALIBRATION}}', '## Decision procedure',
+      '## Scope Challenge', '### A. Assess the target', '### B. Resolve complexity selectors',
+      '### C. Resolve findings', '### 1. Architecture review']);
+  });
+
+  test('compression cannot remove mandatory review stages', () => {
+    const priority = between(entry, '## Priority hierarchy', '## My engineering preferences');
+    expect(priority).not.toContain('Everything else');
+  });
+
+  test('Scope Challenge has one named route and completes its assessments before writing', () => {
+    expect([...scope.matchAll(/^### (.+)$/gm)].map(match => match[1])).toEqual([
+      'A. Assess the target', 'B. Resolve complexity selectors', 'C. Resolve findings',
+    ]);
+    expect([...assessment.matchAll(/^- \*\*([^*]+)\*\*/gm)].map(match => match[1])).toEqual(expect.arrayContaining([
+      'What already solves each sub-problem?', 'What minimum changes achieve the goal?',
+      'Complexity check:', 'Search check:', 'TODOS cross-reference:', 'Completeness check:', 'Distribution check:',
+    ]));
+    expectMentions(compact(assessment), [['do not', 'findings', 'changes']], 'compact(assessment)');
+    expect(scope).not.toContain('Below the threshold, start at step 1');
+  });
+
+  test('below-threshold route skips selectors, never findings or remedy approvals', () => {
+    ordered(compact(findings), ['1. Present', '2. Resolve each remedy through Decision procedure', '3. Report',
+      'Continue to Section 1 only when no answer is pending']);
+    expect(findings).toMatch(/approve no remedies/i);
+    expect(findings).toContain('"No issues found"');
+  });
+
+  test('high complexity stops before Section 1 and asks cuts and structure separately', () => {
+    expectMentions(compact(complexity), [['stop', 'classes/services', 'section']], 'compact(complexity)');
+    ordered(compact(complexity), ['1. Explain the complexity', 'Ask each proposed feature cut/deferral separately',
+      '2. Always resolve the structure question', '3. Save the actual feature and structure answers']);
+    expect(compact(complexity)).toContain('Pending remedies not decided here: <ids>');
+  });
+
+  test('the structure question uses its registered id and honors a stored preference', () => {
+    ordered(compact(complexity), ['2. Always resolve the structure question',
+      'as question_id `plan-eng-review-structure` (no per-plan slug)', '`AUTO_DECIDE` picks the recommendation',
+      'Compare only the file/class arrangement']);
+  });
+
+  test('no safe smaller arrangement does not authorize scope cuts or bypass the pause', () => {
+    ordered(compact(complexity), ['If no smaller arrangement preserves these commitments',
+      'A pause leaves the arrangement undecided', 'Do not continue to C until it is settled']);
+    expectMentions(compact(complexity), [['do not', 'continue', 'settled']], 'compact(complexity)');
+    expectMentions(compact(complexity), [['only', 'investigate', 'question']], 'compact(complexity)');
+  });
+
+  test('selector answers are saved and verified before scope changes apply', () => {
+    const summary = compact(complexity.slice(complexity.indexOf('3. Save the actual')));
+    ordered(summary, ['feature answers: <refs>; structure: <A/B + ref>; accepted scope: <exact scope>; pending remedies: <ids or none>',
+      'Read it back', 'apply only accepted scope changes', 'Continue to **C. Resolve findings**']);
+    expectMentions(summary, [['blocks', 'advancement', 'failed']], 'summary');
+    expect(summary).toContain('**not persisted**');
+    expectMentions(compact(section), [['no', 'engineering', 'selections']], 'compact(section)');
+  });
+
+  test('engineering remedies are saved, asked once, and recorded before the next choice', () => {
+    const procedure = between(section, '## Decision procedure', '## Scope Challenge');
+    ordered(procedure, ['**Compare one choice.**', '**Pending-record checkpoint.**', '### Send once and wait',
+      'AskUserQuestion({ questions: [currentDecision] })', '### Record the answer', 'For the next choice']);
+    expectMentions(between(procedure, '### Send once and wait', '### Record the answer'), [['stop', 'arrives', 'actual']], 'section');
+    expectMentions(compact(procedure), [['no', 'implementation', 'conditional']], 'compact(procedure)');
+    expectMentions(compact(procedure), [['do not', 'exitplanmode', 'remedy']], 'compact(procedure)');
+    const questions = generateAskUserFormat({ skillName: 'plan-eng-review', host: 'claude', paths: HOST_PATHS.claude } as TemplateContext);
+    expect(questions).toContain('10 = complete, 7 = happy path, 3 = shortcut');
+    expect(questions).toContain('Note: options differ in kind, not coverage — no completeness score.');
+  });
+
+  test('unavailable research preserves an explicit coverage limit and continues review', () => {
+    expect(compact(assessment)).toContain('"Search unavailable — proceeding with in-distribution knowledge only."');
+    const outside = between(section, '### Continue after Outside Voice', '### TODOS.md updates');
+    expectMentions(compact(outside), [['only', 'cross-model', 'completed']], 'compact(outside)');
+    expect(section).toContain('Outside voice: recorded provider, completed / unavailable / disabled / skipped (reason)');
+    ordered(compact(outside), ['TODO choices', 'Approval readiness', 'Required outputs']);
+  });
+
+  test('paused transport and failed persistence have distinct non-success outcomes', () => {
+    const pause = between(recovery, '**Paused question:**', '**Repairable write/read failure:**');
+    expectMentions(pause, [['without', 'exitplanmode', 'completion']], 'pause');
+    expectMentions(compact(pause), [['do not', 'pending', 'resend']], 'compact(pause)');
+    const failure = compact(between(recovery, '**Repairable write/read failure:**', '**Late change or missing work:**'));
+    expectMentions(failure, [['stop', 'dependent', 'question']], 'failure');
+    expect(failure).toContain('follow **Blocked outcome**');
+    expectMentions(failure, [['never', 'permitted', 'chat-only']], 'failure');
+    const policy = compact(between(section, '## Review record and write policy', '{{LEARNINGS_SEARCH}}'));
+    expect(policy).toContain('**Recovery routing → Repairable write/read failure**');
+    expect(policy).toMatch(/skip forbidden writes/i);
+    const blocked = between(recovery, '**Blocked outcome:**', '**Report-back outcome:**');
+    expect(blocked).toContain('`OUTCOME=error`');
+    expect(blocked).not.toContain('`OUTCOME=success`');
+  });
+
+  test('#3106: a caller-forbidden write reports back as DONE with PERSISTED: no and a final PERSIST: line', () => {
+    const back = compact(recovery.slice(recovery.indexOf('**Report-back outcome:**')));
+    ordered(back, ['caller forbids the report file or required Review Log', 'as **not persisted**',
+      'skip navigation, Read-back, the EXIT PLAN MODE GATE and ExitPlanMode', '`OUTCOME=success`', 'Report `DONE` and `PERSISTED: no`',
+      'the last line is `PERSIST: `', 'filled `gstack-review-log` command', 'No saved-review credit until then']);
+    expect(back).not.toContain('BLOCKED');
+    expect(back).not.toMatch(/REPORTED|DONE_WITH/);
+    const blocked = compact(between(recovery, '**Blocked outcome:**', '**Report-back outcome:**'));
+    expect(blocked).toContain('report `BLOCKED`');
+    const routes = compact(between(section, '| Artifact | Destination | If writing is forbidden |', 'QA Test Plan/task JSONL keep'));
+    expect(routes).toContain('use **Read-only review** below, then **Report-back outcome**.');
+    expect(routes).toContain('at Review Log, use **Report-back outcome** instead of publishing a saved review');
+    const finish = compact(between(section, '## Required outputs', '### Output reference'));
+    expect(finish).toContain('Forbidden persistence uses **Report-back outcome**; an unrecovered save requires **Blocked outcome**, not logging.');
+    expect(finish).toContain('If the required log is forbidden, show fields as not persisted and take **Report-back outcome**');
+  });
+
+  test('#3106: an unpersisted review gets no saved credit; /ship names the PERSIST: line or a rerun', () => {
+    const ctx = (skillName: string) => ({ skillName, tmplPath: `${skillName}/SKILL.md.tmpl`, host: 'claude', paths: HOST_PATHS.claude } as TemplateContext);
+    const ship = compact(generateReviewDashboard(ctx('ship')));
+    expect(ship).toContain('With no Eng Review record, say "no saved Eng Review: run the `PERSIST:` line a read-only /plan-eng-review printed, or rerun it"');
+    expect(ship).toContain('docs/troubleshooting.md#plan-eng-review-not-persisted');
+    expect(generateReviewDashboard(ctx('plan-eng-review'))).not.toContain('PERSIST:');
+    const gate = compact(generateExitPlanModeGate(ctx('plan-eng-review')));
+    expect(gate).toContain('Forbidden report/log persistence uses **Report-back outcome**, not this gate; an unrecovered save cannot pass');
+    const writer = compact(generatePlanFileReviewReport(ctx('plan-eng-review')));
+    expect(writer).toContain('Then use **Report-back outcome**.');
+    expect(writer).toMatch(/follow \*\*Blocked outcome\*\* before Review Log or decision logging/);
+    expect(readFileSync('docs/troubleshooting.md', 'utf8')).toContain('<a id="plan-eng-review-not-persisted"></a>');
+  });
+
+  test('late changes rerun affected approvals and outputs before another navigation answer', () => {
+    const late = compact(between(recovery, '**Late change or missing work:**', '**Blocked outcome:**'));
+    ordered(late, ['Return to the affected review stage', 'Decision procedure',
+      'Repeat Approval readiness', 'Required outputs steps 1–4', 'before choosing navigation again']);
+    expect(late).toMatch(/stale evidence, follow \*\*Blocked outcome\*\* first/i);
+    const finish = section.slice(section.indexOf('## Required outputs'));
+    expect(compact(finish)).toContain('**Recovery routing → Late change or missing work** before navigation resumes');
+    expectMentions(compact(finish), [['no', 'implementation', 'next-step']], 'compact(finish)');
+    ordered(finish, ['{{TASKS_SECTION_EMIT:eng-review}}', '### Completion summary', '{{PLAN_FILE_REVIEW_REPORT}}',
+      '## Review Log', '{{REVIEW_DASHBOARD}}', '## Next Steps — Review Chaining', '## Learning hooks', '{{BRAIN_WRITE_BACK}}']);
+    const sequence = compact(finish.slice(0, finish.indexOf('### Output reference')));
+    ordered(sequence, ['1. **Prepare the review body.**', '2. **Save and Read back.**', '3. **Log the saved review.**',
+      '4. **Publish.**', '5. **Choose navigation.**', '6. **Finish.**', 'Section self-check']);
+  });
+
+  test('plan test diagrams cover proposed paths without inventing existing implementation', () => {
+    for (const host of ALL_HOST_CONFIGS) {
+      const ctx = { skillName: 'plan-eng-review', host: host.name, paths: HOST_PATHS[host.name] } as TemplateContext;
+      const audit = generateTestCoverageAuditPlan(ctx);
+      expect(audit).toMatch(/existing or proposed component/);
+      expect(audit).toMatch(/existing or proposed function\/method/);
+      expectMentions(audit, [['not', 'proposals', 'runnable']], 'audit');
+      for (const obligation of ['Every conditional branch', 'Every error path', 'Every call to another function', 'Every edge:']) {
+        expect(audit).toContain(obligation);
+      }
+      expect(audit).toMatch(/no skipping regression coverage/i);
+      const ship = generateTestCoverageAuditShip({ ...ctx, skillName: 'ship' });
+      expect(ship).toMatch(/for each changed file, draw an ASCII diagram/i);
+      expect(ship).not.toContain('existing or proposed');
+    }
+  });
+
+  test('calibration write-back stays gated: no write instruction runs without the default-off gate', () => {
+    for (const host of ALL_HOST_CONFIGS) {
+      const ctx = { skillName: 'plan-eng-review', host: host.name, paths: HOST_PATHS[host.name] } as TemplateContext;
+      const output = generateBrainWriteBack(ctx);
+      const gate = output.indexOf('Skip unless `BRAIN_CALIBRATION_WRITEBACK` is set');
+      expect(gate).toBeGreaterThan(0);
+      expect(output.indexOf('mcp__gbrain__takes_add')).toBeGreaterThan(gate);
+      expect(output.indexOf('mcp__gbrain__put_page')).toBeGreaterThan(gate);
+      expect(output.slice(0, gate)).toMatch(/skip this section/i);
+      expectMentions(output.slice(0, gate), [['do not', 'permission', 'enable']], 'output.slice(0, gate)');
+      expect(output).toContain('brain_trust_policy@<endpoint-hash>=personal');
+      expect(output).toMatch(/if unknown, skip/i);
+      expect(output).toContain('source_skill: plan-eng-review');
+      expect(output).not.toContain('${BRAIN_CALIBRATION_WRITEBACK');
+      for (const skillName of ['office-hours', 'plan-ceo-review', 'plan-design-review', 'plan-devex-review']) {
+        const other = generateBrainWriteBack({ ...ctx, skillName });
+        expect(other).toStartWith('## Brain Calibration Write-Back (gated)\n\nSkip unless');
+        expect(other).not.toMatch(/skip this section/i);
+      }
+    }
+  });
+});

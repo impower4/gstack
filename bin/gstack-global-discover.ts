@@ -1,4 +1,4 @@
-#!/usr/bin/env bun
+#!/usr/bin/env -S bun --no-env-file --config=/dev/null
 /**
  * gstack-global-discover — Discover AI coding sessions across Claude Code, Codex CLI, and Gemini CLI.
  * Resolves each session's working directory to a git repo, deduplicates by normalized remote URL,
@@ -10,15 +10,20 @@
  */
 
 import { existsSync, readdirSync, statSync, readFileSync, openSync, readSync, closeSync } from "fs";
-import { join, basename } from "path";
-import { execSync } from "child_process";
+import { join, basename, dirname, resolve } from "path";
+import { spawnSync } from "child_process";
 import { homedir } from "os";
+import { canonicalRemote } from "../lib/remote-identity";
 
 // ── Types ──────────────────────────────────────────────────────────────────
+
+type CodexOriginator = "cli" | "desktop" | "exec" | "claude_code" | "other";
+type CodexOriginatorCounts = Record<CodexOriginator, number>;
 
 interface Session {
   tool: "claude_code" | "codex" | "gemini";
   cwd: string;
+  codexOriginator?: CodexOriginator;
 }
 
 interface Repo {
@@ -26,6 +31,7 @@ interface Repo {
   remote: string;
   paths: string[];
   sessions: { claude_code: number; codex: number; gemini: number };
+  codex_originators: CodexOriginatorCounts;
 }
 
 interface DiscoveryResult {
@@ -34,7 +40,7 @@ interface DiscoveryResult {
   repos: Repo[];
   tools: {
     claude_code: { total_sessions: number; repos: number };
-    codex: { total_sessions: number; repos: number };
+    codex: { total_sessions: number; repos: number; originators: CodexOriginatorCounts };
     gemini: { total_sessions: number; repos: number };
   };
   total_sessions: number;
@@ -49,10 +55,22 @@ function printUsage(): void {
   --since <window>   Time window: e.g. 7d, 14d, 30d, 24h
   --format <fmt>     Output format: json (default) or summary
   --help             Show this help
+  --version          Print the gstack version and exit (no scan)
 
 Examples:
   gstack-global-discover --since 7d
   gstack-global-discover --since 14d --format summary`);
+}
+
+function readGstackVersion(): string {
+  // The compiled binary and this source file both live in bin/, one level below VERSION.
+  for (const dir of [dirname(process.execPath), import.meta.dir]) {
+    try {
+      const version = readFileSync(join(dir, "..", "VERSION"), "utf8").trim();
+      if (version) return version;
+    } catch {}
+  }
+  return "unknown";
 }
 
 function parseArgs(): { since: string; format: "json" | "summary" } {
@@ -63,6 +81,10 @@ function parseArgs(): { since: string; format: "json" | "summary" } {
   for (let i = 0; i < args.length; i++) {
     if (args[i] === "--help" || args[i] === "-h") {
       printUsage();
+      process.exit(0);
+    } else if (args[i] === "--version") {
+      // setup's and gstack-doctor's launch probe (#2595): exits before any scan.
+      console.log(readGstackVersion());
       process.exit(0);
     } else if (args[i] === "--since" && args[i + 1]) {
       since = args[++i];
@@ -122,62 +144,74 @@ function windowToDate(window: string): Date {
 // ── URL normalization ──────────────────────────────────────────────────────
 
 export function normalizeRemoteUrl(url: string): string {
-  let normalized = url.trim();
-
-  // SSH → HTTPS: git@github.com:user/repo → https://github.com/user/repo
-  const sshMatch = normalized.match(/^(?:ssh:\/\/)?git@([^:]+):(.+)$/);
-  if (sshMatch) {
-    normalized = `https://${sshMatch[1]}/${sshMatch[2]}`;
-  }
-
-  // Strip .git suffix
-  if (normalized.endsWith(".git")) {
-    normalized = normalized.slice(0, -4);
-  }
-
-  // Lowercase the host portion
-  try {
-    const parsed = new URL(normalized);
-    parsed.hostname = parsed.hostname.toLowerCase();
-    normalized = parsed.toString();
-    // Remove trailing slash
-    if (normalized.endsWith("/")) {
-      normalized = normalized.slice(0, -1);
-    }
-  } catch {
-    // Not a valid URL (e.g., local:<path>), return as-is
-  }
-
-  return normalized;
+  // One identity per repository whichever way it was cloned (ssh, ssh:// with
+  // a port, https with credentials): the shared canonical remote from
+  // lib/remote-identity.ts, rendered as an https URL for display.
+  const id = canonicalRemote(url.trim());
+  return id.hosted ? `https://${id.canonical}` : url.trim();
 }
 
 // ── Git helpers ────────────────────────────────────────────────────────────
 
-function isGitRepo(dir: string): boolean {
-  return existsSync(join(dir, ".git"));
+interface GitProject {
+  /** Worktree root the session ran in (a linked worktree is its own root). */
+  root: string;
+  /** The repository's main worktree, shared by its linked worktrees. */
+  main: string;
 }
 
-function getGitRemote(cwd: string): string | null {
-  if (!existsSync(cwd) || !isGitRepo(cwd)) return null;
-  try {
-    const remote = execSync("git remote get-url origin", {
-      cwd,
+const PROJECT_MEMO = new Map<string, GitProject | null>();
+
+/**
+ * The git project a session's recorded cwd belongs to: its worktree root and
+ * the repository it shares with linked worktrees. A subdirectory resolves to
+ * the same root as the root itself; a cwd outside any work tree (a plain
+ * directory, or inside .git) has no project.
+ */
+function gitProject(cwd: string): GitProject | null {
+  const memo = PROJECT_MEMO.get(cwd);
+  if (memo !== undefined) return memo;
+  let project: GitProject | null = null;
+  if (existsSync(cwd)) {
+    const r = spawnSync("git", ["-C", cwd, "rev-parse", "--is-inside-work-tree", "--show-prefix", "--path-format=absolute", "--git-common-dir"], {
       encoding: "utf-8",
       timeout: 5000,
-      stdio: ["pipe", "pipe", "pipe"],
-    }).trim();
-    return remote || null;
-  } catch (err: any) {
-    // Expected: no remote configured, repo not found, git not installed
-    if (err?.status !== undefined) return null; // non-zero exit from git
-    if (err?.code === 'ENOENT') return null;    // git binary not found
-    throw err;
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    const [inside, prefix, common] = r.status === 0 ? r.stdout.replace(/\r?\n$/, "").split(/\r?\n/) : [];
+    if (inside === "true" && prefix !== undefined && common) {
+      // Strip the prefix from the recorded cwd instead of taking git's
+      // --show-toplevel, so the root keeps the session's own spelling
+      // (a symlinked home, a native Windows drive path).
+      const up = prefix.split("/").filter(Boolean).map(() => "..");
+      project = { root: resolve(cwd, ...up), main: basename(common) === ".git" ? dirname(common) : common };
+    }
   }
+  PROJECT_MEMO.set(cwd, project);
+  return project;
+}
+
+function getGitRemote(root: string): string | null {
+  const r = spawnSync("git", ["-C", root, "remote", "get-url", "origin"], {
+    encoding: "utf-8",
+    timeout: 5000,
+    stdio: ["ignore", "pipe", "ignore"],
+  });
+  return r.status === 0 && r.stdout.trim() ? r.stdout.trim() : null;
 }
 
 // ── Scanners ───────────────────────────────────────────────────────────────
 
-function scanClaudeCode(since: Date): Session[] {
+/** JSONL lines longer than this are skipped (and counted) while looking for a session's cwd. */
+const MAX_CWD_LINE_BYTES = 1024 * 1024;
+const MAX_CWD_LINES = 30;
+const MAX_CWD_SCAN_BYTES = 16 * 1024 * 1024;
+
+export interface CwdScanStats {
+  oversizedLines: number;
+}
+
+function scanClaudeCode(since: Date, stats: CwdScanStats): Session[] {
   const projectsDir = join(homedir(), ".claude", "projects");
   if (!existsSync(projectsDir)) return [];
 
@@ -193,108 +227,125 @@ function scanClaudeCode(since: Date): Session[] {
 
   for (const dirName of dirs) {
     const dirPath = join(projectsDir, dirName);
+    let recentFiles: string[];
     try {
-      const stat = statSync(dirPath);
-      if (!stat.isDirectory()) continue;
+      if (!statSync(dirPath).isDirectory()) continue;
+      recentFiles = readdirSync(dirPath).filter((f) => {
+        if (!f.endsWith(".jsonl")) return false;
+        try {
+          return statSync(join(dirPath, f)).mtime >= since;
+        } catch {
+          return false;
+        }
+      });
     } catch {
       continue;
     }
 
-    // Find JSONL files
-    let jsonlFiles: string[];
-    try {
-      jsonlFiles = readdirSync(dirPath).filter((f) => f.endsWith(".jsonl"));
-    } catch {
-      continue;
-    }
-    if (jsonlFiles.length === 0) continue;
-
-    // Coarse mtime pre-filter: check if any JSONL file is recent
-    const hasRecentFile = jsonlFiles.some((f) => {
-      try {
-        return statSync(join(dirPath, f)).mtime >= since;
-      } catch (err: any) {
-        if (err?.code === 'ENOENT' || err?.code === 'EACCES') return false;
-        throw err;
-      }
-    });
-    if (!hasRecentFile) continue;
-
-    // Resolve cwd
-    let cwd = resolveClaudeCodeCwd(dirPath, dirName, jsonlFiles);
-    if (!cwd) continue;
-
-    // Count only JSONL files modified within the window as sessions
-    const recentFiles = jsonlFiles.filter((f) => {
-      try {
-        return statSync(join(dirPath, f)).mtime >= since;
-      } catch (err: any) {
-        if (err?.code === 'ENOENT' || err?.code === 'EACCES') return false;
-        throw err;
-      }
-    });
-    for (let i = 0; i < recentFiles.length; i++) {
-      sessions.push({ tool: "claude_code", cwd });
+    // The project is the cwd each session recorded, never the directory name:
+    // Claude Code encodes "/" and "-" alike as "-", so the name cannot be
+    // decoded (#1315). A session that recorded no cwd in its first lines
+    // belongs to the same project as its siblings in this directory.
+    const cwds = recentFiles.map((f) => extractCwdFromJsonl(join(dirPath, f), stats));
+    const sibling = cwds.find((c): c is string => !!c);
+    for (const cwd of cwds) {
+      const resolved = cwd ?? sibling;
+      if (resolved) sessions.push({ tool: "claude_code", cwd: resolved });
     }
   }
 
   return sessions;
 }
 
-function resolveClaudeCodeCwd(
-  dirPath: string,
-  dirName: string,
-  jsonlFiles: string[]
-): string | null {
-  // Fast-path: decode directory name
-  // e.g., -Users-garrytan-git-repo → /Users/garrytan/git/repo
-  const decoded = dirName.replace(/^-/, "/").replace(/-/g, "/");
-  if (existsSync(decoded)) return decoded;
-
-  // Fallback: read cwd from first JSONL file
-  // Sort by mtime descending, pick most recent
-  const sorted = jsonlFiles
-    .map((f) => {
-      try {
-        return { name: f, mtime: statSync(join(dirPath, f)).mtime.getTime() };
-      } catch (err: any) {
-        if (err?.code === 'ENOENT' || err?.code === 'EACCES') return null;
-        throw err;
-      }
-    })
-    .filter(Boolean)
-    .sort((a, b) => b!.mtime - a!.mtime) as { name: string; mtime: number }[];
-
-  for (const file of sorted.slice(0, 3)) {
-    const cwd = extractCwdFromJsonl(join(dirPath, file.name));
-    if (cwd && existsSync(cwd)) return cwd;
+/**
+ * The cwd recorded in the first lines of a session JSONL. Lines are read whole
+ * up to 1 MiB each (Claude Code can open with a queue-operation record far
+ * larger than a fixed prefix); a longer line is skipped and counted in
+ * `stats.oversizedLines`, and the scan moves on to the next line.
+ */
+export function extractCwdFromJsonl(filePath: string, stats: CwdScanStats = { oversizedLines: 0 }): string | null {
+  let fd: number;
+  try {
+    fd = openSync(filePath, "r");
+  } catch {
+    return null;
   }
-
-  return null;
+  try {
+    const chunk = Buffer.alloc(64 * 1024);
+    let pieces: Buffer[] = [];
+    let lineBytes = 0;
+    let lines = 0;
+    let position = 0;
+    const endLine = (): string | null => {
+      lines++;
+      const oversized = lineBytes > MAX_CWD_LINE_BYTES;
+      const text = oversized ? "" : Buffer.concat(pieces).toString("utf-8");
+      pieces = [];
+      lineBytes = 0;
+      if (oversized) {
+        stats.oversizedLines++;
+        return null;
+      }
+      if (!text.trim()) return null;
+      try {
+        const obj = JSON.parse(text);
+        return typeof obj?.cwd === "string" && obj.cwd ? obj.cwd : null;
+      } catch {
+        return null;
+      }
+    };
+    const keep = (part: Buffer) => {
+      lineBytes += part.length;
+      if (lineBytes <= MAX_CWD_LINE_BYTES) pieces.push(Buffer.from(part));
+      else pieces = [];
+    };
+    while (lines < MAX_CWD_LINES && position < MAX_CWD_SCAN_BYTES) {
+      const n = readSync(fd, chunk, 0, chunk.length, position);
+      if (n === 0) return lineBytes > 0 ? endLine() : null;
+      position += n;
+      const data = chunk.subarray(0, n);
+      let start = 0;
+      for (let nl = data.indexOf(10, start); nl !== -1; nl = data.indexOf(10, start)) {
+        keep(data.subarray(start, nl));
+        start = nl + 1;
+        const cwd = endLine();
+        if (cwd) return cwd;
+        if (lines >= MAX_CWD_LINES) return null;
+      }
+      keep(data.subarray(start));
+    }
+    return null;
+  } catch {
+    return null;
+  } finally {
+    closeSync(fd);
+  }
 }
 
-function extractCwdFromJsonl(filePath: string): string | null {
-  try {
-    // Read only the first 8KB to avoid loading huge JSONL files into memory
-    const fd = openSync(filePath, "r");
-    const buf = Buffer.alloc(8192);
-    const bytesRead = readSync(fd, buf, 0, 8192, 0);
-    closeSync(fd);
-    const text = buf.toString("utf-8", 0, bytesRead);
-    const lines = text.split("\n").slice(0, 15);
-    for (const line of lines) {
-      if (!line.trim()) continue;
-      try {
-        const obj = JSON.parse(line);
-        if (obj.cwd) return obj.cwd;
-      } catch {
-        continue;
-      }
-    }
-  } catch {
-    // File read error
+// Separates interactive Codex CLI and Desktop work from codex exec runs and
+// Claude Code-driven calls. The interactive CLI's default originator is
+// codex_cli_rs. Missing, unknown and non-string values count as "other",
+// so the buckets always sum to the Codex session total.
+function normalizeCodexOriginator(raw: unknown): CodexOriginator {
+  if (typeof raw !== "string") return "other";
+  const value = raw.trim().toLowerCase();
+  if (value === "codex_cli_rs") return "cli";
+  if (value === "codex desktop" || value === "codex_desktop") return "desktop";
+  if (value === "codex_exec" || value === "codex exec") return "exec";
+  if (value === "claude code" || value === "claude_code") return "claude_code";
+  return "other";
+}
+
+function countCodexOriginators(sessions: Session[]): CodexOriginatorCounts {
+  const counts: CodexOriginatorCounts = { cli: 0, desktop: 0, exec: 0, claude_code: 0, other: 0 };
+  for (const s of sessions) {
+    if (s.tool === "codex") counts[s.codexOriginator ?? "other"]++;
   }
-  return null;
+  return counts;
+}
+
+function formatCodexOriginators(o: CodexOriginatorCounts): string {
+  return `cli=${o.cli}, desktop=${o.desktop}, exec=${o.exec}, claude_code=${o.claude_code}, other=${o.other}`;
 }
 
 function scanCodex(since: Date): Session[] {
@@ -346,7 +397,11 @@ function scanCodex(since: Date): Session[] {
               if (!firstLine) continue;
               const meta = JSON.parse(firstLine);
               if (meta.type === "session_meta" && meta.payload?.cwd) {
-                sessions.push({ tool: "codex", cwd: meta.payload.cwd });
+                sessions.push({
+                  tool: "codex",
+                  cwd: meta.payload.cwd,
+                  codexOriginator: normalizeCodexOriginator(meta.payload.originator),
+                });
               }
             } catch {
               console.error(`Warning: could not parse Codex session ${filePath}`);
@@ -454,50 +509,28 @@ function scanGemini(since: Date): Session[] {
 // ── Deduplication ──────────────────────────────────────────────────────────
 
 async function resolveAndDeduplicate(sessions: Session[]): Promise<Repo[]> {
-  // Group sessions by cwd
-  const byCwd = new Map<string, Session[]>();
+  // Group sessions by repository: the origin remote when there is one, else
+  // the main worktree, so linked worktrees and subdirectories of one
+  // repository count together and a nested repository counts as its own.
+  const byRemote = new Map<string, { main: string; paths: string[]; sessions: Session[] }>();
   for (const s of sessions) {
-    const existing = byCwd.get(s.cwd) || [];
-    existing.push(s);
-    byCwd.set(s.cwd, existing);
-  }
-
-  // Resolve git remotes for each cwd
-  const cwds = Array.from(byCwd.keys());
-  const remoteMap = new Map<string, string>(); // cwd → normalized remote
-
-  for (const cwd of cwds) {
-    const raw = getGitRemote(cwd);
-    if (raw) {
-      remoteMap.set(cwd, normalizeRemoteUrl(raw));
-    } else if (existsSync(cwd) && isGitRepo(cwd)) {
-      remoteMap.set(cwd, `local:${cwd}`);
-    }
-  }
-
-  // Group by normalized remote
-  const byRemote = new Map<string, { paths: string[]; sessions: Session[] }>();
-  for (const [cwd, cwdSessions] of byCwd) {
-    const remote = remoteMap.get(cwd);
-    if (!remote) continue;
-
-    const existing = byRemote.get(remote) || { paths: [], sessions: [] };
-    if (!existing.paths.includes(cwd)) existing.paths.push(cwd);
-    existing.sessions.push(...cwdSessions);
+    const project = gitProject(s.cwd);
+    if (!project) continue;
+    const raw = getGitRemote(project.root);
+    const remote = raw ? normalizeRemoteUrl(raw) : `local:${project.main}`;
+    const existing = byRemote.get(remote) || { main: project.main, paths: [], sessions: [] };
+    if (!existing.paths.includes(project.root)) existing.paths.push(project.root);
+    existing.sessions.push(s);
     byRemote.set(remote, existing);
   }
 
   // Build Repo objects
   const repos: Repo[] = [];
   for (const [remote, data] of byRemote) {
-    // Find first valid path
-    const validPath = data.paths.find((p) => existsSync(p) && isGitRepo(p));
-    if (!validPath) continue;
-
     // Derive name from remote URL
     let name: string;
     if (remote.startsWith("local:")) {
-      name = basename(remote.replace("local:", ""));
+      name = basename(data.main);
     } else {
       try {
         const url = new URL(remote);
@@ -517,6 +550,7 @@ async function resolveAndDeduplicate(sessions: Session[]): Promise<Repo[]> {
       remote,
       paths: data.paths,
       sessions: sessionCounts,
+      codex_originators: countCodexOriginators(data.sessions),
     });
   }
 
@@ -538,7 +572,8 @@ async function main() {
   const startDate = sinceDate.toISOString().split("T")[0];
 
   // Run all scanners
-  const ccSessions = scanClaudeCode(sinceDate);
+  const cwdStats: CwdScanStats = { oversizedLines: 0 };
+  const ccSessions = scanClaudeCode(sinceDate, cwdStats);
   const codexSessions = scanCodex(sinceDate);
   const geminiSessions = scanGemini(sinceDate);
 
@@ -548,6 +583,13 @@ async function main() {
   console.error(
     `Discovered: ${ccSessions.length} CC sessions, ${codexSessions.length} Codex sessions, ${geminiSessions.length} Gemini sessions`
   );
+
+  if (cwdStats.oversizedLines > 0) {
+    console.error(
+      `Skipped ${cwdStats.oversizedLines} Claude Code JSONL line(s) over 1 MiB while reading session cwds; ` +
+        `a session whose cwd appears only after such lines counts with its project directory's other sessions.`,
+    );
+  }
 
   // Deduplicate
   const repos = await resolveAndDeduplicate(allSessions);
@@ -559,13 +601,15 @@ async function main() {
   const codexRepos = new Set(repos.filter((r) => r.sessions.codex > 0).map((r) => r.remote)).size;
   const geminiRepos = new Set(repos.filter((r) => r.sessions.gemini > 0).map((r) => r.remote)).size;
 
+  const codexOriginators = countCodexOriginators(codexSessions);
+
   const result: DiscoveryResult = {
     window: since,
     start_date: startDate,
     repos,
     tools: {
       claude_code: { total_sessions: ccSessions.length, repos: ccRepos },
-      codex: { total_sessions: codexSessions.length, repos: codexRepos },
+      codex: { total_sessions: codexSessions.length, repos: codexRepos, originators: codexOriginators },
       gemini: { total_sessions: geminiSessions.length, repos: geminiRepos },
     },
     total_sessions: allSessions.length,
@@ -578,13 +622,14 @@ async function main() {
     // Summary format
     console.log(`Window: ${since} (since ${startDate})`);
     console.log(`Sessions: ${allSessions.length} total (CC: ${ccSessions.length}, Codex: ${codexSessions.length}, Gemini: ${geminiSessions.length})`);
+    if (codexSessions.length > 0) console.log(`  Codex originators: ${formatCodexOriginators(codexOriginators)}`);
     console.log(`Repos: ${repos.length} unique`);
     console.log("");
     for (const repo of repos) {
       const total = repo.sessions.claude_code + repo.sessions.codex + repo.sessions.gemini;
       const tools = [];
       if (repo.sessions.claude_code > 0) tools.push(`CC:${repo.sessions.claude_code}`);
-      if (repo.sessions.codex > 0) tools.push(`Codex:${repo.sessions.codex}`);
+      if (repo.sessions.codex > 0) tools.push(`Codex:${repo.sessions.codex} (${formatCodexOriginators(repo.codex_originators)})`);
       if (repo.sessions.gemini > 0) tools.push(`Gemini:${repo.sessions.gemini}`);
       console.log(`  ${repo.name} (${total} sessions) — ${tools.join(", ")}`);
       console.log(`    Remote: ${repo.remote}`);

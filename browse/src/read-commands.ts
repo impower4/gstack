@@ -13,7 +13,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { TEMP_DIR } from './platform';
 import { inspectElement, formatInspectorResult, getModificationHistory } from './cdp-inspector';
-import { validateReadPath } from './path-security';
+import { validateReadPath, validateOutputPath } from './path-security';
 import { stripLoneSurrogates } from './sanitize';
 // Re-export for backward compatibility (tests import from read-commands)
 export { validateReadPath } from './path-security';
@@ -23,27 +23,227 @@ export const SENSITIVE_COOKIE_NAME = /(^|[_.-])(token|secret|key|password|creden
 export const SENSITIVE_COOKIE_VALUE = /^(eyJ|sk-|sk_live_|sk_test_|pk_live_|pk_test_|rk_live_|sk-ant-|ghp_|gho_|github_pat_|xox[bpsa]-|AKIA[A-Z0-9]{16}|AIza|SG\.|Bearer\s|sbp_)/;
 
 /** Detect await keyword, ignoring comments. Accepted risk: await in string literals triggers wrapping (harmless). */
-function hasAwait(code: string): boolean {
+export function hasAwait(code: string): boolean {
   const stripped = code.replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
   return /\bawait\b/.test(stripped);
 }
 
+/**
+ * Find the index of the bracket that closes the group opened at `start`
+ * (which must be `(` or `[`), skipping string literals and escapes.
+ * Returns -1 when unbalanced. Shared by the single-expression scanner below.
+ */
+function findBalancedClose(src: string, start: number): number {
+  const open = src[start];
+  const close = open === '(' ? ')' : ']';
+  let depth = 0;
+  let inString: string | null = null;
+  let escape = false;
+  for (let i = start; i < src.length; i++) {
+    const char = src[i];
+    if (escape) {
+      escape = false;
+      continue;
+    }
+    if (char === '\\' && inString) {
+      escape = true;
+      continue;
+    }
+    if (inString) {
+      if (char === inString) inString = null;
+      continue;
+    }
+    if (char === '"' || char === "'" || char === '`') {
+      inString = char;
+      continue;
+    }
+    if (char === open) {
+      depth++;
+    } else if (char === close) {
+      depth--;
+      if (depth === 0) return i;
+    }
+  }
+  return -1;
+}
+
+/**
+ * Detect whether code is a single top-level expression (such as an IIFE or parenthesized expression),
+ * even if it contains internal statements, semicolons, or multiple lines (#2727).
+ *
+ * The tail after the initial `(...)` group must be a CONTINUOUS member/call/
+ * index chain consumed to end-of-input. Accepting any tail that merely starts
+ * with `(` or `.` classified `(iife)().then(x=>x); stmt` as a single
+ * expression, and the expression wrapper then emitted a SyntaxError.
+ */
+export function isSingleParenOrIifeExpression(code: string): boolean {
+  const trimmed = code.trim().replace(/;+\s*$/, '');
+  let src = trimmed;
+  if (src.startsWith('await ') || src.startsWith('await\t') || src.startsWith('await\n')) {
+    src = src.slice(5).trim();
+  }
+  if (!src.startsWith('(')) return false;
+
+  const mainCloseIndex = findBalancedClose(src, 0);
+  if (mainCloseIndex === -1) return false;
+
+  // Consume the ENTIRE tail as a chain of `.member`, `(...)`, `[...]`, or
+  // optional-chaining segments. Anything else (a `;`, a second statement,
+  // an operator) means this is not a single expression.
+  let i = mainCloseIndex + 1;
+  while (i < src.length) {
+    const ch = src[i];
+    if (ch === ' ' || ch === '\t' || ch === '\n' || ch === '\r') {
+      i++;
+      continue;
+    }
+    if (ch === '(' || ch === '[') {
+      const close = findBalancedClose(src, i);
+      if (close === -1) return false;
+      i = close + 1;
+      continue;
+    }
+    if (ch === '.' || (ch === '?' && src[i + 1] === '.')) {
+      i += ch === '.' ? 1 : 2;
+      // Member name (or the `(`/`[` of `?.()` / `?.[]`, handled next loop).
+      while (i < src.length && /[\w$]/.test(src[i])) i++;
+      continue;
+    }
+    return false;
+  }
+  return true;
+}
+
 /** Detect whether code needs a block wrapper {…} vs expression wrapper (…) inside an async IIFE. */
-function needsBlockWrapper(code: string): boolean {
+export function needsBlockWrapper(code: string): boolean {
   const trimmed = code.trim();
-  if (trimmed.split('\n').length > 1) return true;
-  if (/\b(const|let|var|function|class|return|throw|if|for|while|switch|try)\b/.test(trimmed)) return true;
-  if (trimmed.includes(';')) return true;
+  if (isSingleParenOrIifeExpression(trimmed)) return false;
+  const clean = trimmed.replace(/;+\s*$/, '');
+  if (clean.split('\n').length > 1) return true;
+  if (/\b(const|let|var|function|class|return|throw|if|for|while|switch|try)\b/.test(clean)) return true;
+  if (clean.includes(';')) return true;
   return false;
 }
 
 /** Wrap code for page.evaluate(), using async IIFE with block or expression body as needed. */
-function wrapForEvaluate(code: string): string {
+export function wrapForEvaluate(code: string): string {
   if (!hasAwait(code)) return code;
   const trimmed = code.trim();
+  const cleanExpr = trimmed.replace(/;+\s*$/, '');
   return needsBlockWrapper(trimmed)
     ? `(async()=>{\n${code}\n})()`
-    : `(async()=>(${trimmed}))()`;
+    : `(async()=>(${cleanExpr}))()`;
+}
+
+/** Flags split out of `js`/`eval` args by parseOutArgs. */
+export interface OutArgs {
+  outPath?: string;
+  raw: boolean;
+  rest: string[];
+}
+
+/**
+ * Parse `--out <path>` / `--out=<path>` and `--raw` / `--raw=true|false` out of an
+ * arg list, returning the flags plus the remaining positional args (`rest`).
+ *
+ * Single source of truth shared by the js/eval handlers and the write-capability
+ * gate in server.ts, so the two never disagree on what counts as an `--out`
+ * invocation. Throws on malformed usage (repeated `--out`, missing value, bad
+ * `--raw` value) so the user gets a clear error instead of a silent misparse.
+ */
+export function parseOutArgs(args: string[]): OutArgs {
+  let outPath: string | undefined;
+  let raw = false;
+  const rest: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a === '--out') {
+      if (outPath !== undefined) throw new Error('--out specified more than once');
+      const val = args[i + 1];
+      if (val === undefined || val.startsWith('--')) throw new Error('--out requires a file path');
+      outPath = val;
+      i++;
+    } else if (a.startsWith('--out=')) {
+      if (outPath !== undefined) throw new Error('--out specified more than once');
+      const val = a.slice('--out='.length);
+      if (val === '') throw new Error('--out requires a file path');
+      outPath = val;
+    } else if (a === '--raw') {
+      raw = true;
+    } else if (a.startsWith('--raw=')) {
+      const v = a.slice('--raw='.length).toLowerCase();
+      if (v !== 'true' && v !== 'false') throw new Error('--raw must be true or false');
+      raw = v === 'true';
+    } else {
+      rest.push(a);
+    }
+  }
+  return { outPath, raw, rest };
+}
+
+/**
+ * True iff an arg list contains an `--out` flag in any accepted form
+ * (`--out <path>` or `--out=<path>`). Used by the write-capability gate to
+ * decide whether an otherwise-read command (`js`/`eval`) is actually a write
+ * invocation. Mirrors parseOutArgs's `--out` recognition exactly. Never throws —
+ * a malformed `--out=` still counts as an out attempt (fail safe: gate it).
+ */
+export function hasOutArg(args: string[]): boolean {
+  return args.some(a => a === '--out' || a.startsWith('--out='));
+}
+
+/**
+ * Convert an evaluate() result to its string form — the exact conversion `js`/`eval`
+ * used inline before `--out` existed. Kept byte-for-byte: `typeof === 'object'`
+ * (which includes `null`) goes through JSON.stringify (so `null` → `"null"`);
+ * everything else via `String(result ?? '')` (so `undefined` → `''`). JSON.stringify
+ * still throws on circular / BigInt-bearing results, same as before.
+ */
+export function resultToString(result: unknown): string {
+  return typeof result === 'object'
+    ? JSON.stringify(result, null, 2)
+    : String(result ?? '');
+}
+
+/**
+ * Write an evaluate result string to disk for `--out`, returning bytes written.
+ *
+ * When the result is a base64 data URL (`data:<type>;...;base64,<payload>`) and
+ * `raw` is false, decode the payload to raw bytes — this is the Excalidraw / og-image
+ * path where a render function returns a PNG data URL. The header is parsed
+ * case-insensitively and split on the FIRST comma (data URLs can contain commas in
+ * the payload). The payload is validated against the base64 charset before decoding,
+ * because `Buffer.from(_, 'base64')` silently drops invalid characters and would
+ * otherwise write corrupted bytes. `--raw` forces a literal write even for data URLs.
+ *
+ * Non-base64 strings are surrogate-sanitized (matching what the stdout egress path
+ * did before) and written as UTF-8. Parent directories are created — validateOutputPath
+ * gates the location but does not mkdir.
+ */
+export function writeEvalResult(outPath: string, str: string, opts: { raw: boolean }): number {
+  validateOutputPath(outPath);
+  fs.mkdirSync(path.dirname(path.resolve(outPath)), { recursive: true });
+
+  if (!opts.raw && str.startsWith('data:')) {
+    const comma = str.indexOf(',');
+    if (comma !== -1) {
+      const header = str.slice('data:'.length, comma);
+      const tokens = header.split(';').map(t => t.trim().toLowerCase());
+      if (tokens.includes('base64')) {
+        const payload = str.slice(comma + 1).replace(/\s+/g, '');
+        if (!/^[A-Za-z0-9+/]*={0,2}$/.test(payload)) {
+          throw new Error('--out: malformed base64 in data URL (decode would corrupt output)');
+        }
+        const buf = Buffer.from(payload, 'base64');
+        fs.writeFileSync(outPath, buf);
+        return buf.length;
+      }
+    }
+  }
+
+  const buf = Buffer.from(stripLoneSurrogates(str), 'utf-8');
+  fs.writeFileSync(outPath, buf);
+  return buf.length;
 }
 
 /**
@@ -101,7 +301,7 @@ export async function handleReadCommand(
   command: string,
   args: string[],
   session: TabSession,
-  bm?: BrowserManager,
+  bm: BrowserManager,
 ): Promise<string> {
   const page = session.getPage();
   // Frame-aware target for content extraction
@@ -179,24 +379,36 @@ export async function handleReadCommand(
     }
 
     case 'js': {
-      const expr = args[0];
-      if (!expr) throw new Error('Usage: browse js <expression>');
-      if (bm) assertJsOriginAllowed(bm, page.url());
+      const { outPath, raw, rest } = parseOutArgs(args);
+      const expr = rest[0];
+      if (!expr) throw new Error('Usage: browse js <expression> [--out <file>] [--raw]');
+      assertJsOriginAllowed(bm, page.url());
       const wrapped = wrapForEvaluate(expr);
       const result = await target.evaluate(wrapped);
-      return typeof result === 'object' ? JSON.stringify(result, null, 2) : String(result ?? '');
+      const str = resultToString(result);
+      if (outPath) {
+        const n = writeEvalResult(outPath, str, { raw });
+        return `JS result written: ${outPath} (${n} bytes)`;
+      }
+      return str;
     }
 
     case 'eval': {
-      const filePath = args[0];
-      if (!filePath) throw new Error('Usage: browse eval <js-file>');
-      if (bm) assertJsOriginAllowed(bm, page.url());
+      const { outPath, raw, rest } = parseOutArgs(args);
+      const filePath = rest[0];
+      if (!filePath) throw new Error('Usage: browse eval <js-file> [--out <file>] [--raw]');
+      assertJsOriginAllowed(bm, page.url());
       validateReadPath(filePath);
       if (!fs.existsSync(filePath)) throw new Error(`File not found: ${filePath}`);
       const code = fs.readFileSync(filePath, 'utf-8');
       const wrapped = wrapForEvaluate(code);
       const result = await target.evaluate(wrapped);
-      return typeof result === 'object' ? JSON.stringify(result, null, 2) : String(result ?? '');
+      const str = resultToString(result);
+      if (outPath) {
+        const n = writeEvalResult(outPath, str, { raw });
+        return `Eval result written: ${outPath} (${n} bytes)`;
+      }
+      return str;
     }
 
     case 'css': {

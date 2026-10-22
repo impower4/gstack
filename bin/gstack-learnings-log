@@ -7,14 +7,28 @@
 # by gstack-learnings-search ("latest winner" per key+type).
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# Windows git-bash (#1950): pwd yields a POSIX path (/c/Users/...), which Bun
+# on Windows cannot resolve as an ES module specifier in the import below.
+# cygpath -m converts to C:/Users/... which Bun accepts.
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*) command -v cygpath >/dev/null 2>&1 && SCRIPT_DIR="$(cygpath -m "$SCRIPT_DIR")" ;;
+esac
 eval "$("$SCRIPT_DIR/gstack-slug" 2>/dev/null)"
-GSTACK_HOME="${GSTACK_HOME:-$HOME/.gstack}"
+. "$(dirname "$0")/gstack-state-root.sh" 2>/dev/null || { echo "$0: cannot resolve the gstack state root: $(dirname "$0")/gstack-state-root.sh is missing. fix: reinstall with ./setup or /gstack-upgrade (docs/state-root.md)" >&2; exit 1; }
+gstack_state_root_select
+GSTACK_HOME="$_gstack_sr_root"
 mkdir -p "$GSTACK_HOME/projects/$SLUG"
 
 INPUT="$1"
 
-# Validate and sanitize input
-VALIDATED=$(printf '%s' "$INPUT" | bun -e "
+# Validate and sanitize input. Errors surface (#1950): stderr is captured and
+# printed on failure instead of swallowed — a silent exit 1 here cost Windows
+# users every AI-logged learning.
+TMPERR=$(mktemp "${TMPDIR:-/tmp}/gstack-learnings-log.XXXXXX") || { echo "gstack-learnings-log: could not create a temp file in ${TMPDIR:-/tmp}, so the learning was not recorded. Fix: point TMPDIR at a writable directory." >&2; exit 1; }
+trap 'rm -f "$TMPERR"' EXIT
+set +e
+VALIDATED=$(printf '%s' "$INPUT" | GSTACK_LIB_DIR="$SCRIPT_DIR/../lib" bun --no-env-file --config=/dev/null -e "
+const { hasInjection } = await import(process.env.GSTACK_LIB_DIR + '/jsonl-store.ts');
 const raw = await Bun.stdin.text();
 let j;
 try { j = JSON.parse(raw); } catch { process.stderr.write('gstack-learnings-log: invalid JSON, skipping\n'); process.exit(1); }
@@ -47,27 +61,11 @@ if (j.source && !ALLOWED_SOURCES.includes(j.source)) {
   process.exit(1);
 }
 
-// Content sanitization: strip instruction-like patterns from insight field
-// These patterns could be used for prompt injection when learnings are loaded into agent context
-if (j.insight) {
-  const INJECTION_PATTERNS = [
-    /ignore\s+(all\s+)?previous\s+(instructions|context|rules)/i,
-    /you\s+are\s+now\s+/i,
-    /always\s+output\s+no\s+findings/i,
-    /skip\s+(all\s+)?(security|review|checks)/i,
-    /override[:\s]/i,
-    /\bsystem\s*:/i,
-    /\bassistant\s*:/i,
-    /\buser\s*:/i,
-    /do\s+not\s+(report|flag|mention)/i,
-    /approve\s+(all|every|this)/i,
-  ];
-  for (const pat of INJECTION_PATTERNS) {
-    if (pat.test(j.insight)) {
-      process.stderr.write('gstack-learnings-log: insight contains suspicious instruction-like content, rejected\n');
-      process.exit(1);
-    }
-  }
+// Content sanitization: shared injection patterns (lib/jsonl-store.ts, D2A) —
+// one audited list across learnings + decisions, no drift.
+if (j.insight && hasInjection(j.insight)) {
+  process.stderr.write('gstack-learnings-log: insight contains suspicious instruction-like content, rejected\n');
+  process.exit(1);
 }
 
 // Inject timestamp if not present
@@ -78,9 +76,14 @@ if (!j.ts) j.ts = new Date().toISOString();
 j.trusted = j.source === 'user-stated';
 
 console.log(JSON.stringify(j));
-" 2>/dev/null)
+" 2>"$TMPERR")
+VALIDATE_RC=$?
+set -e
 
-if [ $? -ne 0 ] || [ -z "$VALIDATED" ]; then
+if [ $VALIDATE_RC -ne 0 ] || [ -z "$VALIDATED" ]; then
+  if [ -s "$TMPERR" ]; then
+    cat "$TMPERR" >&2
+  fi
   exit 1
 fi
 

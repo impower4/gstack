@@ -68,6 +68,10 @@ describe('processPayment', () => {
   run('git', ['init', '-b', 'main']);
   run('git', ['config', 'user.email', 'test@test.com']);
   run('git', ['config', 'user.name', 'Test']);
+  // Git 2.47+ runs auto maintenance detached after commit; it can still be
+  // writing .git/objects when the caller removes this fixture.
+  run('git', ['config', 'gc.auto', '0']);
+  run('git', ['config', 'maintenance.auto', 'false']);
   run('git', ['add', '.']);
   run('git', ['commit', '-m', 'initial commit']);
 

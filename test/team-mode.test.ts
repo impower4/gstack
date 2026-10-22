@@ -3,6 +3,8 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import { execSync } from 'child_process';
+import { createHash } from 'crypto';
+import { runBashScript } from './helpers/bash-script';
 
 const ROOT = path.resolve(import.meta.dir, '..');
 const SETTINGS_HOOK = path.join(ROOT, 'bin', 'gstack-settings-hook');
@@ -133,8 +135,8 @@ describe('gstack-session-update', () => {
     fs.mkdirSync(stateDir, { recursive: true });
 
     // Init a git repo to pass the .git guard
-    execSync('git init', { cwd: gstackDir });
-    execSync('git commit --allow-empty -m "init"', { cwd: gstackDir });
+    execSync('git init', { cwd: gstackDir, timeout: 30_000 });
+    execSync('git commit --allow-empty -m "init"', { cwd: gstackDir, timeout: 30_000 });
     fs.writeFileSync(path.join(gstackDir, 'VERSION'), '0.1.0');
 
     // Create a minimal gstack-config that returns auto_upgrade=true
@@ -191,8 +193,8 @@ describe('gstack-team-init', () => {
 
   beforeEach(() => {
     tmpDir = mkTmpDir();
-    execSync('git init', { cwd: tmpDir });
-    execSync('git commit --allow-empty -m "init"', { cwd: tmpDir });
+    execSync('git init', { cwd: tmpDir, timeout: 30_000 });
+    execSync('git commit --allow-empty -m "init"', { cwd: tmpDir, timeout: 30_000 });
   });
 
   afterEach(() => {
@@ -231,7 +233,7 @@ describe('gstack-team-init', () => {
 
   test('required: creates enforcement hook', () => {
     run(`${TEAM_INIT} required`, { cwd: tmpDir });
-    const hookPath = path.join(tmpDir, '.claude', 'hooks', 'check-gstack.sh');
+    const hookPath = path.join(tmpDir, '.claude', 'hooks', 'check-gstack.cjs');
     expect(fs.existsSync(hookPath)).toBe(true);
     const hook = fs.readFileSync(hookPath, 'utf-8');
     expect(hook).toContain('BLOCKED: gstack is not installed');
@@ -246,8 +248,110 @@ describe('gstack-team-init', () => {
     expect(fs.existsSync(settingsPath)).toBe(true);
     const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'));
     expect(settings.hooks.PreToolUse).toHaveLength(1);
-    expect(settings.hooks.PreToolUse[0].matcher).toBe('Skill');
+    // C7 (#2229): Copilot CLI's skill tool is lowercase `skill`; Claude-format
+    // matchers fire when an alternation token equals the runtime tool name.
+    expect(settings.hooks.PreToolUse[0].matcher.split('|').sort()).toEqual(['Skill', 'skill']);
     expect(settings.hooks.PreToolUse[0].hooks[0].command).toContain('check-gstack');
+  });
+
+  test('required: a Skill-only entry from an older team-init is upgraded, not duplicated (C7)', () => {
+    const settingsPath = path.join(tmpDir, '.claude', 'settings.json');
+    fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
+    fs.writeFileSync(settingsPath, JSON.stringify({ hooks: { PreToolUse: [
+      { matcher: 'Bash', hooks: [{ type: 'command', command: 'my-own-hook' }] },
+      { matcher: 'Skill', hooks: [{ type: 'command', command: '"$CLAUDE_PROJECT_DIR/.claude/hooks/check-gstack.sh"' }] },
+    ] } }));
+    run(`${TEAM_INIT} required`, { cwd: tmpDir });
+    run(`${TEAM_INIT} required`, { cwd: tmpDir });
+    const pre = JSON.parse(fs.readFileSync(settingsPath, 'utf-8')).hooks.PreToolUse;
+    expect(pre.map((e: { matcher: string }) => e.matcher)).toEqual(['Bash', 'Skill|skill']);
+  });
+
+  const registeredCommand = () => {
+    const pre = JSON.parse(fs.readFileSync(path.join(tmpDir, '.claude', 'settings.json'), 'utf-8')).hooks.PreToolUse;
+    return pre.flatMap((e: { hooks: { command: string }[] }) => e.hooks.map(h => h.command)).find((c: string) => c.includes('check-gstack'));
+  };
+
+  test('required: the registered command is shell-neutral (no shell variable syntax, node reads CLAUDE_PROJECT_DIR)', () => {
+    run(`${TEAM_INIT} required`, { cwd: tmpDir });
+    const command = registeredCommand();
+    expect(command).toStartWith('node -e "');
+    expect(command).toContain('process.env.CLAUDE_PROJECT_DIR');
+    expect(command).toContain('check-gstack.cjs');
+    expect(command).not.toContain('$');
+    expect(command).not.toContain('%');
+    expect(command).not.toContain('.sh');
+  });
+
+  test('required: the registered command, run from another directory, allows when gstack resolves and denies when not', () => {
+    run(`${TEAM_INIT} required`, { cwd: tmpDir });
+    const command = registeredCommand();
+    const home = mkTmpDir();
+    const elsewhere = mkTmpDir();
+    const hook = (env: Record<string, string>) => {
+      const r = Bun.spawnSync(['sh', '-c', command], { cwd: elsewhere, env: { PATH: process.env.PATH!, CLAUDE_PROJECT_DIR: tmpDir, ...env }, timeout: 10_000 });
+      return { code: r.exitCode, out: r.stdout.toString().trim(), err: r.stderr.toString() };
+    };
+    try {
+      const denied = hook({ HOME: home });
+      expect(denied.code).toBe(2);
+      expect(JSON.parse(denied.out).hookSpecificOutput.permissionDecision).toBe('deny');
+      expect(denied.err).toContain('BLOCKED: gstack is not installed globally.');
+
+      expect(hook({ HOME: home, GSTACK_ROOT: path.join(ROOT) })).toEqual({ code: 0, out: '{}', err: '' });
+      fs.mkdirSync(path.join(home, '.codex', 'skills', 'gstack', 'bin'), { recursive: true });
+      expect(hook({ HOME: home })).toEqual({ code: 0, out: '{}', err: '' });
+      // No HOME (a Windows hook runner): USERPROFILE is next.
+      expect(hook({ USERPROFILE: home })).toEqual({ code: 0, out: '{}', err: '' });
+    } finally {
+      fs.rmSync(home, { recursive: true, force: true });
+      fs.rmSync(elsewhere, { recursive: true, force: true });
+    }
+  });
+
+  test('required: re-running over a legacy .sh registration leaves exactly one handler and removes the tracked .sh', () => {
+    const hooksDir = path.join(tmpDir, '.claude', 'hooks');
+    fs.mkdirSync(hooksDir, { recursive: true });
+    fs.writeFileSync(path.join(hooksDir, 'check-gstack.sh'), '#!/bin/bash\necho "{}"\n', { mode: 0o755 });
+    const legacy = { type: 'command', command: '"$CLAUDE_PROJECT_DIR/.claude/hooks/check-gstack.sh"' };
+    fs.writeFileSync(path.join(tmpDir, '.claude', 'settings.json'), JSON.stringify({ hooks: { PreToolUse: [
+      { matcher: 'Skill', hooks: [{ type: 'command', command: 'team-audit' }, legacy] },
+      { matcher: 'Skill|skill', hooks: [legacy] },
+      { matcher: 'Bash', hooks: [{ type: 'command', command: 'my-own-hook' }] },
+    ] } }));
+    execSync('git add .claude && git commit -q -m legacy', { cwd: tmpDir, timeout: 30_000 });
+
+    const first = run(`${TEAM_INIT} required`, { cwd: tmpDir });
+    expect(first.exitCode).toBe(0);
+    expect(fs.existsSync(path.join(hooksDir, 'check-gstack.sh'))).toBe(false);
+    expect(first.stdout).toMatch(/git add .*\.claude\/hooks\/check-gstack\.sh/);
+    run(`${TEAM_INIT} required`, { cwd: tmpDir });
+
+    const pre = JSON.parse(fs.readFileSync(path.join(tmpDir, '.claude', 'settings.json'), 'utf-8')).hooks.PreToolUse;
+    expect(pre).toEqual([
+      { matcher: 'Skill|skill', hooks: [{ type: 'command', command: 'team-audit' }, { type: 'command', command: registeredCommand() }] },
+      { matcher: 'Bash', hooks: [{ type: 'command', command: 'my-own-hook' }] },
+    ]);
+    expect(registeredCommand()).not.toContain('$');
+  });
+
+  test('required: without bun the legacy .sh stays, since nothing re-registers its replacement', () => {
+    const hooksDir = path.join(tmpDir, '.claude', 'hooks');
+    fs.mkdirSync(hooksDir, { recursive: true });
+    fs.writeFileSync(path.join(hooksDir, 'check-gstack.sh'), '#!/bin/bash\necho "{}"\n', { mode: 0o755 });
+    const bin = mkTmpDir();
+    try {
+      for (const tool of ['git', 'bash', 'cat', 'mkdir', 'chmod', 'grep', 'dirname', 'rm']) {
+        const real = execSync(`command -v ${tool}`, { encoding: 'utf-8', shell: '/bin/bash' }).trim();
+        fs.symlinkSync(real, path.join(bin, tool));
+      }
+      const r = run(`${bin}/bash ${TEAM_INIT} required`, { cwd: tmpDir, env: { PATH: bin } });
+      expect(r.exitCode).toBe(0);
+      expect(r.stdout).toContain('bun not found');
+      expect(fs.existsSync(path.join(hooksDir, 'check-gstack.sh'))).toBe(true);
+    } finally {
+      fs.rmSync(bin, { recursive: true, force: true });
+    }
   });
 
   test('idempotent: running twice does not duplicate CLAUDE.md section', () => {
@@ -265,8 +369,8 @@ describe('gstack-team-init', () => {
     fs.writeFileSync(path.join(vendoredDir, 'VERSION'), '0.14.0.0');
     fs.writeFileSync(path.join(vendoredDir, 'README.md'), 'vendored');
     // Track it in git
-    execSync('git add .claude/skills/gstack/', { cwd: tmpDir });
-    execSync('git commit -m "add vendored gstack"', { cwd: tmpDir });
+    execSync('git add .claude/skills/gstack/', { cwd: tmpDir, timeout: 30_000 });
+    execSync('git commit -m "add vendored gstack"', { cwd: tmpDir, timeout: 30_000 });
 
     const result = run(`${TEAM_INIT} optional`, { cwd: tmpDir });
     expect(result.exitCode).toBe(0);
@@ -306,8 +410,8 @@ describe('gstack-team-init', () => {
     const vendoredDir = path.join(tmpDir, '.claude', 'skills', 'gstack');
     fs.mkdirSync(vendoredDir, { recursive: true });
     fs.writeFileSync(path.join(vendoredDir, 'VERSION'), '0.14.0.0');
-    execSync('git add .claude/skills/gstack/', { cwd: tmpDir });
-    execSync('git commit -m "add vendored"', { cwd: tmpDir });
+    execSync('git add .claude/skills/gstack/', { cwd: tmpDir, timeout: 30_000 });
+    execSync('git commit -m "add vendored"', { cwd: tmpDir, timeout: 30_000 });
 
     run(`${TEAM_INIT} optional`, { cwd: tmpDir });
 
@@ -323,28 +427,130 @@ describe('gstack-team-init', () => {
 });
 
 describe('setup --team / --no-team / -q', () => {
-  // `./setup` does a full install + build + skill regeneration. On a cold cache
-  // it routinely takes 60-90s. Give both tests a 3-minute budget so CI doesn't
-  // report pre-existing timeouts as failures.
+  // Run the real installer from a private payload: setup can rebuild binaries,
+  // regenerate source, and install skills. None may target this test's checkout.
+  function withSetup(check: (fixture: { setup: string; cwd: string; env: NodeJS.ProcessEnv; home: string }) => void): void {
+    const protectedPaths = ['setup', 'SKILL.md', 'lib/dom-dump.js', 'design/dist/design'];
+    const snapshot = () => protectedPaths.map(rel => {
+      const file = path.join(ROOT, rel);
+      try {
+        const stat = fs.statSync(file, { bigint: true });
+        return { rel, mtimeNs: stat.mtimeNs, sha256: createHash('sha256').update(fs.readFileSync(file)).digest('hex') };
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { rel, missing: true };
+        throw error;
+      }
+    });
+    const before = snapshot();
+    const tmp = mkTmpDir();
+    const cwd = path.join(tmp, 'gstack');
+    const home = path.join(tmp, 'home');
+    const commands = path.join(tmp, 'commands');
+    const quote = (value: string) => `'${value.replace(/'/g, `'\\''`)}'`;
+    const write = (rel: string, content: string) => {
+      const file = path.join(cwd, rel);
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(file, content, { mode: 0o755 });
+    };
+    try {
+      for (const rel of [
+        'setup', 'VERSION', 'SKILL.md', 'qa/SKILL.md', 'bin/gstack-config', 'bin/gstack-patch-names',
+        'bin/gstack-state-root.sh', 'bin/gstack-bun-version.sh', 'bin/gstack-path-spelling.sh', 'bin/gstack-claude-root.sh', 'bin/gstack-install-registry.sh', 'bin/gstack-render-claude.sh', 'bin/gstack-host-renders.sh',
+        'scripts/resolve-codex-generation-model.ts', 'scripts/models.ts', 'scripts/preflight-codex-overlap.ts',
+        'scripts/discover-skills.ts', 'scripts/external-skill-names.ts', 'scripts/host-config.ts',
+        'lib/claude-code-migration.ts', 'lib/model-policy.ts', 'lib/model-catalog.ts',
+        'lib/model-policy-notice.ts', 'lib/state-root.ts', 'lib/bun-isolation.ts',
+      ]) {
+        const dest = path.join(cwd, rel);
+        fs.mkdirSync(path.dirname(dest), { recursive: true });
+        fs.copyFileSync(path.join(ROOT, rel), dest);
+      }
+      fs.mkdirSync(path.join(cwd, 'hosts'));
+      for (const name of fs.readdirSync(path.join(ROOT, 'hosts')).filter(name => name.endsWith('.ts'))) {
+        fs.copyFileSync(path.join(ROOT, 'hosts', name), path.join(cwd, 'hosts', name));
+      }
+      for (const dir of ['browse/src', 'make-pdf/src', 'design/src', 'lib']) fs.mkdirSync(path.join(cwd, dir), { recursive: true });
+      // Same executable-presence contract as setup-needs-build.test.ts. These
+      // tests cover installer messages, not compiler output or dependency install.
+      for (const binary of ['browse/dist/browse', 'design/dist/design', 'make-pdf/dist/pdf']) {
+        write(binary, '#!/bin/sh\nexit 0\n');
+        if (process.platform === 'win32') write(`${binary}.exe`, '#!/bin/sh\nexit 0\n');
+      }
+      write('browse/dist/.build-complete', 'complete\n');
+      fs.mkdirSync(commands);
+      fs.mkdirSync(home);
+      // Only installation/generation prerequisites are stubbed. The model
+      // resolver, flag parser, logging, skill registration and completion run
+      // unchanged. Unexpected commands (including a build) fail the test.
+      fs.writeFileSync(path.join(commands, 'bun'), `#!/usr/bin/env bash
+[ "$1 $2" = '--no-env-file --config=/dev/null' ] && shift 2
+case "$*" in
+  'install --frozen-lockfile') exit 0 ;;
+  'build --help') echo 'Fixture Bun has no CSO compile flags'; exit 0 ;;
+  *'/bin/gstack-migrate-claude-code --install-dir '*)
+    [[ "$#" -eq 5 && "$2" = --install-dir && "$4" = --skills-dir ]] || exit 90
+    exit 0 ;;
+  'run gen:skill-docs --host codex --model gpt-6-astra') mkdir -p .agents/skills; exit 0 ;;
+  'run scripts/resolve-codex-generation-model.ts') exec ${quote(process.execPath)} "$@" ;;
+  *'/scripts/preflight-codex-overlap.ts --source '*)
+    [[ "$#" -eq 13 && "$1" = ${quote(path.join(cwd, 'scripts/preflight-codex-overlap.ts'))}
+      && "$2" = --source && "$3" = ${quote(cwd)}
+      && "$4" = --namespace && "$5" = ${quote(path.join(home, '.codex/skills'))}
+      && "$6" = --selected && "$7" = 0 && "$8" = --local && "$9" = 0
+      && "\${10}" = --windows && "\${11}" = ${process.platform === 'win32' ? '1' : '0'}
+      && "\${12}" = --relocation && "\${13}" = ${quote(path.join(home, '.gstack/repos/gstack'))} ]] || exit 90
+    exec ${quote(process.execPath)} "$@" ;;
+  *) echo "Unexpected setup prerequisite: $*" >&2; exit 90 ;;
+esac
+`, { mode: 0o755 });
+      // setup's legacy cache cleanup uses this absolute path even with a
+      // private HOME/TMPDIR. Leave the shared cache untouched in this fixture.
+      const realRm = Bun.which('rm');
+      if (!realRm) throw new Error('rm is required for the setup fixture');
+      fs.writeFileSync(path.join(commands, 'rm'), `#!/usr/bin/env bash
+if [ "$#" -eq 2 ] && [ "$1" = -f ] && [ "$2" = /tmp/gstack-latest-version ]; then exit 0; fi
+exec ${quote(realRm)} "$@"
+`, { mode: 0o755 });
+      const state = path.join(home, '.gstack');
+      const env: NodeJS.ProcessEnv = {
+        PATH: `${commands}${path.delimiter}${process.env.PATH ?? ''}`,
+        HOME: home, USERPROFILE: home, TMPDIR: tmp, TMP: tmp, TEMP: tmp,
+        CODEX_HOME: path.join(home, '.codex'), CLAUDE_CONFIG_DIR: path.join(home, '.claude'),
+        GSTACK_HOME: state, GSTACK_STATE_ROOT: state,
+        GSTACK_SKIP_PLAYWRIGHT: '1', GSTACK_SKIP_FONTS: '1', GSTACK_SKIP_COREUTILS: '1', GSTACK_SKIP_ASIDE: '1',
+        ...(process.env.SystemRoot ? { SystemRoot: process.env.SystemRoot } : {}),
+      };
+      check({ setup: quote(path.join(cwd, 'setup')), cwd, env, home });
+      expect(fs.readFileSync(path.join(state, '.last-setup-version'), 'utf8').trim()).toBe(fs.readFileSync(path.join(cwd, 'VERSION'), 'utf8').trim());
+    } finally {
+      try { expect(snapshot()).toEqual(before); }
+      finally { fs.rmSync(tmp, { recursive: true, force: true }); }
+    }
+  }
+
   test(
     'setup -q produces no stdout',
-    () => {
-      const result = run(`${path.join(ROOT, 'setup')} -q`, { cwd: ROOT });
+    () => withSetup(fixture => {
+      const result = runBashScript(`bash ${fixture.setup} -q`, { cwd: fixture.cwd, env: fixture.env, timeout: 10000 });
+      expect(result.status, result.stderr).toBe(0);
       // -q should suppress informational output (may still have some output from build)
       // The key test is that the "Skill naming:" prompt and "gstack ready" messages are suppressed
       expect(result.stdout).not.toContain('Skill naming:');
       expect(result.stdout).not.toContain('gstack ready');
-    },
+      expect(fs.realpathSync(path.join(fixture.home, '.claude/skills/gstack'))).toBe(fs.realpathSync(fixture.cwd));
+    }),
     180_000,
   );
 
   test(
     'setup --local prints deprecation warning',
-    () => {
+    () => withSetup(fixture => {
       // stderr capture: run via bash redirect so we can capture stderr
-      const result = run(`bash -c '${path.join(ROOT, 'setup')} --local -q 2>&1'`, { cwd: ROOT });
+      const result = runBashScript(`bash ${fixture.setup} --local -q 2>&1`, { cwd: fixture.cwd, env: fixture.env, timeout: 10000 });
+      expect(result.status, result.stdout + result.stderr).toBe(0);
       expect(result.stdout).toContain('deprecated');
-    },
+      expect(fs.realpathSync(path.join(fixture.cwd, '.claude/skills/qa/SKILL.md'))).toBe(path.join(fs.realpathSync(fixture.cwd), 'qa/SKILL.md'));
+    }),
     180_000,
   );
 });

@@ -36,7 +36,7 @@
  *   architecture_care:  0 = pragmatic, ship it      ↔  1 = principled, get it right
  */
 
-import { QUESTIONS } from './question-registry';
+import { QUESTIONS, type QuestionDef } from './question-registry';
 
 /** The 5 dimensions of the developer psychographic. */
 export type Dimension =
@@ -188,6 +188,23 @@ export const SIGNAL_MAP: Record<string, Record<string, DimensionDelta[]>> = {
   },
 
   // -----------------------------------------------------------------------
+  // decision-autonomy — does the user trust the agent to apply decisions
+  // without checking back? (Cathedral T7: was the missing signal for the
+  // 'autonomy' dimension; added so /plan-tune annotations can render
+  // 'consult me' vs 'delegate' guidance on merge/rollback questions.)
+  // -----------------------------------------------------------------------
+  'decision-autonomy': {
+    accept: [{ dim: 'autonomy', delta: +0.04 }],
+    reject: [{ dim: 'autonomy', delta: -0.04 }],
+    // common option keys for "I'll review first" vs "go ahead":
+    'review-first': [{ dim: 'autonomy', delta: -0.05 }],
+    proceed: [{ dim: 'autonomy', delta: +0.05 }],
+    // /investigate-style: "agent applies fix" vs "show me the diff first"
+    'apply-fix': [{ dim: 'autonomy', delta: +0.04 }],
+    'show-diff': [{ dim: 'autonomy', delta: -0.04 }],
+  },
+
+  // -----------------------------------------------------------------------
   // session-mode — office-hours goal selection
   // -----------------------------------------------------------------------
   'session-mode': {
@@ -238,7 +255,7 @@ export function validateRegistrySignalKeys(): {
   extra: string[];
 } {
   const registrySignalKeys = new Set<string>();
-  for (const q of Object.values(QUESTIONS)) {
+  for (const q of Object.values(QUESTIONS) as QuestionDef[]) {
     if (q.signal_key) registrySignalKeys.add(q.signal_key);
   }
   const mapKeys = new Set(Object.keys(SIGNAL_MAP));

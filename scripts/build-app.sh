@@ -13,6 +13,16 @@
 #   ./scripts/build-app.sh           # Build .app + DMG
 #   ./scripts/build-app.sh --no-dmg  # Build .app only
 
+# Heredoc delivery guard. bash 5.2+ writes a heredoc body <=64KiB through a
+# pipe in the forked child before exec, with no reader on the other end. On
+# macOS under pipe-KVA pressure a fresh pipe gets a 512-byte buffer, so any
+# body >=512B blocks write() forever and the script hangs at startup with no
+# output. Compat level 50 restores the tempfile path. These scripts are
+# bash-3.2-clean, so the compat level costs them nothing. Not exported: the
+# guard is per-script, and it survives `bash script.sh` call sites that
+# bypass the shebang.
+BASH_COMPAT=50
+
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -28,7 +38,7 @@ echo "Building $APP_NAME v$VERSION..."
 # ─── Step 1: Compile browse binary ─────────────────────────────
 echo "  Compiling browse binary..."
 cd "$ROOT/browse"
-bun build --compile src/cli.ts --outfile "$BUILD_DIR/browse-app" --target=bun 2>/dev/null
+bun build --compile --no-compile-autoload-dotenv --no-compile-autoload-bunfig src/cli.ts --outfile "$BUILD_DIR/browse-app" --target=bun 2>/dev/null
 cd "$ROOT"
 
 # ─── Step 2: Find Playwright's Chromium ─────────────────────────
@@ -94,7 +104,9 @@ if [ -f "$CHROMIUM_PLIST" ]; then
   if [ -f "$CHROMIUM_STRINGS" ]; then
     # InfoPlist.strings may be binary plist, convert to xml first
     plutil -convert xml1 "$CHROMIUM_STRINGS" 2>/dev/null || true
-    sed -i '' "s/Google Chrome for Testing/$APP_NAME/g" "$CHROMIUM_STRINGS" 2>/dev/null || true
+    # Escape sed replacement metachars (& / \) in $APP_NAME so unusual names can't break or inject into the s/// command.
+    APP_NAME_SED_ESCAPED=$(printf '%s' "$APP_NAME" | sed 's/[&/\]/\\&/g')
+    sed -i '' "s/Google Chrome for Testing/${APP_NAME_SED_ESCAPED}/g" "$CHROMIUM_STRINGS" 2>/dev/null || true
   fi
   # Replace Chromium's icon with ours so the Dock shows the GStack icon
   # (Chromium's process owns the Dock icon, not our launcher)
@@ -177,7 +189,11 @@ echo "  Creating DMG..."
 rm -f "$DMG_PATH"
 
 # Create a temporary directory for DMG contents
-DMG_TMP=$(mktemp -d)
+DMG_TMP=$(mktemp -d) || { echo "ERROR: mktemp -d failed — refusing to continue so we don't cp into the filesystem root." >&2; exit 1; }
+if [ -z "$DMG_TMP" ] || [ ! -d "$DMG_TMP" ]; then
+  echo "ERROR: mktemp -d returned an invalid path ('$DMG_TMP')." >&2
+  exit 1
+fi
 cp -a "$APP_DIR" "$DMG_TMP/"
 ln -s /Applications "$DMG_TMP/Applications"
 

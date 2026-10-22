@@ -1,5 +1,59 @@
 import { describe, test, expect } from 'bun:test';
+import { spawnSync } from 'node:child_process';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { parseNDJSON } from './session-runner';
+
+test('runSkillTest launches a child without operator credentials', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'gstack-hermetic-session-'));
+  try {
+    const bin = path.join(root, 'claude');
+    fs.writeFileSync(bin, `#!/usr/bin/env node
+const names = ['GITHUB_TOKEN', 'GITHUB_PERSONAL_ACCESS_TOKEN', 'GITHUB_APP_PRIVATE_KEY', 'GH_TOKEN', 'GITHUB_ACTIONS', 'GITHUB_PATH', 'GITHUB_TOKENIZER', 'EVALS_RUN_ID'];
+const present = Object.fromEntries(names.map(name => [name, Object.hasOwn(process.env, name)]));
+console.log(JSON.stringify({type: 'result', subtype: 'success', result: JSON.stringify(present)}));
+`, { mode: 0o700 });
+    const script = `import { runSkillTest } from ${JSON.stringify(pathToFileURL(path.join(import.meta.dir, 'session-runner.ts')).href)};
+const result = await runSkillTest({prompt: 'synthetic fixture', workingDirectory: ${JSON.stringify(root)}, model: 'fixture', timeout: 5000, startupGraceMs: 5000, allowedTools: []});
+console.log(JSON.stringify({exitReason: result.exitReason, child: JSON.parse(result.output)}));`;
+    const result = spawnSync(process.execPath, ['-e', script], {
+      cwd: path.resolve(import.meta.dir, '..', '..'),
+      encoding: 'utf8',
+      timeout: 30_000,
+      env: {
+        PATH: `${root}${path.delimiter}${process.env.PATH ?? '/usr/bin:/bin'}`,
+        HOME: root,
+        TMPDIR: os.tmpdir(),
+        GITHUB_TOKEN: 'synthetic-token',
+        GITHUB_PERSONAL_ACCESS_TOKEN: 'synthetic-pat',
+        GITHUB_APP_PRIVATE_KEY: 'synthetic-private-key',
+        GH_TOKEN: 'synthetic-gh-token',
+        GITHUB_ACTIONS: 'true',
+        GITHUB_PATH: '/tmp/actions-path',
+        GITHUB_TOKENIZER: 'metadata-tokenizer',
+        EVALS_RUN_ID: 'synthetic-run',
+      },
+    });
+    expect(result.status, result.stderr).toBe(0);
+    expect(JSON.parse(result.stdout)).toEqual({
+      exitReason: 'success',
+      child: {
+        GITHUB_TOKEN: false,
+        GITHUB_PERSONAL_ACCESS_TOKEN: false,
+        GITHUB_APP_PRIVATE_KEY: false,
+        GH_TOKEN: false,
+        GITHUB_ACTIONS: true,
+        GITHUB_PATH: true,
+        GITHUB_TOKENIZER: true,
+        EVALS_RUN_ID: true,
+      },
+    });
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
 
 // Fixture: minimal NDJSON session (system init, assistant with tool_use, tool result, assistant text, result)
 const FIXTURE_LINES = [
@@ -92,5 +146,113 @@ describe('parseNDJSON', () => {
     const parsed = parseNDJSON(lines);
     expect(parsed.turnCount).toBe(2);
     expect(parsed.toolCalls).toHaveLength(0);
+  });
+
+  test('associates Agent verdict text with its tool-use ID without transport metadata or reasoning', () => {
+    const lines = [
+      { type: 'assistant', message: { content: [
+        { type: 'tool_use', id: 'review', name: 'Agent', input: { prompt: 'Review the design.' } },
+      ] } },
+      { type: 'user', tool_use_result: { content: [
+        { type: 'thinking', thinking: 'Private computation must not become tool output.' },
+        { type: 'text', text: 'Completeness: missing failure handling.' },
+        { type: 'text', text: 'Quality score: 7/10' },
+      ] }, message: { content: [
+        { type: 'tool_result', tool_use_id: 'review', content: [
+          { type: 'text', text: 'Completeness: missing failure handling.\nQuality score: 7/10' },
+          { type: 'text', text: 'agentId: child-review\n<usage>duration_ms: 1000</usage>' },
+        ] },
+      ] } },
+    ].map(event => JSON.stringify(event));
+
+    expect(parseNDJSON(lines).toolCalls).toEqual([{
+      tool: 'Agent',
+      input: { prompt: 'Review the design.' },
+      output: 'Completeness: missing failure handling.\nQuality score: 7/10',
+    }]);
+  });
+
+  test('preserves Task error-result diagnostics as output', () => {
+    const lines = [
+      { type: 'assistant', message: { content: [
+        { type: 'tool_use', id: 'failed-review', name: 'Task', input: {} },
+      ] } },
+      { type: 'user', message: { content: [
+        { type: 'tool_result', tool_use_id: 'failed-review', is_error: true, content: 'Reviewer failed: deadline exceeded.' },
+      ] } },
+    ].map(event => JSON.stringify(event));
+
+    expect(parseNDJSON(lines).toolCalls[0].output).toBe('Reviewer failed: deadline exceeded.');
+  });
+
+  test('flattens only public text blocks from matching message results', () => {
+    const lines = [
+      { type: 'assistant', message: { content: [
+        { type: 'tool_use', id: 'legacy-task', name: 'Task', input: {} },
+        { type: 'tool_use', id: 'shell', name: 'Bash', input: { command: 'echo done' } },
+      ] } },
+      { type: 'user', message: { content: [
+        { type: 'tool_result', tool_use_id: 'legacy-task', content: [
+          { type: 'text', text: 'Consistency: PASS' },
+          { type: 'image', source: { data: 'not-text' } },
+          { type: 'thinking', thinking: 'Private computation.' },
+          { type: 'redacted_thinking', data: 'opaque' },
+          null,
+          { type: 'text', text: 123 },
+          { type: 'text', text: 'Quality score: 10/10' },
+        ] },
+        { type: 'tool_result', tool_use_id: 'shell', content: 'done\n' },
+      ] } },
+    ].map(event => JSON.stringify(event));
+
+    const parsed = parseNDJSON(lines);
+    expect(parsed.toolCalls.map(call => call.output)).toEqual([
+      'Consistency: PASS\nQuality score: 10/10', 'done\n',
+    ]);
+    expect(parsed.toolCallCount).toBe(2);
+    expect(parsed.turnCount).toBe(1);
+  });
+
+  test('leaves missing, unmatched, and malformed results empty', () => {
+    const lines = [
+      { type: 'assistant', message: { content: [
+        { type: 'tool_use', id: 'missing', name: 'Agent', input: {} },
+        { type: 'tool_use', id: 'malformed', name: 'Task', input: {} },
+        { type: 'tool_use', name: 'Read', input: {} },
+      ] } },
+      { type: 'user', message: { content: [
+        { type: 'tool_result', tool_use_id: 'unknown', content: 'Do not attach to the latest call.' },
+        { type: 'tool_result', tool_use_id: 'malformed', content: { text: 'Not a public content block.' } },
+        { type: 'tool_result', content: 'No tool-use ID.' },
+      ] } },
+      { type: 'user', message: { content: 'Not a tool-result array.' } },
+    ].map(event => JSON.stringify(event));
+
+    expect(parseNDJSON(lines).toolCalls.map(call => call.output)).toEqual(['', '', '']);
+  });
+
+  test('scopes repeated tool-use IDs to the parent so child results cannot replace the parent verdict', () => {
+    const lines = [
+      { type: 'assistant', parent_tool_use_id: null, message: { content: [
+        { type: 'tool_use', id: 'shared', name: 'Agent', input: { prompt: 'Parent review' } },
+      ] } },
+      { type: 'assistant', parent_tool_use_id: 'shared', message: { content: [
+        { type: 'tool_use', id: 'shared', name: 'Read', input: { file_path: '/tmp/design.md' } },
+      ] } },
+      { type: 'user', parent_tool_use_id: 'shared', message: { content: [
+        { type: 'tool_result', tool_use_id: 'shared', content: 'Child file content' },
+      ] } },
+      { type: 'user', message: { content: [
+        { type: 'tool_result', tool_use_id: 'shared', content: 'Parent review verdict' },
+      ] } },
+      { type: 'user', parent_tool_use_id: 'another-child', message: { content: [
+        { type: 'tool_result', tool_use_id: 'shared', content: 'Unrelated child result' },
+      ] } },
+    ].map(event => JSON.stringify(event));
+
+    const parsed = parseNDJSON(lines);
+    expect(parsed.toolCalls.map(call => call.output)).toEqual(['Parent review verdict', 'Child file content']);
+    expect(parsed.toolCallCount).toBe(2);
+    expect(parsed.turnCount).toBe(2);
   });
 });

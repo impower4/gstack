@@ -17,26 +17,24 @@
  */
 import { promises as fsp } from 'fs';
 import * as path from 'path';
-import * as os from 'os';
 import { mkdirSecure } from './file-permissions';
+import { resolveStateRoot } from '../../lib/state-root';
 
-const LOG_DIR = path.join(os.homedir(), '.gstack', 'security');
-const LOG_PATH = path.join(LOG_DIR, 'attempts.jsonl');
 const RATE_CAP = 60; // writes per minute
 const WINDOW_MS = 60_000;
 
 const writeTimestamps: number[] = [];
 let droppedSinceLastWrite = 0;
-let dirEnsured = false;
+let ensuredDir: string | null = null;
 
-async function ensureDir(): Promise<void> {
-  if (dirEnsured) return;
+async function ensureDir(dir: string): Promise<void> {
+  if (ensuredDir === dir) return;
   try {
     // Sync mkdir is fine here — runs once per process at first denial. The
     // (OI)(CI) inheritance set on Windows means subsequent fsp.appendFile
     // writes pick up the owner-only ACL automatically.
-    mkdirSecure(LOG_DIR);
-    dirEnsured = true;
+    mkdirSecure(dir);
+    ensuredDir = dir;
   } catch {
     // Swallow — log writes are best-effort. Failure to mkdir just means
     // subsequent appends will also fail and be caught below.
@@ -81,8 +79,9 @@ export function logTunnelDenial(req: Request, url: URL, reason: string): void {
   // Fire and forget. Never await, never block the request path.
   void (async () => {
     try {
-      await ensureDir();
-      await fsp.appendFile(LOG_PATH, JSON.stringify(entry) + '\n');
+      const dir = path.join(resolveStateRoot(), 'security');
+      await ensureDir(dir);
+      await fsp.appendFile(path.join(dir, 'attempts.jsonl'), JSON.stringify(entry) + '\n');
     } catch {
       // Swallow — log writes are best-effort. If disk is full or ACLs block
       // us, we don't want to crash the server.
@@ -94,5 +93,5 @@ export function logTunnelDenial(req: Request, url: URL, reason: string): void {
 export function __resetTunnelDenialLog(): void {
   writeTimestamps.length = 0;
   droppedSinceLastWrite = 0;
-  dirEnsured = false;
+  ensuredDir = null;
 }

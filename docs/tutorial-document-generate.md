@@ -138,5 +138,5 @@ Each one is short enough to maintain. Each one has a single job. The PR body sho
 
 - **If you have gaps** /document-release flagged but didn't fill: run `/document-generate` again, scoped to those entities specifically.
 - **If you want to understand why the four quadrants exist:** read [explanation-diataxis-in-gstack.md](./explanation-diataxis-in-gstack.md).
-- **If you want to document one specific shipped feature** (not the whole project): read [howto-document-a-shipped-feature.md](./howto-document-a-shipped-feature.md).
+- **If you want to document one specific feature before shipping** (not the whole project): read [howto-document-a-shipped-feature.md](./howto-document-a-shipped-feature.md).
 - **Reference for the skill itself:** [`document-generate/SKILL.md`](../document-generate/SKILL.md).

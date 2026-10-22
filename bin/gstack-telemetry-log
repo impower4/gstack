@@ -10,15 +10,28 @@
 #   gstack-telemetry-log --skill qa --duration 142 --outcome success \
 #     --used-browse true --session-id "12345-1710756600"
 #
+#   --no-sweep  one-shot events with no session of their own (setup's
+#               onboarding events) must not finalize OTHER sessions' in-flight
+#               .pending markers as outcome:unknown — only a skill's own
+#               epilogue may sweep.
+#
 # Env overrides (for testing):
-#   GSTACK_STATE_DIR  — override ~/.gstack state directory
+#   GSTACK_HOME     — relocate the state root (chain: bin/gstack-state-root.sh)
 #   GSTACK_DIR        — override auto-detected gstack root
 #
 # NOTE: Uses set -uo pipefail (no -e) — telemetry must never exit non-zero
 set -uo pipefail
 
 GSTACK_DIR="${GSTACK_DIR:-$(cd "$(dirname "$0")/.." && pwd)}"
-STATE_DIR="${GSTACK_STATE_DIR:-$HOME/.gstack}"
+SCRIPT_DIR="$GSTACK_DIR/bin"
+# Windows git-bash (#1950): pwd yields a POSIX path (/c/Users/...), which Bun
+# on Windows cannot resolve as an ES module specifier in bun -e imports.
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*) command -v cygpath >/dev/null 2>&1 && SCRIPT_DIR="$(cygpath -m "$SCRIPT_DIR")" ;;
+esac
+. "$(dirname "$0")/gstack-state-root.sh" 2>/dev/null || { echo "$0: cannot resolve the gstack state root: $(dirname "$0")/gstack-state-root.sh is missing. fix: reinstall with ./setup or /gstack-upgrade (docs/state-root.md)" >&2; exit 1; }
+gstack_state_root_select
+STATE_DIR="$_gstack_sr_root"
 ANALYTICS_DIR="$STATE_DIR/analytics"
 JSONL_FILE="$ANALYTICS_DIR/skill-usage.jsonl"
 PENDING_DIR="$ANALYTICS_DIR"  # .pending-* files live here
@@ -42,9 +55,11 @@ SEC_PAYLOAD_HASH=""
 SEC_CONFIDENCE=""
 SEC_LAYER=""
 SEC_VERDICT=""
+NO_SWEEP=""
 
 while [ $# -gt 0 ]; do
   case "$1" in
+    --no-sweep)      NO_SWEEP=1; shift ;;
     --skill)         SKILL="$2"; shift 2 ;;
     --duration)      DURATION="$2"; shift 2 ;;
     --outcome)       OUTCOME="$2"; shift 2 ;;
@@ -87,6 +102,9 @@ fi
 # ─── Finalize stale .pending markers ────────────────────────
 # Each session gets its own .pending-$SESSION_ID file to avoid races
 # between concurrent sessions. Finalize any that don't match our session.
+# --no-sweep (one-shot events from setup) skips this: a marker that is not
+# ours is another live session's, not a stale one.
+if [ -z "$NO_SWEEP" ]; then
 for PFILE in "$PENDING_DIR"/.pending-*; do
   [ -f "$PFILE" ] || continue
   # Skip our own session's marker (it's still in-flight)
@@ -111,6 +129,7 @@ for PFILE in "$PENDING_DIR"/.pending-*; do
       "$P_TS" "$P_SKILL" "$P_SID" "$P_VER" "$P_OS" "$P_ARCH" >> "$JSONL_FILE" 2>/dev/null || true
   fi
 done
+fi
 
 # Clear our own session's pending marker (we're about to log the real event)
 [ -n "$SESSION_ID" ] && rm -f "$PENDING_DIR/.pending-$SESSION_ID" 2>/dev/null || true
@@ -131,7 +150,7 @@ fi
 # can't be guessed or correlated by someone who knows your machine identity.
 INSTALL_ID=""
 if [ "$TIER" = "community" ]; then
-  ID_FILE="$HOME/.gstack/installation-id"
+  ID_FILE="$STATE_DIR/installation-id"
   if [ -f "$ID_FILE" ]; then
     INSTALL_ID="$(cat "$ID_FILE" 2>/dev/null)"
   fi
@@ -177,12 +196,40 @@ BRANCH="$(json_safe "$BRANCH")"
 ERR_FIELD="null"
 [ -n "$ERROR_CLASS" ] && ERR_FIELD="\"$(json_safe "$ERROR_CLASS")\""
 
+# error_message goes through the redaction engine before it touches disk
+# (#1947): stack traces and failed-API errors can embed credentials, paths,
+# and hostnames. Every finding span becomes <REDACTED-{id}>; the rest of the
+# message survives for crash triage. The bun snippet emits a JSON-encoded
+# string (quotes included) ready to drop into the printf below. FAIL CLOSED:
+# if bun / the engine is unavailable, the scan errors, or the output doesn't
+# look like a JSON string, the whole message becomes null — never raw.
 ERR_MSG_FIELD="null"
-[ -n "$ERROR_MESSAGE" ] && ERR_MSG_FIELD="\"$(printf '%s' "$ERROR_MESSAGE" | head -c 200 | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/	/\\t/g' | tr '\n\r' '  ')\""
+if [ -n "$ERROR_MESSAGE" ]; then
+  ERR_MSG_FIELD="$(printf '%s' "$ERROR_MESSAGE" | GSTACK_LIB_DIR="$SCRIPT_DIR/../lib" bun --no-env-file --config=/dev/null -e "
+const { redactFindingSpans } = await import(process.env.GSTACK_LIB_DIR + '/redact-engine.ts');
+const input = await Bun.stdin.text();
+const out = redactFindingSpans(input, { repoVisibility: 'private' });
+if (out === null) process.exit(1);
+console.log(JSON.stringify(out.slice(0, 200)));
+" 2>/dev/null)" || ERR_MSG_FIELD="null"
+  case "$ERR_MSG_FIELD" in
+    *"
+"*) ERR_MSG_FIELD="null" ;; # embedded newline would corrupt the JSONL record
+    \"*\") ;; # single-line JSON string — safe to embed
+    *) ERR_MSG_FIELD="null" ;;
+  esac
+fi
 
 STEP_FIELD="null"
 [ -n "$FAILED_STEP" ] && STEP_FIELD="\"$(json_safe "$FAILED_STEP")\""
 
+# Integrity first: a non-numeric duration would splice raw text into the
+# JSON line ("duration_s":%s) and corrupt the whole JSONL stream — the range
+# caps below silently no-op on non-integers because both test(1) comparisons
+# fail. Reject anything that isn't a plain integer.
+case "$DURATION" in
+  ''|*[!0-9]*) DURATION="" ;;
+esac
 # Cap unreasonable durations
 if [ -n "$DURATION" ] && [ "$DURATION" -gt 86400 ] 2>/dev/null; then
   DURATION=""  # null if > 24h

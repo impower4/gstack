@@ -1,0 +1,5 @@
+The change is correct and the tests cover it.
+
+1. **P3 — The helper name is vague.** `lib/journal.ts:77`
+
+Verdict: ready (1 P3)

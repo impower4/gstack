@@ -1,0 +1,23 @@
+{
+  "questions": [
+    {
+      "question": "D1 — Parser source for the two proposed Retry-After callers\nProject/branch/task: repo on main — planning src/import-worker.ts and src/sync-route.ts (PLAN.md), which must match the current scheduler's Retry-After semantics.\nELI10: The scheduler already turns a \"Retry-After\" header into a wait time using one tested function, lib/retry-after.ts retrySeconds(value, now, fallback). It handles blank/null input, plain seconds, HTTP dates, a 3600-second ceiling and a caller-chosen fallback — exactly what the plan says the two new callers need. The plan drafts a fresh copy of that logic inside each new caller instead. Two more copies means the same rule lives in several places and can quietly drift apart, and every quirk (e.g. \"1.5\" parses as a date in 2001 and yields 0) would have to be re-proven per copy.\nStakes if we pick wrong: a copied parser that diverges by even one branch makes the import worker or sync route wait a different time than the scheduler for the same header — the exact incompatibility the plan forbids — and nobody is alerted because each copy has its own tests.\nRecommendation: A because the required behavior is fixed and identical, the helper already exists with a passing contract test and an existing first-party caller, so reuse gives improved reliability and net savings with the smallest clear diff.\nCompleteness: A=10/10, B=7/10, C=3/10\nPros / cons:\nA) Reuse shared retrySeconds (recommended)\n  ✅ Both callers call the exact function the scheduler uses, so compatibility is structural, not re-derived\n  ✅ ~26 fewer implementation lines; one contract test suite proves edge cases for all three callers\n  ❌ A helper bug now reaches three callers at once; the helper's engine-dependent Date.parse quirks are inherited unchanged\nB) Local parser + contract tests\n  ✅ Each caller is self-contained and can later diverge deliberately without touching the scheduler\n  ✅ Full per-copy contract tests catch accidental drift at write time\n  ❌ ~28 duplicated implementation lines plus two more ~10-line test suites that must be kept in sync with lib/retry-after.ts forever\nC) Keep plan as drafted\n  ✅ Zero new test files beyond the integration tests already planned\n  ✅ No dependency between the new callers and lib/\n  ❌ Provides no shared-contract proof, which PLAN.md:4 says cannot be waived; drift is invisible until production\nNet: trading a shared dependency (single failure point, already accepted by the scheduler) against two hand-maintained copies whose only guarantee of matching is discipline.",
+      "header": "Parser source",
+      "multiSelect": false,
+      "options": [
+        {
+          "label": "Reuse shared retrySeconds",
+          "description": "✅ Both new callers import retrySeconds from lib/retry-after.ts and pass value, injected now and their own fallback — the same function src/scheduler.ts:1-2 already uses. ✅ Adds ~2 import lines + call sites instead of ~28 duplicated lines; extends test/retry-after.test.ts with the edge cases both callers inherit (whitespace-only → fallback, null + custom fallback, unsafe-integer digits → fallback, past date → 0, future date → 3600) and adds one integration test per caller proving pass-through of value/now/fallback. ❌ A regression in the helper now reaches scheduler + 2 callers at once; helper semantics stay exactly as-is (no hardening) and existing local copies in retry-route/retry-worker are not migrated. Effort: human ~1 hour / CC ~3 min."
+        },
+        {
+          "label": "Local parser + contract tests",
+          "description": "✅ Each caller ships its own ~14-line parser copied verbatim from lib/retry-after.ts, plus a per-caller contract test (~5-8 assertions each) mirroring test/retry-after.test.ts, plus the planned integration test. ✅ Callers stay independent of lib/ and can diverge later without touching the scheduler. ❌ ~28 duplicated implementation lines and two more test suites that must track lib/retry-after.ts by hand; drift between copies is only caught if all suites are updated together. Effort: human ~2 hours / CC ~5 min."
+        },
+        {
+          "label": "Keep plan as drafted",
+          "description": "✅ Matches the current draft: a local ~14-line parser in each caller with only the planned integration test. ✅ Smallest test footprint; no lib/ dependency. ❌ Supplies no shared-contract proof — PLAN.md:4 states required proof cannot be waived, so this leaves the plan non-compliant with itself; any divergence from scheduler semantics is unverified. Effort: human ~1 hour / CC ~3 min."
+        }
+      ]
+    }
+  ]
+}

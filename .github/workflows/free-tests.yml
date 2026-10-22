@@ -1,0 +1,500 @@
+name: Free Tests
+
+# A single duration-balanced plan covers every free test exactly once. Each
+# shard runs serially on its own machine; the aggregate requires every receipt
+# and strict outcome. Tree-mutating files, when present, get a separate machine.
+#
+# Deliberately SECRETLESS: free tests make no API calls, so this lane gets no
+# provider keys at all — least privilege, and fork PRs get real test signal
+# here (the eval matrix skips fork PRs because repository secrets can't reach
+# them). test/free-tests-workflow-wiring.test.ts fails CI if a secret sneaks in.
+#
+# This is a REQUIRED check from day one (branch protection lists it). If it's
+# red, fix or quarantine-with-issue — don't make it advisory; an advisory lane
+# is permanent false comfort.
+#
+# Local `bun run test` still uses the existing bounded process pool.
+
+on:
+  pull_request:
+    branches: [main]
+  # Also on main pushes: two individually-green PRs can merge into a red
+  # main; without this nothing runs the free suite on main until the next PR.
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Keyed on the PR number, not head_ref: a bare branch name carries no fork
+# prefix, so same-name branches from two forks would share one group and a
+# push to fork B's PR would cancel fork A's in-flight REQUIRED check.
+concurrency:
+  group: free-tests-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
+# Least privilege: this job executes PR-controlled code (install lifecycle
+# scripts + the test suite), so the GITHUB_TOKEN gets read-only contents and
+# the checkout doesn't persist it into .git/config.
+permissions:
+  contents: read
+
+jobs:
+  free-plan:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+          # Full history: the seed ratchet compares the allowlist with its
+          # merge-base copy, which a depth-1 checkout cannot read.
+          fetch-depth: 0
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.4.2
+      - id: plan
+        name: Inventory and balance the complete free suite
+        # Warns in the job summary when more than 5 files are unseeded.
+        run: |
+          matrix=$(bun run scripts/test-free-shards.ts --ci-plan "$RUNNER_TEMP/free-plan.json" --shards 20)
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+      - name: Seed growth ratchet (60 s ceiling, shrink-only allowlist)
+        run: |
+          GSTACK_FREE_SEED_BASE="$(git merge-base HEAD origin/main)" bun test test/free-seed-ratchet.test.ts
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: free-plan
+          path: ${{ runner.temp }}/free-plan.json
+          if-no-files-found: error
+
+  cso-macos-launcher:
+    runs-on: macos-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.4.2
+      - name: Install helper dependencies
+        run: bun install --frozen-lockfile --ignore-scripts
+      - name: Build and sign the native macOS startup boundary
+        run: bun run build:cso
+      - name: Exercise hardened-runtime startup and environment scrubbing
+        run: bun run test:cso:macos
+        env:
+          GSTACK_CSO_MACOS_TESTS: "1"
+      - name: Build browser lifecycle prerequisites
+        env:
+          GSTACK_STRICT_BUILD: '1'
+        run: |
+          bunx playwright install chromium
+          bun run build
+      - name: Exercise native agent ownership and linked settings
+        env:
+          TMPDIR: /tmp
+        run: |
+          files=(browse/test/terminal-agent-lifecycle.test.ts browse/test/terminal-agent-native-observation.test.ts browse/test/terminal-agent-watchdog.test.ts browse/test/server-embedder-terminal-port.test.ts browse/test/server-factory.test.ts test/gstack-settings-hook-symlink.test.ts test/gstack-settings-hook-schema-aware.test.ts)
+          for file in "${files[@]}"; do test -f "$file"; done
+          bun test "${files[@]}"
+
+  # Named regressions that only reproduce on macOS's default temp root:
+  # $TMPDIR sits under /var/folders and /var is a symlink to /private/var, so
+  # code that compares a realpath with an unresolved path passes on Linux's
+  # /tmp and fails here (#2982). TMPDIR is deliberately left at the runner's
+  # default, and the job fails if that layout is not symlinked. It also sources
+  # the Codex probe from zsh, macOS's default shell (#3024; no paid call).
+  macos-named-regressions:
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.4.2
+      - name: Install dependencies
+        run: bun install --frozen-lockfile --ignore-scripts
+      - name: Build browser prerequisites
+        env:
+          GSTACK_STRICT_BUILD: '1'
+        run: |
+          bunx playwright install chromium
+          bun run build
+      - name: Configure git identity (tests init temp repos)
+        run: |
+          git config --global user.email "free-tests-ci@gstack.test"
+          git config --global user.name "Free Tests CI"
+          git config --global init.defaultBranch main
+      - name: Codex probe selects a model from zsh, run as a command and sourced (macOS default shell, no paid call)
+        working-directory: ${{ runner.temp }}
+        run: |
+          set -euo pipefail
+          run="$(zsh -c '"$GITHUB_WORKSPACE/bin/gstack-codex-probe" select-model exec' 2>&1)"
+          printf '%s\n' "$run"
+          printf '%s\n' "$run" | grep -E '^CODEX_SEL: [A-Za-z0-9._:/-]+$'
+          out="$(zsh -c 'source "$GITHUB_WORKSPACE/bin/gstack-codex-probe" && _gstack_codex_select_model exec' 2>&1)"
+          printf '%s\n' "$out"
+          printf '%s\n' "$out" | grep -E '^CODEX_MODEL: [A-Za-z0-9._:/-]+ \(exec; source: '
+      - name: Run the named macOS regressions on the default temp root
+        run: |
+          set -euo pipefail
+          tmp="${TMPDIR:-/tmp}"
+          resolved="$(realpath "$tmp")"
+          echo "temp root: $tmp -> $resolved"
+          test "$resolved" != "${tmp%/}"
+          files=(test/gstack-design-detect.test.ts browse/test/chromium-profile-isolation.test.ts test/cso-git-hardening.test.ts test/plan-count-file-permission.test.ts test/spec-quality-gate-secret-sink.test.ts test/gstack-memory-ingest.test.ts test/regression-issue3024-zsh-sourced-helpers.test.ts test/codex-probe-subcommands.test.ts)
+          for file in "${files[@]}"; do test -f "$file"; done
+          bun test "${files[@]}"
+
+  cso-windows-launcher:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.4.2
+      - name: Install helper dependencies
+        run: bun install --frozen-lockfile --ignore-scripts
+      - name: Build the native Windows startup boundary from Git Bash
+        shell: bash
+        run: bun run build:cso
+      - name: Exercise native startup, environment, and argument forwarding
+        run: bun run test:cso:windows
+        env:
+          GSTACK_CSO_WINDOWS_TESTS: "1"
+      - name: Upload #2894 lease diagnostics
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: cso-lease-diagnostics-a${{ github.run_attempt }}
+          path: ${{ runner.temp }}/cso-lease-diagnostics
+          if-no-files-found: ignore
+          retention-days: 14
+
+  cso-docker-integration:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.4.2
+      - name: Require local Docker containment prerequisites
+        # A missing daemon is a failed gate, never a skipped integration test.
+        run: |
+          command -v docker
+          docker --host unix:///var/run/docker.sock info
+          command -v cc
+      - name: Install helper dependencies
+        run: bun install --frozen-lockfile --ignore-scripts
+      - name: Compile trusted CSO helper and watchdog
+        run: bun run build:cso
+      # Only the file that can run here: the node-lifecycle and stack-cold
+      # files need GSTACK_CSO_TEST_STACK images and run in the CSO runtime
+      # workflows (test:cso:docker), so in this job they always skipped.
+      - name: Run CSO Docker integration gate
+        run: |
+          bun test --max-concurrency 1 test/cso-docker-integration.test.ts
+        env:
+          GSTACK_CSO_DOCKER_TESTS: "1"
+          DOCKER_HOST: unix:///var/run/docker.sock
+
+  typecheck:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.4.2
+      - name: Install dependencies
+        run: bun install --frozen-lockfile --ignore-scripts
+      - name: Typecheck product code (zero errors)
+        run: bun run typecheck
+      - name: Test-code type-debt ratchet
+        run: bun run typecheck:test
+      - name: CSO source formatting
+        run: bun run format:cso:check
+
+  # Capy machines install GSTACK_BUN_DEFAULT (bin/gstack-bun-version.sh) when
+  # no project pin decides, above the 1.4.2 minimum every other lane pins, so
+  # the quick tier also runs on it. Its pin equals GSTACK_BUN_DEFAULT;
+  # test/bun-version-drift.test.ts checks this job exists and agrees.
+  quick-bun-default:
+    runs-on: ubicloud-standard-8
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.4.3
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+      - name: Install Playwright Chromium
+        run: npx playwright install --with-deps chromium
+      - name: Configure the bundled Chromium sandbox helper
+        run: |
+          set -euo pipefail
+          chrome=$(bun -e 'import { chromium } from "playwright"; import { realpathSync } from "node:fs"; console.log(realpathSync(chromium.executablePath()))')
+          case "$chrome" in
+            "$HOME"/.cache/ms-playwright/chromium-*/chrome-linux*/chrome) ;;
+            *) echo "Unexpected Chromium installation path" >&2; exit 1 ;;
+          esac
+          helper="${chrome%/*}/chrome_sandbox"
+          installed="${chrome%/*}/chrome-sandbox"
+          test -f "$helper" && test ! -L "$helper"
+          sudo install -T -o root -g root -m 4755 "$helper" "$installed"
+      - name: Install Xvfb + X11 utilities + gate tools
+        run: sudo apt-get install -y --no-install-recommends xvfb x11-utils poppler-utils fonts-noto-color-emoji zsh
+      - name: Configure git identity (tests init temp repos)
+        run: |
+          git config --global user.email "free-tests-ci@gstack.test"
+          git config --global user.name "Free Tests CI"
+          git config --global init.defaultBranch main
+          git config --global --add safe.directory '*'
+      - name: Generate host SKILL.md outputs (.agents, .factory)
+        run: bun run gen:skill-docs --host all
+      - name: Vendor xterm assets into the extension
+        run: bun run vendor:xterm
+      - name: Build server-node bundle (loaded by browse cli imports)
+        run: bash browse/scripts/build-node-server.sh
+      - name: Build gate binaries (make-pdf e2e gates)
+        run: bun run build:gates
+      - name: Build trusted CSO helper used by free contract tests
+        run: bun run build:cso
+      - name: Run the quick free tier on the install-default Bun
+        env:
+          GSTACK_FREE_RETRY_FLAKY: "1"
+          GSTACK_FLAKE_LEDGER: ${{ runner.temp }}/flake-ledger.jsonl
+        run: xvfb-run -a bun run test:quick
+
+  free-suite:
+    needs: free-plan
+    runs-on: ubicloud-standard-8
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      max-parallel: 20
+      matrix: ${{ fromJSON(needs.free-plan.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.4.2
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: free-plan
+          path: ${{ runner.temp }}
+
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: ~/.bun/install/cache
+          key: linux-bun-${{ hashFiles('bun.lock') }}
+          # A lockfile bump starts from the previous cache instead of cold.
+          restore-keys: |
+            linux-bun-
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: ~/.cache/ms-playwright
+          key: linux-playwright-${{ hashFiles('bun.lock') }}
+          restore-keys: |
+            linux-playwright-
+
+      # Cache restores browser binaries; install is still required for system
+      # deps and is a fast no-op for already-present browsers.
+      - name: Install Playwright Chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: Configure the bundled Chromium sandbox helper
+        run: |
+          set -euo pipefail
+          chrome=$(bun -e 'import { chromium } from "playwright"; import { realpathSync } from "node:fs"; console.log(realpathSync(chromium.executablePath()))')
+          case "$chrome" in
+            "$HOME"/.cache/ms-playwright/chromium-*/chrome-linux*/chrome) ;;
+            *) echo "Unexpected Chromium installation path" >&2; exit 1 ;;
+          esac
+          helper="${chrome%/*}/chrome_sandbox"
+          installed="${chrome%/*}/chrome-sandbox"
+          test -f "$helper" && test ! -L "$helper"
+          sudo install -T -o root -g root -m 4755 "$helper" "$installed"
+          test "$(stat -c '%u:%a' "$installed")" = '0:4755'
+          cmp -s "$helper" "$installed"
+
+      # Headed-browser tests (handoff, extension sidepanel DOM) need a real
+      # DISPLAY — first Linux run failed with Playwright's "launched a headed
+      # browser without an XServer" banner. xvfb-run below provides it;
+      # x11-utils ships xdpyinfo for display probing. poppler-utils ships
+      # pdftotext/pdffonts/pdftoppm for the make-pdf e2e gates;
+      # fonts-noto-color-emoji is the emoji-gate's render font (playwright
+      # --with-deps usually installs it, but the gate must not depend on a
+      # transitive package list). Fonts must land BEFORE the first browse
+      # daemon launch — Chromium snapshots fontconfig at startup. zsh is not
+      # in the runner image; without it the bash+zsh portability arms (#2669)
+      # skip instead of running.
+      - name: Install Xvfb + X11 utilities + gate tools
+        run: sudo apt-get install -y --no-install-recommends xvfb x11-utils poppler-utils fonts-noto-color-emoji zsh
+
+      - name: Configure git identity (tests init temp repos)
+        run: |
+          git config --global user.email "free-tests-ci@gstack.test"
+          git config --global user.name "Free Tests CI"
+          git config --global init.defaultBranch main
+          # Some tests run git against the checkout itself; CI checkouts can be
+          # owned by a different uid than the runner user.
+          git config --global --add safe.directory '*'
+
+      - name: Generate host SKILL.md outputs (.agents, .factory)
+        # Golden-file tests read generated host outputs that are gitignored.
+        run: bun run gen:skill-docs --host all
+
+      - name: Vendor xterm assets into the extension
+        # extension/lib/xterm* are gitignored (vendored from npm at build
+        # time). Without them the sidepanel's terminal script bails and the
+        # sidepanel DOM tests time out waiting on init that never happens.
+        run: bun run vendor:xterm
+
+      - name: Build server-node bundle (loaded by browse cli imports)
+        run: bash browse/scripts/build-node-server.sh
+
+      # Narrowed gate build: the make-pdf e2e gates probe make-pdf/dist/pdf,
+      # browse/dist/browse, and the diagram-render bundle, then self-skip when
+      # absent — which made them silently skip on Linux for their whole life
+      # (this lane never built binaries). Full `bun run build` compiles five
+      # binaries and would add ~60-90s to the ONLY required check; the gates
+      # need exactly these three artifacts.
+      - name: Build gate binaries (make-pdf e2e gates)
+        run: bun run build:gates
+
+      - name: Build trusted CSO helper used by free contract tests
+        run: bun run build:cso
+
+      # GSTACK_EXPECT_BINARIES=1 arms make-pdf/test/e2e/ci-prereqs.test.ts:
+      # if a future edit drops the gate build (or poppler), the lane FAILS
+      # instead of the gates silently self-skipping back to false green.
+      - name: Run free suite
+        run: xvfb-run -a bun run test:free --ci-run "$RUNNER_TEMP/free-plan.json" --shard ${{ matrix.shard }} --result "$RUNNER_TEMP/free-results/shard-${{ matrix.shard }}.json"
+        env:
+          GSTACK_EXPECT_BINARIES: "1"
+          # WS1 flake telemetry: a single timing flake must not red the only
+          # required lane — the runner's attribution-gated retry pass (cap 5,
+          # truncation veto) re-runs failing files once, serially, and a
+          # clean retry downgrades to a LOUD flaky-pass. Every flaky-pass is
+          # appended to the ledger (single writer: the parent runner) and
+          # uploaded below, so repeat offenders are an enumerable series —
+          # recorded and ranked, never masked. Pinned by
+          # test/free-tests-workflow-wiring.test.ts.
+          GSTACK_FREE_RETRY_FLAKY: "1"
+          GSTACK_FLAKE_LEDGER: ${{ runner.temp }}/flake-ledger.jsonl
+
+      - name: Upload strict shard result
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: free-result-${{ matrix.shard }}
+          path: ${{ runner.temp }}/free-results/*.json
+          if-no-files-found: error
+
+      # Uploaded unconditionally (not just on failure): a flaky-pass run is
+      # GREEN — that's the point — so its evidence must survive green runs.
+      - name: Upload flake ledger
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: flake-ledger-${{ matrix.shard }}
+          path: ${{ runner.temp }}/flake-ledger.jsonl
+          if-no-files-found: ignore
+          retention-days: 90
+
+      - name: Detect recovered failures for log retention
+        id: flake_spool
+        if: always()
+        run: |
+          if [ -s "$RUNNER_TEMP/flake-ledger.jsonl" ]; then
+            echo 'present=true' >> "$GITHUB_OUTPUT"
+          fi
+
+      # The quiet console omits assertion details. Preserve the original spool
+      # after a recovered retry too, so a green job retains its first failure.
+      - name: Upload shard logs on failure or recovered retry
+        if: failure() || steps.flake_spool.outputs.present == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: free-test-shard-logs-${{ matrix.shard }}
+          path: .context/free-test-logs/gstack-free-test-*.log
+          include-hidden-files: true
+          if-no-files-found: ignore
+
+  # Branch protection already requires the `free-tests` context. Keep that
+  # stable name as an always-running aggregate so every platform-specific CSO
+  # gate is merge-blocking without a separate branch-protection migration.
+  free-tests:
+    if: always()
+    needs: [free-suite, typecheck, quick-bun-default, cso-macos-launcher, macos-named-regressions, cso-windows-launcher, cso-docker-integration]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require the free suite, typecheck, the quick tier on the default Bun, macOS regressions, and every CSO platform gate
+        env:
+          FREE_SUITE_RESULT: ${{ needs.free-suite.result }}
+          TYPECHECK_RESULT: ${{ needs.typecheck.result }}
+          QUICK_BUN_DEFAULT_RESULT: ${{ needs.quick-bun-default.result }}
+          CSO_MACOS_RESULT: ${{ needs.cso-macos-launcher.result }}
+          MACOS_REGRESSIONS_RESULT: ${{ needs.macos-named-regressions.result }}
+          CSO_WINDOWS_RESULT: ${{ needs.cso-windows-launcher.result }}
+          CSO_DOCKER_RESULT: ${{ needs.cso-docker-integration.result }}
+        run: |
+          set -eu
+          test "$FREE_SUITE_RESULT" = success
+          test "$TYPECHECK_RESULT" = success
+          test "$QUICK_BUN_DEFAULT_RESULT" = success
+          test "$CSO_MACOS_RESULT" = success
+          test "$MACOS_REGRESSIONS_RESULT" = success
+          test "$CSO_WINDOWS_RESULT" = success
+          test "$CSO_DOCKER_RESULT" = success
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.4.2
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: free-plan
+          path: ${{ runner.temp }}
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          pattern: free-result-*
+          merge-multiple: true
+          path: ${{ runner.temp }}/free-results
+      # Per-shard ledgers land in their own subdirectories (all are named
+      # flake-ledger.jsonl). A green run is where a retried flake hides, so the
+      # summary runs before strict verification.
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          pattern: flake-ledger-*
+          path: ${{ runner.temp }}/flake-ledgers
+      - name: Summarize flaky passes absorbed by the serial retry
+        run: bun run scripts/test-health-report.ts flake-summary "$RUNNER_TEMP/flake-ledgers" >> "$GITHUB_STEP_SUMMARY"
+      - name: Require exact coverage and complete strict results
+        run: bun run scripts/test-free-shards.ts --ci-verify "$RUNNER_TEMP/free-plan.json" --results "$RUNNER_TEMP/free-results"

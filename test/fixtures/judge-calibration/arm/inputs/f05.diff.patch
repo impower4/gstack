@@ -1,0 +1,96 @@
+diff --git a/deploy.sh b/deploy.sh
+index 7571dff..6ff395a 100644
+--- a/deploy.sh
++++ b/deploy.sh
+@@ -1,10 +1,28 @@
+ #!/usr/bin/env bash
+ set -euo pipefail
+ 
++SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
++# shellcheck source=lib/log.sh
++source "$SCRIPT_DIR/lib/log.sh"
++
++while [[ $# -gt 0 ]]; do
++  case "$1" in
++    -v|--verbose) LOG_LEVEL=DEBUG ;;
++    -q|--quiet) LOG_LEVEL=WARN ;;
++    *) log::error "unknown option: $1"; exit 2 ;;
++  esac
++  shift
++done
++
+ HOST="${DEPLOY_HOST:-app1.internal}"
+ TARGET="/srv/trailhead"
+ 
+-echo "deploying to $HOST"
+-rsync -az --delete build/ "deploy@$HOST:$TARGET/"
+-ssh "deploy@$HOST" "sudo systemctl restart trailhead"
+-echo "done"
++run() {
++  log::debug "+ $*"
++  "$@"
++}
++
++log::info "deploying to $HOST"
++run rsync -az --delete build/ "deploy@$HOST:$TARGET/"
++run ssh "deploy@$HOST" "sudo systemctl restart trailhead"
++log::info "done"
+diff --git a/lib/log.sh b/lib/log.sh
+new file mode 100644
+index 0000000..f18b845
+--- /dev/null
++++ b/lib/log.sh
+@@ -0,0 +1,53 @@
++#!/usr/bin/env bash
++# Reusable leveled logger for shell scripts.
++#   LOG_LEVEL   DEBUG|INFO|WARN|ERROR (default INFO)
++#   LOG_FILE    optional path; lines are also appended there
++#   LOG_MAX_KB  rotate LOG_FILE to LOG_FILE.1 past this size (default 1024)
++#   LOG_COLOR   auto|always|never (default auto: colour only on a tty)
++
++: "${LOG_LEVEL:=INFO}"
++: "${LOG_MAX_KB:=1024}"
++: "${LOG_COLOR:=auto}"
++
++declare -A _LOG_RANK=([DEBUG]=10 [INFO]=20 [WARN]=30 [ERROR]=40)
++declare -A _LOG_COLOR=([DEBUG]=$'\e[2m' [INFO]='' [WARN]=$'\e[33m' [ERROR]=$'\e[31m')
++_LOG_RESET=$'\e[0m'
++
++_log_use_color() {
++  case "$LOG_COLOR" in
++    always) return 0 ;;
++    never) return 1 ;;
++    *) [[ -t 2 ]] ;;
++  esac
++}
++
++_log_rotate() {
++  [[ -n "${LOG_FILE:-}" && -f "$LOG_FILE" ]] || return 0
++  local size_kb
++  size_kb=$(( $(wc -c < "$LOG_FILE") / 1024 ))
++  if (( size_kb > LOG_MAX_KB )); then
++    mv -f "$LOG_FILE" "$LOG_FILE.1"
++  fi
++}
++
++_log() {
++  local level="$1"; shift
++  (( ${_LOG_RANK[$level]} >= ${_LOG_RANK[$LOG_LEVEL]} )) || return 0
++  local line="$*"
++  if [[ -n "${LOG_FILE:-}" ]]; then
++    _log_rotate
++    printf '%s [%s] %s\n' "$(date -u +%FT%TZ)" "$level" "$line" >> "$LOG_FILE"
++  fi
++  local out=1
++  [[ "$level" == WARN || "$level" == ERROR ]] && out=2
++  if _log_use_color && [[ -n "${_LOG_COLOR[$level]}" ]]; then
++    printf '%s%s%s\n' "${_LOG_COLOR[$level]}" "$line" "$_LOG_RESET" >&"$out"
++  else
++    printf '%s\n' "$line" >&"$out"
++  fi
++}
++
++log::debug() { _log DEBUG "$@"; }
++log::info()  { _log INFO "$@"; }
++log::warn()  { _log WARN "$@"; }
++log::error() { _log ERROR "$@"; }

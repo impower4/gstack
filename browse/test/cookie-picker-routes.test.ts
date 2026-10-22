@@ -6,8 +6,18 @@
  * CORS headers, and JSON response formats.
  */
 
-import { describe, test, expect } from 'bun:test';
+import { afterAll, describe, test, expect } from 'bun:test';
 import { handleCookiePickerRoute, generatePickerCode, hasActivePicker } from '../src/cookie-picker-routes';
+
+afterAll(() => {
+  const realNow = Date.now;
+  Date.now = () => realNow() + 3_700_000;
+  try {
+    expect(hasActivePicker()).toBe(false);
+  } finally {
+    Date.now = realNow;
+  }
+});
 
 // ─── Mock BrowserManager ──────────────────────────────────────
 
@@ -368,16 +378,20 @@ describe('cookie-picker-routes', () => {
 
       expect(html).not.toContain(authToken);
       expect(html).not.toContain('AUTH_TOKEN');
+      expect(html).not.toContain(session);
     });
 
     test('data routes accept session cookie', async () => {
       const { bm } = mockBrowserManager();
       const session = await getSessionCookie(bm, 'test-token');
+      const document = await handleCookiePickerRoute(makeUrl('/cookie-picker'), makeReq('GET', undefined, { Cookie: `gstack_picker=${session}` }), bm, 'test-token');
+      const html = await document.text();
+      const { pickerInstance } = JSON.parse(html.match(/<script id="picker-config" type="application\/json">(.*?)<\/script>/s)![1]);
 
       const url = makeUrl('/cookie-picker/browsers');
       const req = new Request('http://127.0.0.1:9470', {
         method: 'GET',
-        headers: { 'Cookie': `gstack_picker=${session}` },
+        headers: { 'Cookie': `gstack_picker=${session}`, 'X-Gstack-Picker-Instance': pickerInstance },
       });
 
       const res = await handleCookiePickerRoute(url, req, bm, 'test-token');

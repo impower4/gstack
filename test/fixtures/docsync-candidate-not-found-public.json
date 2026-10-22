@@ -1,0 +1,308 @@
+{
+ "sourceRun": "39223031058 slice 2 ship-docsync-current (PR #3295 head 3918043)",
+ "sourceFileSha256": "7e4a144fcb47cfff0d54f51a839dd51451054cd8af9e9d36c73516b8b0ae6aef",
+ "note": "Every tool call of the captured parent and child in order. {home} is the fixture home and {shard} its shard root. Inputs keep only command or file_path; outputs are kept only for gstack-docs-candidate calls and failed calls.",
+ "calls": [
+  {
+   "tool": "Read",
+   "input": {
+    "file_path": "{home}/phase.md"
+   },
+   "output": ""
+  },
+  {
+   "tool": "Read",
+   "input": {
+    "file_path": "{home}/fixture-interface.md"
+   },
+   "output": ""
+  },
+  {
+   "tool": "Read",
+   "input": {
+    "file_path": "{home}/.claude/skills/gstack/ship/sections/documentation.md"
+   },
+   "output": ""
+  },
+  {
+   "tool": "Bash",
+   "input": {
+    "command": "find {home}/.claude/skills/gstack/document-release {home}/.claude/skills/gstack/bin -maxdepth 3"
+   },
+   "output": ""
+  },
+  {
+   "tool": "Read",
+   "input": {
+    "file_path": "{home}/.claude/skills/gstack/document-release/SKILL.md"
+   },
+   "output": ""
+  },
+  {
+   "tool": "Read",
+   "input": {
+    "file_path": "{home}/.claude/skills/gstack/document-release/sections/audit-scope.md"
+   },
+   "output": ""
+  },
+  {
+   "tool": "Read",
+   "input": {
+    "file_path": "{home}/.claude/skills/gstack/document-release/sections/release-body.md"
+   },
+   "output": ""
+  },
+  {
+   "tool": "Bash",
+   "input": {
+    "command": "git status"
+   },
+   "output": ""
+  },
+  {
+   "tool": "Bash",
+   "input": {
+    "command": "git merge-base main HEAD"
+   },
+   "output": ""
+  },
+  {
+   "tool": "Bash",
+   "input": {
+    "command": "git ls-files --cached --others --exclude-standard"
+   },
+   "output": ""
+  },
+  {
+   "tool": "Bash",
+   "input": {
+    "command": "{home}/.claude/skills/gstack/bin/gstack-docs-candidate --help"
+   },
+   "output": "usage: gstack-docs-candidate snapshot --out <candidate.json> --audit-id <id> --mode edit|read-only --base <rev> [--select <path>]... [--docs <path>]...\n       gstack-docs-candidate compare <candidate.json>"
+  },
+  {
+   "tool": "Bash",
+   "input": {
+    "command": "git diff c37ee3a1a1c98972abc7cd26cb49a6f388c7c608 HEAD --stat"
+   },
+   "output": ""
+  },
+  {
+   "tool": "Bash",
+   "input": {
+    "command": "git diff c37ee3a1a1c98972abc7cd26cb49a6f388c7c608 HEAD"
+   },
+   "output": ""
+  },
+  {
+   "tool": "Bash",
+   "input": {
+    "command": "ls -la {home} {home}/repo"
+   },
+   "output": ""
+  },
+  {
+   "tool": "Bash",
+   "input": {
+    "command": "{home}/.claude/skills/gstack/bin/gstack-docs-candidate snapshot --out {home}/ship2-docs-a1.json --audit-id ship2-docs-20261019-a1 --mode edit --base c37ee3a1a1c98972abc7cd26cb49a6f388c7c608 --docs handbook --docs README.md --docs AGENTS.md"
+   },
+   "output": "CANDIDATE: {home}/ship2-docs-a1.json\nbase=c37ee3a1a1c98972abc7cd26cb49a6f388c7c608 head=940ecb8e1008f52768d1f98ffed974d039a32251 branch=feature/docs mode=edit\ncommitted=1 staged=0 unstaged=0 untracked=1 selected=2 docs=3 hashed=4\ncommitted: \"handbook/reference/commands/widget.md.tmpl\"\nuntracked: \"personal-note.txt\"\ndocs: \"AGENTS.md\" \"README.md\" \"handbook/reference/commands/widget.md.tmpl\""
+  },
+  {
+   "tool": "Bash",
+   "input": {
+    "command": "{home}/.claude/skills/gstack/bin/gstack-docs-candidate snapshot --out {home}/ship2-docs-a1.json --audit-id ship2-docs-20261019-a1 --mode edit --base c37ee3a1a1c98972abc7cd26cb49a6f388c7c608 --select handbook/reference/commands/widget.md.tmpl --docs handbook --docs README.md --docs AGENTS.md"
+   },
+   "output": "CANDIDATE: {home}/ship2-docs-a1.json\nbase=c37ee3a1a1c98972abc7cd26cb49a6f388c7c608 head=940ecb8e1008f52768d1f98ffed974d039a32251 branch=feature/docs mode=edit\ncommitted=1 staged=0 unstaged=0 untracked=1 selected=1 docs=3 hashed=4\ncommitted: \"handbook/reference/commands/widget.md.tmpl\"\nuntracked: \"personal-note.txt\"\ndocs: \"AGENTS.md\" \"README.md\" \"handbook/reference/commands/widget.md.tmpl\""
+  },
+  {
+   "tool": "Agent",
+   "input": {
+    "run_in_background": false
+   },
+   "output": ""
+  },
+  {
+   "tool": "Read",
+   "input": {
+    "file_path": "{home}/fixture-interface.md"
+   },
+   "output": ""
+  },
+  {
+   "tool": "Read",
+   "input": {
+    "file_path": "{home}/.claude/skills/gstack/document-release/SKILL.md"
+   },
+   "output": ""
+  },
+  {
+   "tool": "Read",
+   "input": {
+    "file_path": "{home}/.claude/skills/gstack/document-release/sections/audit-scope.md"
+   },
+   "output": ""
+  },
+  {
+   "tool": "Read",
+   "input": {
+    "file_path": "{home}/.claude/skills/gstack/document-release/sections/release-body.md"
+   },
+   "output": ""
+  },
+  {
+   "tool": "Bash",
+   "input": {
+    "command": "GSTACK_SESSION_KIND=spawned {home}/.claude/skills/gstack/bin/gstack-skill-start --skill document-release --model claude"
+   },
+   "output": ""
+  },
+  {
+   "tool": "Bash",
+   "input": {
+    "command": "cat {home}/ship2-docs-a1.json"
+   },
+   "output": ""
+  },
+  {
+   "tool": "Bash",
+   "input": {
+    "command": "git status"
+   },
+   "output": ""
+  },
+  {
+   "tool": "Bash",
+   "input": {
+    "command": "git ls-files -z --cached --others --exclude-standard"
+   },
+   "output": ""
+  },
+  {
+   "tool": "Bash",
+   "input": {
+    "command": "git diff c37ee3a1a1c98972abc7cd26cb49a6f388c7c608 HEAD"
+   },
+   "output": ""
+  },
+  {
+   "tool": "Bash",
+   "input": {
+    "command": "git diff --cached"
+   },
+   "output": ""
+  },
+  {
+   "tool": "Bash",
+   "input": {
+    "command": "git diff"
+   },
+   "output": ""
+  },
+  {
+   "tool": "Bash",
+   "input": {
+    "command": "cat AGENTS.md README.md handbook/reference/commands/widget.md.tmpl app.ts package.json"
+   },
+   "output": ""
+  },
+  {
+   "tool": "Bash",
+   "input": {
+    "command": "git log c37ee3a1a1c98972abc7cd26cb49a6f388c7c608..HEAD --oneline"
+   },
+   "output": ""
+  },
+  {
+   "tool": "Bash",
+   "input": {
+    "command": "cat CHANGELOG.md VERSION TODOS.md"
+   },
+   "output": ""
+  },
+  {
+   "tool": "Bash",
+   "input": {
+    "command": "{home}/.claude/skills/gstack/bin/gstack-skill-end --skill document-release --outcome success --session-id 842-1792399327-88f7a744 --tel-start 1792399327 --used-browse no"
+   },
+   "output": ""
+  },
+  {
+   "tool": "Bash",
+   "input": {
+    "command": "{shard}/.claude/skills/gstack/bin/gstack-docs-candidate compare {home}/ship2-docs-a1.json"
+   },
+   "output": "Exit code 127\n(eval):1: no such file or directory: {shard}/.claude/skills/gstack/bin/gstack-docs-candidate"
+  },
+  {
+   "tool": "Bash",
+   "input": {
+    "command": "{home}/.claude/skills/gstack/bin/gstack-docs-candidate compare {home}/ship2-docs-a1.json"
+   },
+   "output": "{\"audit_id\":\"ship2-docs-20261019-a1\",\"head_changed\":false,\"index_changed\":false,\"content_changed\":[],\"newly_dirty\":[]}"
+  },
+  {
+   "tool": "Bash",
+   "input": {
+    "command": "git status"
+   },
+   "output": ""
+  },
+  {
+   "tool": "Bash",
+   "input": {
+    "command": "git rev-parse HEAD"
+   },
+   "output": ""
+  },
+  {
+   "tool": "Bash",
+   "input": {
+    "command": "cat app.ts README.md AGENTS.md handbook/reference/commands/widget.md.tmpl CHANGELOG.md VERSION package.json TODOS.md"
+   },
+   "output": ""
+  },
+  {
+   "tool": "Bash",
+   "input": {
+    "command": "{home}/.claude/skills/gstack/bin/gstack-docs-candidate snapshot --out {home}/ship2-docs-20261019-a1-post.json --audit-id ship2-docs-20261019-a1 --mode edit --base c37ee3a1a1c98972abc7cd26cb49a6f388c7c608 --select handbook/reference/commands/widget.md.tmpl --docs handbook --docs README.md --docs AGENTS.md"
+   },
+   "output": "CANDIDATE: {home}/ship2-docs-20261019-a1-post.json\nbase=c37ee3a1a1c98972abc7cd26cb49a6f388c7c608 head=940ecb8e1008f52768d1f98ffed974d039a32251 branch=feature/docs mode=edit\ncommitted=1 staged=0 unstaged=0 untracked=1 selected=1 docs=3 hashed=4\ncommitted: \"handbook/reference/commands/widget.md.tmpl\"\nuntracked: \"personal-note.txt\"\ndocs: \"AGENTS.md\" \"README.md\" \"handbook/reference/commands/widget.md.tmpl\""
+  },
+  {
+   "tool": "Write",
+   "input": {
+    "file_path": "{home}/ship2-docs-20261019-a1-documentation.md"
+   },
+   "output": ""
+  },
+  {
+   "tool": "Write",
+   "input": {
+    "file_path": "{home}/ship-report.md"
+   },
+   "output": ""
+  },
+  {
+   "tool": "Bash",
+   "input": {
+    "command": "cat {home}/ship2-docs-20261019-a1-documentation.md >> {home}/ship-report.md"
+   },
+   "output": ""
+  },
+  {
+   "tool": "Bash",
+   "input": {
+    "command": "bun {home}/fixture-publish.ts"
+   },
+   "output": ""
+  },
+  {
+   "tool": "Edit",
+   "input": {
+    "file_path": "{home}/ship-report.md"
+   },
+   "output": ""
+  }
+ ]
+}

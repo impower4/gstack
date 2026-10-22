@@ -1,0 +1,164 @@
+[
+  {
+    "url": "https://github.com/garrytan/gstack.git",
+    "canonical": "github.com/garrytan/gstack",
+    "slug": "garrytan-gstack",
+    "legacy_slug": "garrytan-gstack"
+  },
+  {
+    "url": "https://github.com/garrytan/gstack",
+    "canonical": "github.com/garrytan/gstack",
+    "slug": "garrytan-gstack",
+    "legacy_slug": "garrytan-gstack"
+  },
+  {
+    "url": "git@github.com:garrytan/gstack.git",
+    "canonical": "github.com/garrytan/gstack",
+    "slug": "garrytan-gstack",
+    "legacy_slug": "garrytan-gstack"
+  },
+  {
+    "url": "ssh://git@github.com/garrytan/gstack.git",
+    "canonical": "github.com/garrytan/gstack",
+    "slug": "garrytan-gstack",
+    "legacy_slug": "garrytan-gstack"
+  },
+  {
+    "url": "https://GitHub.COM/garrytan/gstack/",
+    "canonical": "github.com/garrytan/gstack",
+    "slug": "httpsGitHub.COMgarrytangstack",
+    "legacy_slug": "httpsGitHub.COMgarrytangstack"
+  },
+  {
+    "url": "https://gitlab.com/customer-a/product/repo.git",
+    "canonical": "gitlab.com/customer-a/product/repo",
+    "slug": "product-repo-5eca1fe041984543",
+    "legacy_slug": "product-repo"
+  },
+  {
+    "url": "git@gitlab.com:customer-a/product/repo.git",
+    "canonical": "gitlab.com/customer-a/product/repo",
+    "slug": "product-repo-5eca1fe041984543",
+    "legacy_slug": "product-repo"
+  },
+  {
+    "url": "ssh://git@gitlab.com:2222/customer-a/product/repo.git",
+    "canonical": "gitlab.com/customer-a/product/repo",
+    "slug": "product-repo-5eca1fe041984543",
+    "legacy_slug": "product-repo"
+  },
+  {
+    "url": "https://oauth2:PASSWORD@GitLab.com:8443/customer-a/product/repo.git",
+    "canonical": "gitlab.com/customer-a/product/repo",
+    "slug": "product-repo-5eca1fe041984543",
+    "legacy_slug": "product-repo"
+  },
+  {
+    "url": "https://gitlab.com/customer-b/product/repo.git",
+    "canonical": "gitlab.com/customer-b/product/repo",
+    "slug": "product-repo-3c13cab341f442f8",
+    "legacy_slug": "product-repo"
+  },
+  {
+    "url": "git@gitlab.example.com:group/sub/team/repo.git",
+    "canonical": "gitlab.example.com/group/sub/team/repo",
+    "slug": "team-repo-da3955fc2f81a1a1",
+    "legacy_slug": "team-repo"
+  },
+  {
+    "url": "https://gitlab.example.com/group/sub/team/repo",
+    "canonical": "gitlab.example.com/group/sub/team/repo",
+    "slug": "team-repo-da3955fc2f81a1a1",
+    "legacy_slug": "team-repo"
+  },
+  {
+    "url": "https://dev.azure.com/org/project/_git/repo",
+    "canonical": "dev.azure.com/org/project/repo",
+    "slug": "project-repo-a4383ea5249af29a",
+    "legacy_slug": "_git-repo"
+  },
+  {
+    "url": "https://org@dev.azure.com/org/project/_git/repo",
+    "canonical": "dev.azure.com/org/project/repo",
+    "slug": "project-repo-a4383ea5249af29a",
+    "legacy_slug": "_git-repo"
+  },
+  {
+    "url": "git@ssh.dev.azure.com:v3/org/project/repo",
+    "canonical": "dev.azure.com/org/project/repo",
+    "slug": "project-repo-a4383ea5249af29a",
+    "legacy_slug": "project-repo"
+  },
+  {
+    "url": "https://org.visualstudio.com/project/_git/repo",
+    "canonical": "dev.azure.com/org/project/repo",
+    "slug": "project-repo-a4383ea5249af29a",
+    "legacy_slug": "_git-repo"
+  },
+  {
+    "url": "https://org.visualstudio.com/DefaultCollection/project/_git/repo",
+    "canonical": "dev.azure.com/org/project/repo",
+    "slug": "project-repo-a4383ea5249af29a",
+    "legacy_slug": "_git-repo"
+  },
+  {
+    "url": "org@vs-ssh.visualstudio.com:v3/org/project/repo",
+    "canonical": "dev.azure.com/org/project/repo",
+    "slug": "project-repo-a4383ea5249af29a",
+    "legacy_slug": "project-repo"
+  },
+  {
+    "url": "https://bitbucket.example.com/scm/proj/repo.git",
+    "canonical": "bitbucket.example.com/proj/repo",
+    "slug": "proj-repo",
+    "legacy_slug": "proj-repo"
+  },
+  {
+    "url": "ssh://git@bitbucket.example.com:7999/proj/repo.git",
+    "canonical": "bitbucket.example.com/proj/repo",
+    "slug": "proj-repo",
+    "legacy_slug": "proj-repo"
+  },
+  {
+    "url": "/srv/git/team/product/repo.git",
+    "canonical": "/srv/git/team/product/repo",
+    "slug": "product-repo",
+    "legacy_slug": "product-repo"
+  },
+  {
+    "url": "file:///srv/git/repo.git",
+    "canonical": "/srv/git/repo",
+    "slug": "git-repo",
+    "legacy_slug": "git-repo"
+  },
+  {
+    "url": "../sibling-repo",
+    "canonical": "../sibling-repo",
+    "slug": "..sibling-repo",
+    "legacy_slug": "..sibling-repo"
+  },
+  {
+    "url": "..",
+    "canonical": "..",
+    "slug": "",
+    "legacy_slug": ""
+  },
+  {
+    "url": "https://host/onlyrepo.git",
+    "canonical": "host/onlyrepo",
+    "slug": "host-onlyrepo",
+    "legacy_slug": "host-onlyrepo"
+  },
+  {
+    "url": "C:/repos/a/b/c.git",
+    "canonical": "C:/repos/a/b/c",
+    "slug": "b-c",
+    "legacy_slug": "b-c"
+  },
+  {
+    "url": "https://[2001:db8::1]:8443/grp/sub/repo.git",
+    "canonical": "[2001:db8::1]/grp/sub/repo",
+    "slug": "sub-repo-4278116e81ebff80",
+    "legacy_slug": "sub-repo"
+  }
+]

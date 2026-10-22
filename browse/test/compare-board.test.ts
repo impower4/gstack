@@ -10,23 +10,57 @@
  * No LLM involved — this is a deterministic functional test.
  */
 
-import { describe, test, expect, beforeAll, afterAll } from 'bun:test';
+import * as os from 'os';
+import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { BrowserManager } from '../src/browser-manager';
 import { handleReadCommand as _handleReadCommand } from '../src/read-commands';
 import { handleWriteCommand as _handleWriteCommand } from '../src/write-commands';
 
 const handleReadCommand = (cmd: string, args: string[], b: BrowserManager) =>
-  _handleReadCommand(cmd, args, b.getActiveSession());
+  _handleReadCommand(cmd, args, b.getActiveSession(), b);
 const handleWriteCommand = (cmd: string, args: string[], b: BrowserManager) =>
   _handleWriteCommand(cmd, args, b.getActiveSession(), b);
 import { generateCompareHtml } from '../../design/src/compare';
 import * as fs from 'fs';
 import * as path from 'path';
 
+// Per-FILE Chromium profile: this file launches an in-process persistent
+// context (BrowserManager.launch()), and sharing a profile dir with the
+// long-lived browse daemon a sibling file may have spawned kills one side's
+// Chromium (ProcessSingleton on user-data-dir). Scoped via hooks, never
+// module scope (see test/gstack-home-module-scope.test.ts's rationale).
+const ORIGINAL_CHROMIUM_PROFILE = process.env.CHROMIUM_PROFILE;
+let CHROMIUM_PROFILE_DIR: string | undefined;
+beforeAll(() => {
+  CHROMIUM_PROFILE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'gstack-test-profile-'));
+  process.env.CHROMIUM_PROFILE = CHROMIUM_PROFILE_DIR;
+});
+afterAll(() => {
+  if (ORIGINAL_CHROMIUM_PROFILE === undefined) delete process.env.CHROMIUM_PROFILE;
+  else process.env.CHROMIUM_PROFILE = ORIGINAL_CHROMIUM_PROFILE;
+  if (CHROMIUM_PROFILE_DIR) { try { fs.rmSync(CHROMIUM_PROFILE_DIR, { recursive: true, force: true }); } catch {} }
+});
+
+
 let bm: BrowserManager;
 let boardUrl: string;
 let server: ReturnType<typeof Bun.serve>;
 let tmpDir: string;
+
+/**
+ * The board settles its post-submit state after the feedback POST resolves, a
+ * network round trip after the click. Poll for that settled state instead of
+ * reading it once: a single read races the round trip under a loaded runner.
+ */
+async function settledJs(expression: string, expected: string, timeoutMs = 10_000): Promise<string> {
+  const deadline = Date.now() + timeoutMs;
+  let value = await handleReadCommand('js', [expression], bm);
+  while (value !== expected && Date.now() < deadline) {
+    await Bun.sleep(25);
+    value = await handleReadCommand('js', [expression], bm);
+  }
+  return value;
+}
 
 // Create a minimal 1x1 pixel PNG for test variants
 function createTestPng(filePath: string): void {
@@ -69,10 +103,15 @@ beforeAll(async () => {
   await handleWriteCommand('goto', [boardUrl], bm);
 });
 
-afterAll(() => {
+afterAll(async () => {
   try { server.stop(); } catch {}
   fs.rmSync(tmpDir, { recursive: true, force: true });
-  setTimeout(() => process.exit(0), 500);
+  // Close only this file's own browser — never process.exit(): bun test runs
+  // all files in one process, so a delayed exit kills the whole suite
+  // (see test/no-suicide-exit.test.ts). close() can hang when the browser
+  // already died, and its internal 5s timeout ties bun's 5s hook timeout —
+  // so race it at 3s and abandon; the child is reaped at process exit.
+  try { await Promise.race([bm?.close(), new Promise((resolve) => setTimeout(resolve, 3000))]); } catch {}
 });
 
 // ─── DOM Structure ──────────────────────────────────────────────
@@ -211,16 +250,12 @@ describe('Submit feedback flow', () => {
   });
 
   test('submit button is disabled after submission', async () => {
-    const disabled = await handleReadCommand('js', [
-      'document.getElementById("submit-btn").disabled'
-    ], bm);
+    const disabled = await settledJs('document.getElementById("submit-btn").disabled', 'true');
     expect(disabled).toBe('true');
   });
 
   test('success message is visible after submission', async () => {
-    const display = await handleReadCommand('js', [
-      'document.getElementById("success-msg").style.display'
-    ], bm);
+    const display = await settledJs('document.getElementById("success-msg").style.display', 'block');
     expect(display).toBe('block');
   });
 });

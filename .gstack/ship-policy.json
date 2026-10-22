@@ -1,0 +1,17 @@
+{
+  "$schema": "https://github.com/garrytan/gstack/docs/ship-policy.md#schema-v1",
+  "bump": "patch",
+  "queue_mode": "stamp-at-merge",
+  "release_tool": "bun scripts/gen-agents-digest.ts",
+  "release_outputs": ["agents-digest/gstack-AGENTS.md"],
+  "stamp_paths": [],
+  "changelog": "CHANGELOG.md",
+  "mirror": null,
+  "history": "squash-ok",
+  "preregistration_shas": [],
+  "stamp_sensitive_gates": ["tests"],
+  "pr_count": { "default_pr_count": 1, "split_requires_owner": true },
+  "maintainers": ["garrytan"],
+  "train": { "gate_workflow": "evals.yml", "free_workflow": "free-tests.yml", "full_gate_check": "gstack/full-gate", "record_artifact": "gstack-train-record", "max_size": 5, "fill_hours": 3, "screen_selection": "gstack-paid", "trial_reservation_usd": 1.5 },
+  "min_gstack_version": "1.91.146.0"
+}

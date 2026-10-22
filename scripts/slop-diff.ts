@@ -1,4 +1,4 @@
-#!/usr/bin/env bun
+#!/usr/bin/env -S bun --no-env-file --config=/dev/null
 /**
  * slop-diff: show NEW slop-scan findings introduced on this branch.
  *

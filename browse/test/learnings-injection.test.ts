@@ -9,14 +9,14 @@ const BIN_DIR = path.join(import.meta.dir, '../../bin');
 
 describe('gstack-learnings-search injection safety', () => {
   it('must not interpolate variables into JS string literals', () => {
-    const jsBlock = SCRIPT.slice(SCRIPT.indexOf('bun -e'));
+    const jsBlock = SCRIPT.slice(SCRIPT.indexOf('bun --no-env-file --config=/dev/null -e'));
     expect(jsBlock).not.toMatch(/const \w+ = '\$\{/);
     expect(jsBlock).not.toMatch(/= \$\{[A-Z_]+\};/);
     expect(jsBlock).not.toMatch(/'\$\{CROSS_PROJECT\}'/);
   });
 
   it('must use process.env for parameters', () => {
-    const jsBlock = SCRIPT.slice(SCRIPT.indexOf('bun -e'));
+    const jsBlock = SCRIPT.slice(SCRIPT.indexOf('bun --no-env-file --config=/dev/null -e'));
     expect(jsBlock).toContain('process.env');
   });
 });

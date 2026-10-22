@@ -1,0 +1,301 @@
+{
+ "note": "Public HANDOFF.md Reads and completed:true gstack-review-log records, with their results, from two failed review-exploratory-small-cli attempts; fixture paths are rewritten to /fixture-root.",
+ "attempts": [
+  {
+   "source": "run 39320737890 paid-slice-8-a1 review-exploratory-small-cli",
+   "head": "f278f5b",
+   "sourceEventIndices": [
+    541,
+    547,
+    580,
+    584,
+    817,
+    821
+   ],
+   "events": [
+    {
+     "type": "assistant",
+     "session_id": "0fa1b922-1e77-4aa4-a152-a33997782193",
+     "parent_tool_use_id": null,
+     "message": {
+      "id": "msg_011CgCFmhNcdng5NVrYMeEXc",
+      "role": "assistant",
+      "content": [
+       {
+        "type": "tool_use",
+        "id": "toolu_018VDo7yRPYpS71H6uZZQXfr",
+        "name": "Read",
+        "input": {
+         "file_path": "/fixture-root/product/HANDOFF.md"
+        },
+        "caller": {
+         "type": "direct"
+        }
+       }
+      ]
+     }
+    },
+    {
+     "type": "user",
+     "session_id": "0fa1b922-1e77-4aa4-a152-a33997782193",
+     "parent_tool_use_id": null,
+     "tool_use_result": {
+      "type": "text",
+      "file": {
+       "filePath": "/fixture-root/product/HANDOFF.md",
+       "content": "No concurrent input update.\n",
+       "numLines": 2,
+       "startLine": 1,
+       "totalLines": 2
+      }
+     },
+     "message": {
+      "role": "user",
+      "content": [
+       {
+        "tool_use_id": "toolu_018VDo7yRPYpS71H6uZZQXfr",
+        "type": "tool_result",
+        "content": "1\tNo concurrent input update.\n2\t"
+       }
+      ]
+     }
+    },
+    {
+     "type": "assistant",
+     "session_id": "0fa1b922-1e77-4aa4-a152-a33997782193",
+     "parent_tool_use_id": null,
+     "message": {
+      "id": "msg_011CgCFmhNcdng5NVrYMeEXc",
+      "role": "assistant",
+      "content": [
+       {
+        "type": "tool_use",
+        "id": "toolu_01RE7HZrWaWAoZyEhpSQthmp",
+        "name": "Bash",
+        "input": {
+         "command": "/fixture-root/host/runtime/bin/gstack-review-log '{\"skill\":\"adversarial-review\",\"timestamp\":\"'\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"'\",\"status\":\"issues_found\",\"source\":\"in-host\",\"host\":\"claude\",\"outside_provider\":\"codex\",\"outside_status\":\"unavailable\",\"phase\":\"adversarial\",\"tier\":\"always\",\"gate\":\"informational\",\"commit\":\"'\"$(git rev-parse --short HEAD)\"'\",\"completed\":true,\"converged\":true}' --finish be9a452e-5250-4734-8c5a-3cb4922ea744",
+         "description": "Persist native adversarial review record"
+        },
+        "caller": {
+         "type": "direct"
+        }
+       }
+      ]
+     }
+    },
+    {
+     "type": "user",
+     "session_id": "0fa1b922-1e77-4aa4-a152-a33997782193",
+     "parent_tool_use_id": null,
+     "tool_use_result": {
+      "stdout": "",
+      "stderr": "",
+      "interrupted": false,
+      "isImage": false,
+      "noOutputExpected": false
+     },
+     "message": {
+      "role": "user",
+      "content": [
+       {
+        "tool_use_id": "toolu_01RE7HZrWaWAoZyEhpSQthmp",
+        "type": "tool_result",
+        "content": "(Bash completed with no output)",
+        "is_error": false
+       }
+      ]
+     }
+    },
+    {
+     "type": "assistant",
+     "session_id": "0fa1b922-1e77-4aa4-a152-a33997782193",
+     "parent_tool_use_id": null,
+     "message": {
+      "id": "msg_011CgCFoAqtJycy2UWEB8WG7",
+      "role": "assistant",
+      "content": [
+       {
+        "type": "tool_use",
+        "id": "toolu_011TvxdKFapV3hPc7FKpnW7G",
+        "name": "Read",
+        "input": {
+         "file_path": "/fixture-root/product/HANDOFF.md"
+        },
+        "caller": {
+         "type": "direct"
+        }
+       }
+      ]
+     }
+    },
+    {
+     "type": "user",
+     "session_id": "0fa1b922-1e77-4aa4-a152-a33997782193",
+     "parent_tool_use_id": null,
+     "tool_use_result": {
+      "type": "file_unchanged",
+      "file": {
+       "filePath": "/fixture-root/product/HANDOFF.md"
+      }
+     },
+     "message": {
+      "role": "user",
+      "content": [
+       {
+        "tool_use_id": "toolu_011TvxdKFapV3hPc7FKpnW7G",
+        "type": "tool_result",
+        "content": "Wasted call \u2014 file unchanged since your last Read. Refer to that earlier tool_result instead."
+       }
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "source": "run 39332134395 paid-slice-8-a2 review-exploratory-small-cli",
+   "head": "8802d99",
+   "sourceEventIndices": [
+    745,
+    749,
+    777,
+    781,
+    790,
+    794
+   ],
+   "events": [
+    {
+     "type": "assistant",
+     "session_id": "e05cf21a-eced-4ee5-a031-89a8c253c54e",
+     "parent_tool_use_id": null,
+     "message": {
+      "id": "msg_011CgCP93PHjujPRobVJASRi",
+      "role": "assistant",
+      "content": [
+       {
+        "type": "tool_use",
+        "id": "toolu_018xntzUCrFxBhzJTuszB54U",
+        "name": "Bash",
+        "input": {
+         "command": "/fixture-root/host/runtime/bin/gstack-review-log '{\"skill\":\"adversarial-review\",\"timestamp\":\"'\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"'\",\"status\":\"issues_found\",\"source\":\"in-host\",\"host\":\"claude\",\"outside_provider\":\"codex\",\"outside_status\":\"unavailable\",\"phase\":\"adversarial\",\"tier\":\"always\",\"gate\":\"informational\",\"commit\":\"'\"$(git rev-parse --short HEAD)\"'\",\"completed\":true,\"converged\":true}' --finish 0fa0d55a-16d1-4fa5-a65c-98ba0d2adb3a",
+         "description": "Persist native adversarial review record"
+        },
+        "caller": {
+         "type": "direct"
+        }
+       }
+      ]
+     }
+    },
+    {
+     "type": "user",
+     "session_id": "e05cf21a-eced-4ee5-a031-89a8c253c54e",
+     "parent_tool_use_id": null,
+     "tool_use_result": {
+      "stdout": "",
+      "stderr": "",
+      "interrupted": false,
+      "isImage": false,
+      "noOutputExpected": false
+     },
+     "message": {
+      "role": "user",
+      "content": [
+       {
+        "tool_use_id": "toolu_018xntzUCrFxBhzJTuszB54U",
+        "type": "tool_result",
+        "content": "(Bash completed with no output)",
+        "is_error": false
+       }
+      ]
+     }
+    },
+    {
+     "type": "assistant",
+     "session_id": "e05cf21a-eced-4ee5-a031-89a8c253c54e",
+     "parent_tool_use_id": null,
+     "message": {
+      "id": "msg_011CgCP9T1qta9KojKXBkn7S",
+      "role": "assistant",
+      "content": [
+       {
+        "type": "tool_use",
+        "id": "toolu_01KxpCiHqeq6EjStFc1eGKKm",
+        "name": "Read",
+        "input": {
+         "file_path": "/fixture-root/product/HANDOFF.md"
+        },
+        "caller": {
+         "type": "direct"
+        }
+       }
+      ]
+     }
+    },
+    {
+     "type": "user",
+     "session_id": "e05cf21a-eced-4ee5-a031-89a8c253c54e",
+     "parent_tool_use_id": null,
+     "tool_use_result": {
+      "type": "text",
+      "file": {
+       "filePath": "/fixture-root/product/HANDOFF.md",
+       "content": "No concurrent input update.\n",
+       "numLines": 2,
+       "startLine": 1,
+       "totalLines": 2
+      }
+     },
+     "message": {
+      "role": "user",
+      "content": [
+       {
+        "tool_use_id": "toolu_01KxpCiHqeq6EjStFc1eGKKm",
+        "type": "tool_result",
+        "content": "1\tNo concurrent input update.\n2\t"
+       }
+      ]
+     }
+    },
+    {
+     "type": "assistant",
+     "session_id": "e05cf21a-eced-4ee5-a031-89a8c253c54e",
+     "parent_tool_use_id": null,
+     "message": {
+      "id": "msg_011CgCP9T1qta9KojKXBkn7S",
+      "role": "assistant",
+      "content": [
+       {
+        "type": "tool_use",
+        "id": "toolu_01FbKjc6xXVDmtcU9Zd3GATA",
+        "name": "Read",
+        "input": {
+         "file_path": "/fixture-root/product/reports/HANDOFF.md"
+        },
+        "caller": {
+         "type": "direct"
+        }
+       }
+      ]
+     }
+    },
+    {
+     "type": "user",
+     "session_id": "e05cf21a-eced-4ee5-a031-89a8c253c54e",
+     "parent_tool_use_id": null,
+     "tool_use_result": "Error: File does not exist. Note: your current working directory is /fixture-root/product.",
+     "message": {
+      "role": "user",
+      "content": [
+       {
+        "type": "tool_result",
+        "content": "File does not exist. Note: your current working directory is /fixture-root/product.",
+        "is_error": true,
+        "tool_use_id": "toolu_01FbKjc6xXVDmtcU9Zd3GATA"
+       }
+      ]
+     }
+    }
+   ]
+  }
+ ]
+}

@@ -1,14 +1,14 @@
-# How to document a feature you just shipped
+# How to document a feature before it ships
 
-This is the post-ship workflow: you merged a PR, the docs are stale, and you want a coverage map plus filled gaps in one pass. You'll run `/document-release` to audit, then `/document-generate` to fill the gaps it finds.
+This is the pre-merge documentation workflow: the feature is implemented and you want to audit coverage and fill gaps. `/ship` already runs the relevant documentation audit before publication; use standalone `/document-release` on a committed feature branch to revisit it, then `/document-generate` for missing pages.
 
 ## Prerequisites
 
 - gstack installed (`./setup` complete; verify with `which gstack` or by typing `/` in Claude Code and seeing skills listed)
-- The branch with your shipped feature is checked out
-- A PR exists on GitHub or GitLab (recommended — the workflow updates the PR body with a coverage map)
+- The committed feature branch is checked out, before merge
+- Optional: an existing GitHub or GitLab PR lets standalone `/document-release` update its body with the coverage map
 
-If no PR exists yet, run `/ship` first to create one; that's what `/document-release` is designed to run against.
+No PR is required to audit. `/ship` runs its audit before creating or updating the PR; a standalone invocation without a PR skips the PR-body update.
 
 ## Steps
 
@@ -30,13 +30,13 @@ Coverage map:
   FooProcessor     ❌            ❌        ❌          ❌
 ```
 
-Items with zero coverage are **critical gaps**. Items with only reference coverage are **common gaps**. Both land in the PR body as a `### Documentation Debt` subsection so reviewers see them.
+Items with zero coverage are **critical gaps**. Items with only reference coverage are **common gaps**. The audit reports both; when a PR exists, it also adds a `### Documentation Debt` subsection for reviewers.
 
 If `/document-release` reports everything is covered, you're done. Skip the rest of this how-to.
 
-### 2. Read the documentation debt section in the PR body
+### 2. Read the reported documentation gaps
 
-Open your PR (the skill prints the URL). Scroll to `## Documentation` → `### Documentation Debt`. Each item is tagged with the Diataxis quadrant that would fill it:
+Use the audit's coverage map and gap summary. If a PR exists, open `## Documentation` → `### Documentation Debt` in its body. Each item is tagged with the Diataxis quadrant that would fill it:
 
 ```
 ### Documentation Debt
@@ -67,23 +67,23 @@ Re-run `/document-release`:
 /document-release
 ```
 
-The coverage map should now show the previously-flagged entities with green checkmarks in the previously-empty quadrants. The PR body's Documentation Debt section should be empty or reduced to items you intentionally deferred.
+The coverage map should now show the previously-flagged entities with green checkmarks in the previously-empty quadrants. Reported documentation debt, including the PR-body section when present, should be empty or reduced to items you intentionally deferred.
 
 ## Verification
 
-Open your PR and confirm:
+Read the audit output and, when present, the PR body. Confirm:
 
-1. The PR body has a `## Documentation` section with a doc-diff preview.
-2. The `### Documentation Debt` subsection lists zero critical gaps (or only items you knowingly deferred).
+1. The audit summarizes the docs reviewed and changed; an existing PR has a `## Documentation` section with a doc-diff preview.
+2. The reported documentation debt lists zero critical gaps (or only items you knowingly deferred).
 3. Each generated doc file in `docs/` opens cleanly and cross-links to siblings (reference → how-to → tutorial → explanation).
 4. Run `grep -rE '\]\([^)]*\.md\)' docs/` and verify no link points to a missing file.
 
-If all four check, your PR is ready to land with complete documentation.
+These checks complete the documentation pass, with any deferred gaps recorded. They do not replace `/ship`'s code review, tests or final verification.
 
 ## Troubleshooting
 
 **`/document-release` reports "No public surface changes detected."**
-The diff is internal-only (refactors, tests, infra). No docs are needed. Skip to landing.
+There may be no new public surface, but still check affected setup, testing, architecture and workflow instructions. A completed audit can report current documentation; an empty public-surface map alone is not that audit.
 
 **The Diataxis quadrant tag on a gap doesn't match what you'd expect.**
 The skill uses an entity taxonomy to decide which quadrants matter (CLI flags want reference + how-to; internal modules want reference + explanation; user-facing features want all four). If you disagree, you can override by hand-editing the docs after generation. The audit is a guide, not a constraint.
@@ -92,7 +92,7 @@ The skill uses an entity taxonomy to decide which quadrants matter (CLI flags wa
 Tutorials should hit a working result in 3 steps or fewer. Re-run the skill and ask it to compress, or hand-edit. The Step 8 Quality Self-Review catches some of these but not all.
 
 **You want to document a feature but no PR exists yet.**
-Run `/ship` first to create the PR, then this workflow. Without a PR, `/document-release` can still audit but skips the PR-body update.
+Run standalone `/document-release` on the committed feature branch; it can audit without a PR and skips the PR-body update. Or run `/ship`, which includes the audit before publication.
 
 **A generated reference doc has hallucinated API signatures.**
 File a bug. The skill's Step 1 archaeology is supposed to read implementation files end-to-end, not just signatures, specifically to prevent this. Include the generated text and the actual code so we can trace why the archaeology missed it.

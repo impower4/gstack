@@ -24,6 +24,16 @@
 #   0 — merge succeeded, result written to <ours>
 #   1 — error; git treats as conflict and stops the merge
 
+# Heredoc delivery guard. bash 5.2+ writes a heredoc body <=64KiB through a
+# pipe in the forked child before exec, with no reader on the other end. On
+# macOS under pipe-KVA pressure a fresh pipe gets a 512-byte buffer, so any
+# body >=512B blocks write() forever and the script hangs at startup with no
+# output. Compat level 50 restores the tempfile path. These scripts are
+# bash-3.2-clean, so the compat level costs them nothing. Not exported: the
+# guard is per-script, and it survives `bash script.sh` call sites that
+# bypass the shebang.
+BASH_COMPAT=50
+
 set -uo pipefail
 
 if [ "$#" -lt 3 ]; then
@@ -35,7 +45,7 @@ BASE="$1"
 OURS="$2"
 THEIRS="$3"
 
-TMP=$(mktemp /tmp/gstack-jsonl-merge.XXXXXX) || exit 1
+TMP=$(mktemp "${TMPDIR:-/tmp}/gstack-jsonl-merge.XXXXXX") || exit 1
 trap 'rm -f "$TMP" 2>/dev/null || true' EXIT
 
 python3 - "$BASE" "$OURS" "$THEIRS" > "$TMP" <<'PYEOF'
@@ -53,18 +63,25 @@ for path in paths:
                     continue
                 if line in seen:
                     continue
-                # Prefer ISO ts field for sort; fall back to SHA-256.
+                # Prefer ISO ts field for sort; fall back to SHA-256. The line
+                # content is the final tiebreaker so the order is total: two
+                # entries sharing a ts must resolve identically regardless of
+                # which side they arrive on. Without it, equal-ts entries fall
+                # back to insertion order (base, ours, theirs), and since ours
+                # and theirs are swapped depending on which machine runs the
+                # merge, the two sides produce divergent files that never
+                # converge.
                 sort_key = None
                 try:
                     obj = json.loads(line)
                     ts = obj.get('ts') or obj.get('timestamp')
                     if isinstance(ts, str):
-                        sort_key = (0, ts)
+                        sort_key = (0, ts, line)
                 except (json.JSONDecodeError, ValueError, TypeError):
                     pass
                 if sort_key is None:
                     h = hashlib.sha256(line.encode('utf-8')).hexdigest()
-                    sort_key = (1, h)
+                    sort_key = (1, h, line)
                 seen[line] = sort_key
     except FileNotFoundError:
         # Absent base / absent ours / absent theirs are all valid.

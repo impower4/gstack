@@ -1,0 +1,97 @@
+{
+  "generated_at": "2026-10-03T20:57:19.542Z",
+  "budget_usd": 81,
+  "entries": [
+    {
+      "config": "arm",
+      "priority": 1,
+      "cases": 1,
+      "model": "claude-fable-5-1",
+      "items": 24,
+      "calls": 216,
+      "input_tokens": 389709,
+      "estimated_output_tokens_per_call": 300,
+      "estimated_cost_usd": 7.13709,
+      "cumulative_usd": 7.1371,
+      "within_budget": true
+    },
+    {
+      "config": "qa-workflow",
+      "priority": 2,
+      "cases": 1,
+      "model": "claude-fable-5-1",
+      "items": 24,
+      "calls": 216,
+      "input_tokens": 639162,
+      "estimated_output_tokens_per_call": 1200,
+      "estimated_cost_usd": 19.35162,
+      "cumulative_usd": 26.4887,
+      "within_budget": true
+    },
+    {
+      "config": "qa-health-rubric",
+      "priority": 3,
+      "cases": 1,
+      "model": "claude-fable-5-1",
+      "items": 24,
+      "calls": 216,
+      "input_tokens": 210294,
+      "estimated_output_tokens_per_call": 1200,
+      "estimated_cost_usd": 15.06294,
+      "cumulative_usd": 41.5517,
+      "within_budget": true
+    },
+    {
+      "config": "qa-anti-refusal",
+      "priority": 4,
+      "cases": 1,
+      "model": "claude-fable-5-1",
+      "items": 24,
+      "calls": 216,
+      "input_tokens": 221022,
+      "estimated_output_tokens_per_call": 1200,
+      "estimated_cost_usd": 15.17022,
+      "cumulative_usd": 56.7219,
+      "within_budget": true
+    },
+    {
+      "config": "cross-skill",
+      "priority": 5,
+      "cases": 1,
+      "model": "claude-fable-5-1",
+      "items": 24,
+      "calls": 216,
+      "input_tokens": 690336,
+      "estimated_output_tokens_per_call": 1200,
+      "estimated_cost_usd": 19.86336,
+      "cumulative_usd": 76.5852,
+      "within_budget": true
+    },
+    {
+      "config": "voice",
+      "priority": 6,
+      "cases": 1,
+      "model": "claude-fable-5-1",
+      "items": 24,
+      "calls": 216,
+      "input_tokens": 191619,
+      "estimated_output_tokens_per_call": 1200,
+      "estimated_cost_usd": 14.87619,
+      "cumulative_usd": 91.4614,
+      "within_budget": false
+    },
+    {
+      "config": "workflow-default",
+      "priority": 7,
+      "cases": 14,
+      "model": "claude-fable-5-1",
+      "items": 24,
+      "calls": 216,
+      "input_tokens": 740745,
+      "estimated_output_tokens_per_call": 1200,
+      "estimated_cost_usd": 20.36745,
+      "cumulative_usd": 111.8289,
+      "within_budget": false
+    }
+  ]
+}

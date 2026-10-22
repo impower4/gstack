@@ -2,46 +2,876 @@
 # gstack-slug — output project slug and sanitized branch name
 # Usage: eval "$(gstack-slug)"  → sets SLUG and BRANCH variables
 # Or:    gstack-slug            → prints SLUG=... and BRANCH=... lines
+#        gstack-slug --get NAME → print one raw value (SLUG, BRANCH or an
+#                                  --identity field); skill bash blocks
+#                                  use this form (#2763: worktree-isolated Claude
+#                                  Code sessions refuse eval/source)
+# Modes (not on the hot path; see `gstack-slug --help`):
+#   --identity                 also print PROJECT_REMOTE, PROJECT_ROOT, LEGACY_SLUG
+#   --stamp-checkpoint <file>  write remote:/project_root: into a checkpoint's frontmatter
+#   --classify-checkpoints     read checkpoint paths on stdin, print "<status>\t<path>"
+#   --checkpoints-below        list other buckets' checkpoints saved below the cwd, plus pointers
+#   --point-from <dir> <file>  leave a pointer to <file> in <dir>'s bucket (nested-repo saves)
+#   --newer-task <branch>      read restore candidates on stdin, name a newer same-task checkpoint
+#   --adopt-legacy [--copy <relpath>...]  review/copy files from the pre-#3003 bucket
+#   --adopt-legacy --from <slug>  merge a former bucket (e.g. a worktree's) into this one
+#   --adopt-legacy --dismiss <slug>  stop naming a former bucket at skill start
 #
-# Security: output is sanitized to [a-zA-Z0-9._-] only, preventing
-# shell injection when consumed via source or eval.
+# Nested-group remotes (#3003): a hosted remote with 3+ path segments
+# (gitlab.com/a/product/repo) files under "<last-two>-<16 hex>" instead of the
+# last two segments alone, so projects in different groups stop sharing one
+# bucket. 2-segment remotes (all of GitHub) and local paths are unchanged. The
+# canonical-remote and slug rules live in bin/gstack-remote-identity.sh (twin of
+# lib/remote-identity.ts). Earlier data stays in the old bucket until the user
+# copies it with --adopt-legacy; nothing moves automatically. ssh host aliases
+# (git@work-gitlab:…) are a different canonical host than the https spelling;
+# pin those with GSTACK_PROJECT_SLUG.
+#
+# Cache key (#2767): inside a git repository the entry is keyed on the git
+# common dir, which the main checkout, its subdirectories and every linked
+# worktree share, so a worktree can no longer resolve a different slug than
+# the main checkout. It is read from .git files without spawning git. Entries
+# written before this keyed on pwd; on a miss the main checkout's old entry
+# wins over the current directory's own old entry (deterministic: the main
+# checkout holds the project's original, possibly pre-remote, identity). When
+# a worktree's own old entry named a different, non-empty bucket, that slug is
+# recorded in projects/<slug>/.former-slugs until --adopt-legacy --from merges
+# it or --dismiss drops it. Both keys are written, so pwd-keyed readers agree.
+#
+# Cache format: entries are versioned ("v2:<slug>"). An unversioned entry from
+# an older gstack is recomputed once (one git spawn) and rewritten as v2; it
+# keeps its value unless it is exactly the pre-#3003 last-two slug of a
+# 3+-segment remote, so #2212 sticky identity survives the upgrade and later
+# cache hits stay git-free.
+#
+# Resolution order (highest precedence first):
+#   0. $GSTACK_PROJECT_SLUG env override (documented escape hatch)
+#   1. Walk UP from $(pwd) to the OUTERMOST ancestor containing a canonical
+#      project-identity marker (.git, .project.yaml, package.json, pyproject.toml,
+#      Cargo.toml, Gemfile, go.mod). Use that ancestor as the "project root".
+#      Build/deploy artifacts (.vercel, .next, dist, node_modules, etc.) are
+#      DELIBERATELY NOT markers — they're tooling output, not project identity.
+#      Without this walk-up, running gstack-slug from a subdir whose only
+#      "marker" is a deploy artifact silently resolves to the subdir's basename,
+#      misfiling all session state under a phantom slug. (2026-05-25 bug fix.)
+#   2. Derive the slug from the canonical git remote: the OUTERMOST ancestor
+#      that is an actual git repo (`.git` directory, or `.git` FILE for
+#      worktrees/submodules) with an `origin` remote wins. The slug is
+#      `owner-repo`, parsed EXACTLY like browse/bin/remote-slug so the two
+#      bins can never disagree on a canonical-remote repo. Marker-only
+#      ancestors that are NOT remote-bearing repos (a stray empty ~/.git,
+#      a stray package.json in $HOME) still anchor the basename FALLBACK,
+#      but they can no longer shadow a real remote. (2026-08-17 bug fix:
+#      a stray empty ~/.git made the walk-up pick $HOME as project root;
+#      $HOME has no origin, so EVERY repo under it degraded to
+#      SLUG=<username> — one shared bucket for all projects.)
+#   3. Otherwise use the basename of the resolved project root.
+#   4. If no project root was found anywhere on the chain, fall back to the
+#      basename of $(pwd) (preserves prior behavior for plain folders).
+#
+# MIGRATION NOTE (2026-08-17): sessions run BEFORE the remote-first fix above,
+# in repos below a stray marker-bearing ancestor, filed their session state
+# (decisions / timeline / ceo-plans / learnings) under the DEGRADED slug —
+# ~/.gstack/projects/<ancestor-basename>/ (e.g. `garrytan`) instead of the
+# canonical ~/.gstack/projects/<owner-repo>/. The slug cache self-heals on the
+# next invocation (see 1b), but already-written store data does NOT move.
+# Whether/how to merge those stores is tracked in TODOS.md — do not add data
+# migration code here.
+#
+# Caching is self-healing: a cache entry for the literal pwd that differs from
+# the freshly-computed slug gets opportunistically rewritten (single-shot, key-
+# local — never sweeps other entries). This lets pre-existing poisoned caches
+# clean themselves up without a manual `rm -rf ~/.gstack/slug-cache/`.
+#
+# Security: output is sanitized to [a-zA-Z0-9._-] only, preventing shell
+# injection when consumed via source or eval.
+# Bash 5.2+ can feed a heredoc body >=512B through a pipe with no reader
+# yet, which hangs --help forever; compat level 50 restores the tempfile path
+# (same guard as bin/gstack-artifacts-init). Not exported.
+BASH_COMPAT=50
+
 set -euo pipefail
 
-CACHE_DIR="$HOME/.gstack/slug-cache"
+# State-root aware (bin/gstack-state-root.sh), matching lib/bin-context.ts (#2561): the
+# bash writer and the TS reader must key the SAME cache, and a test running
+# with GSTACK_HOME=<temp> must write its cache junk there, not into the real
+# home (observed: 2,528 stale temp-cwd entries accumulated in ~/.gstack).
+. "$(dirname "$0")/gstack-state-root.sh" 2>/dev/null || { echo "$0: cannot resolve the gstack state root: $(dirname "$0")/gstack-state-root.sh is missing. fix: reinstall with ./setup or /gstack-upgrade (docs/state-root.md)" >&2; exit 1; }
+gstack_state_root_select; GSTACK_STATE_ROOT="$_gstack_sr_root"
+. "$(dirname "$0")/gstack-remote-identity.sh" 2>/dev/null || { echo "$0: $(dirname "$0")/gstack-remote-identity.sh is missing. fix: reinstall with ./setup or /gstack-upgrade" >&2; exit 1; }
+
+MODE=default
+MODE_ARG=""
+MODE_ARG2=""
+COPY_PATHS=()
+case "${1:-}" in
+  "") ;;
+  --identity) MODE=identity ;;
+  --get) MODE=get; MODE_ARG="${2:-}"
+    case "$MODE_ARG" in SLUG|BRANCH|PROJECT_REMOTE|PROJECT_ROOT|LEGACY_SLUG|FORMER_SLUGS) ;;
+      *) echo "usage: gstack-slug --get SLUG|BRANCH|PROJECT_REMOTE|PROJECT_ROOT|LEGACY_SLUG|FORMER_SLUGS" >&2; exit 2 ;;
+    esac ;;
+  --stamp-checkpoint) MODE=stamp; MODE_ARG="${2:-}"
+    [[ -n "$MODE_ARG" ]] || { echo "usage: gstack-slug --stamp-checkpoint <file>" >&2; exit 2; } ;;
+  --classify-checkpoints) MODE=classify ;;
+  --checkpoints-below) MODE=below ;;
+  --newer-task) MODE=newer-task; MODE_ARG="${2:-}" ;;
+  --point-from) MODE=point; MODE_ARG="${2:-}"; MODE_ARG2="${3:-}"
+    [[ -n "$MODE_ARG" && -n "$MODE_ARG2" ]] || { echo "usage: gstack-slug --point-from <start dir> <checkpoint file>" >&2; exit 2; } ;;
+  --adopt-legacy) MODE=adopt; shift
+    if [[ "${1:-}" == "--copy" ]]; then
+      shift
+      [[ $# -gt 0 ]] || { echo "usage: gstack-slug --adopt-legacy --copy <relpath>..." >&2; exit 2; }
+      COPY_PATHS=("$@")
+    elif [[ "${1:-}" == "--from" || "${1:-}" == "--dismiss" ]]; then
+      MODE=$([[ "$1" == "--from" ]] && echo adopt-from || echo adopt-dismiss)
+      MODE_ARG=$(printf '%s' "${2:-}" | tr -cd 'a-zA-Z0-9._-')
+      case "$MODE_ARG" in ""|.|..) echo "usage: gstack-slug --adopt-legacy $1 <slug>" >&2; exit 2 ;; esac
+    elif [[ -n "${1:-}" ]]; then
+      echo "usage: gstack-slug --adopt-legacy [--copy <relpath>... | --from <slug> | --dismiss <slug>]" >&2; exit 2
+    fi ;;
+  -h|--help)
+    cat <<'USAGE'
+gstack-slug — print SLUG=<project slug> and BRANCH=<branch> for the current directory.
+  eval "$(gstack-slug)"                 set SLUG and BRANCH
+  SLUG=$(gstack-slug --get SLUG)        print one raw value (SLUG, BRANCH, or an --identity
+                                        field); no eval needed
+  gstack-slug --identity                also print PROJECT_REMOTE (canonical, credential-free),
+                                        PROJECT_ROOT and LEGACY_SLUG (pre-#3003 bucket, if different)
+  gstack-slug --stamp-checkpoint FILE   write remote:/project_root: into FILE's frontmatter
+  gstack-slug --classify-checkpoints    read checkpoint paths on stdin; print "<status><TAB><path>",
+                                        status = match | match-root | foreign | unstamped
+  gstack-slug --checkpoints-below       outside git: other buckets' checkpoints whose project_root
+                                        is below the cwd (newest 200 read); always: this bucket's
+                                        pointers. Prints "BELOW_CWD <path>" / "POINTER <path>"
+  gstack-slug --point-from DIR FILE     record FILE in DIR's bucket when DIR files elsewhere
+  gstack-slug --newer-task BRANCH       read restore candidates on stdin (BRANCH's first); print
+                                        "NEWER_TASK <path>" for a newer same-task other-branch save
+  gstack-slug --adopt-legacy            list the old bucket's files (checkpoints marked
+                                        matching/foreign/unknown); asks per file on a terminal
+  gstack-slug --adopt-legacy --copy P…  copy the named files (paths relative to the old bucket)
+  gstack-slug --adopt-legacy --from S   merge bucket S into this project's: JSONL logs merge with
+                                        de-duplication, missing files copy, differing files are
+                                        listed as conflicts and never overwritten; S is kept
+  gstack-slug --adopt-legacy --dismiss S  stop naming former bucket S at skill start
+Env: GSTACK_PROJECT_SLUG pins the slug (ssh host aliases, vendored sub-repos); never cached.
+USAGE
+    exit 0 ;;
+  *) echo "gstack-slug: unknown argument: $1 (try --help)" >&2; exit 2 ;;
+esac
+CACHE_DIR="$GSTACK_STATE_ROOT/slug-cache"
 PROJECT_DIR="$(pwd)"
 # Encode absolute path as cache key: /Users/j/foo → _Users_j_foo
 CACHE_KEY=$(printf '%s' "$PROJECT_DIR" | tr '/' '_')
 CACHE_FILE="${CACHE_DIR}/${CACHE_KEY}"
 
-# 1. Try cached slug first (guarantees consistency across sessions)
-if [[ -f "$CACHE_FILE" ]]; then
-  SLUG=$(cat "$CACHE_FILE")
+# Physical git common dir of the repository holding $1 (nearest .git entry),
+# or nothing outside git. A worktree's .git file names its gitdir, whose
+# `commondir` file points at the shared dir. No git spawn.
+_git_common_dir() {
+  local dir="$1" parent="" gitdir="" common="" depth=0
+  while [[ -n "$dir" && $depth -lt 64 ]]; do
+    if [[ -d "$dir/.git" ]]; then (cd "$dir/.git" 2>/dev/null && pwd -P); return 0; fi
+    if [[ -f "$dir/.git" ]]; then
+      gitdir=$(sed -n 's/^gitdir: *//p' "$dir/.git" 2>/dev/null | head -1)
+      [[ -n "$gitdir" ]] || return 0
+      [[ "$gitdir" == /* || "$gitdir" =~ ^[A-Za-z]: ]] || gitdir="$dir/$gitdir"
+      common="$gitdir"
+      if [[ -f "$gitdir/commondir" ]]; then
+        common=$(head -1 "$gitdir/commondir" 2>/dev/null)
+        [[ "$common" == /* || "$common" =~ ^[A-Za-z]: ]] || common="$gitdir/$common"
+      fi
+      (cd "$common" 2>/dev/null && pwd -P); return 0
+    fi
+    parent=$(dirname "$dir")
+    [[ "$parent" == "$dir" ]] && break
+    dir="$parent"
+    depth=$((depth + 1))
+  done
+  return 0
+}
+LEGACY_CACHE_FILE="$CACHE_FILE"
+MAIN_CACHE_FILE=""
+GIT_COMMON_DIR=$(_git_common_dir "$PROJECT_DIR")
+if [[ -n "$GIT_COMMON_DIR" ]]; then
+  CACHE_FILE="${CACHE_DIR}/$(printf '%s' "$GIT_COMMON_DIR" | tr '/' '_')"
+  if [[ "$(basename "$GIT_COMMON_DIR")" == .git ]]; then
+    MAIN_CACHE_FILE="${CACHE_DIR}/$(dirname "$GIT_COMMON_DIR" | tr '/' '_')"
+  fi
 fi
 
-# 2. If no cache, compute from git remote (separated from pipeline to avoid
-#    pipefail swallowing the error and producing an empty slug)
-if [[ -z "${SLUG:-}" ]]; then
-  REMOTE_URL=$(git remote get-url origin 2>/dev/null) || REMOTE_URL=""
+SLUG=""
+
+# 0. Explicit env override — wins over everything. Escape hatch for vendored
+#    sub-repos and other genuine "subdir IS its own project" edge cases.
+SLUG_FROM_ENV=0
+if [[ -n "${GSTACK_PROJECT_SLUG:-}" ]]; then
+  SLUG=$(printf '%s' "$GSTACK_PROJECT_SLUG" | tr -cd 'a-zA-Z0-9._-')
+  # A pin of "." or ".." would file state outside projects/; ignore it.
+  case "$SLUG" in .|..) SLUG="" ;; esac
+  # Per-invocation escape hatch, never a durable identity: persisting it
+  # would rebind THIS cwd's slug for every later env-less run (observed: a
+  # test exporting GSTACK_PROJECT_SLUG from the repo root rebound the whole
+  # repo's session state to the test's slug).
+  SLUG_FROM_ENV=1
+fi
+
+# 1. Walk up from pwd, tracking the OUTERMOST ancestor with a canonical
+#    project-identity marker. The walk stops at "/" so we never escape the
+#    filesystem root. Markers are an allow-list (not a blacklist) so new
+#    build/deploy tools cannot silently establish phantom project roots.
+#
+#    Markers: .git can be a directory (normal repo) or a file (worktree /
+#    submodule pointer). Everything else is a file at the directory's top
+#    level.
+#    Two tiers of markers:
+#    - STRONG markers (canonical version-control / language project files):
+#      .git, .project.yaml, package.json, pyproject.toml, Cargo.toml, Gemfile,
+#      go.mod. These signal "this directory is a real project of its own."
+#    - WEAK markers (content-only project signals): README.md, README, LICENSE.
+#      These catch content folders (markdown bundles, asset collections, AJ's
+#      loadout-style folders) that have no programming-language project files
+#      but ARE the user's project root.
+#    Rule: outermost STRONG marker wins. If no strong marker exists anywhere on
+#    the chain, outermost WEAK marker wins. This means a vendored sub-repo
+#    (e.g. `loadout/starter-pack/.git`) correctly keeps its own slug even when
+#    a weak-marker parent (`loadout/README.md`) is higher up — the sub-repo IS
+#    its own project. But a deploy-artifact-only subdir (`loadout/site/.vercel`)
+#    correctly folds into the content-project parent (`loadout/README.md`),
+#    because `.vercel` is not a marker at all.
+_outermost_project_root() {
+  local dir="$1"
+  local outermost_strong=""
+  local outermost_weak=""
+  local parent="" depth=0
+  # Terminate on dirname's FIXED POINT, not on a literal "/": under git-bash
+  # on Windows a mixed-form path walks C:/Users -> C: -> . -> . forever, which
+  # hung every bin that evals gstack-slug (caught by windows-free-tests CI).
+  # The depth cap is belt-and-braces for exotic path forms (UNC, //server).
+  while [[ -n "$dir" && "$dir" != "/" && $depth -lt 64 ]]; do
+    if [[ -e "$dir/.git" \
+       || -f "$dir/.project.yaml" \
+       || -f "$dir/package.json" \
+       || -f "$dir/pyproject.toml" \
+       || -f "$dir/Cargo.toml" \
+       || -f "$dir/Gemfile" \
+       || -f "$dir/go.mod" ]]; then
+      outermost_strong="$dir"
+    elif [[ -f "$dir/README.md" \
+         || -f "$dir/README" \
+         || -f "$dir/README.rst" \
+         || -f "$dir/LICENSE" \
+         || -f "$dir/LICENSE.md" ]]; then
+      outermost_weak="$dir"
+    fi
+    parent=$(dirname "$dir")
+    [[ "$parent" == "$dir" ]] && break # dirname fixed point (C:/, ., //srv)
+    dir="$parent"
+    depth=$((depth + 1))
+  done
+  # Strong markers win over weak; either wins over nothing.
+  if [[ -n "$outermost_strong" ]]; then
+    printf '%s' "$outermost_strong"
+  else
+    printf '%s' "$outermost_weak"
+  fi
+}
+
+# 1a. Outermost REMOTE-BEARING repo root: walk the same ancestor chain and
+#     track the outermost dir that has a `.git` entry (directory for normal
+#     clones, FILE for git-worktrees/submodules — `git -C` resolves a
+#     worktree's remote through its main clone) AND whose `origin` remote
+#     resolves. This is the canonical-identity walk: a marker-only ancestor
+#     with no resolvable origin (stray empty ~/.git, stray package.json)
+#     cannot win here, so it cannot hijack remote-derived identity the way
+#     it can hijack the marker walk above. Nested-repo semantics preserved:
+#     an inner repo under an outer canonical-remote repo still resolves to
+#     the OUTER repo's remote (outermost wins), same as before.
+#     Note: git spawns only at `.git`-bearing ancestors — typically one.
+_outermost_remote_repo() {
+  local dir="$1"
+  local outermost="" parent="" depth=0
+  while [[ -n "$dir" && "$dir" != "/" && $depth -lt 64 ]]; do
+    if [[ -e "$dir/.git" ]] && git -C "$dir" remote get-url origin >/dev/null 2>&1; then
+      outermost="$dir"
+    fi
+    parent=$(dirname "$dir")
+    [[ "$parent" == "$dir" ]] && break # dirname fixed point (C:/, ., //srv)
+    dir="$parent"
+    depth=$((depth + 1))
+  done
+  printf '%s' "$outermost"
+}
+
+# Only compute the project root if we don't already have a slug (env override
+# took precedence). The walk is cheap (~10 stats on the deepest realistic cwd).
+PROJECT_ROOT=""
+if [[ -z "$SLUG" ]]; then
+  PROJECT_ROOT=$(_outermost_project_root "$PROJECT_DIR")
+fi
+
+# Lazy, memoized remote discovery. Needed on exactly two paths: fresh
+# resolution (no usable cache) and the degraded-ancestor heal check below.
+# Gating it keeps ordinary cache hits git-spawn-free.
+REMOTE_ROOT=""
+REMOTE_URL=""
+_REMOTE_RESOLVED=0
+_resolve_remote() {
+  if [[ "$_REMOTE_RESOLVED" -eq 1 ]]; then return 0; fi
+  _REMOTE_RESOLVED=1
+  REMOTE_ROOT=$(_outermost_remote_repo "$PROJECT_DIR")
+  if [[ -n "$REMOTE_ROOT" ]]; then
+    REMOTE_URL=$(git -C "$REMOTE_ROOT" remote get-url origin 2>/dev/null) || REMOTE_URL=""
+  fi
+  return 0
+}
+
+# 1b. Cached identity is STICKY (#2212): a project that used gstack before it
+#     adopted a git remote keeps its pre-origin slug — recomputing from the
+#     remote here would rename the project mid-life and orphan everything
+#     under ~/.gstack/projects/<slug>/. TWO provable bug shapes are exempt
+#     and fall through to recompute (self-heal):
+#     - Old-bug shape (#1125): the pre-walk-up resolver cached basename(pwd)
+#       for a SUBDIRECTORY of the real project — cached == pwd basename while
+#       the walk-up says pwd is NOT the project root.
+#     - Degraded-ancestor shape (2026-08-17), STRAY-REPO shape ONLY: the
+#       pre-remote-first resolver cached basename(PROJECT_ROOT) for an
+#       ancestor anchored by a .git entry whose origin does NOT resolve (the
+#       stray empty ~/.git live bug) while a remote-bearing repo BELOW it
+#       exists. A marker root anchored by package.json / pyproject etc. with
+#       NO .git is legit #2212 sticky identity (a monorepo wrapper that used
+#       gstack before its inner dir grew a remote) and must NOT be healed.
+#       Legit remote-adopting stickiness is safe too: there the repo that
+#       adopted the remote IS the marker root (REMOTE_ROOT == PROJECT_ROOT),
+#       so the heal never fires.
+_CACHE_V2=0
+LEGACY_NOTICE_SLUG=""
+_ENTRY_FILE=""
+for _f in "$CACHE_FILE" "$MAIN_CACHE_FILE" "$LEGACY_CACHE_FILE"; do
+  if [[ -n "$_f" && -f "$_f" ]]; then _ENTRY_FILE="$_f"; break; fi
+done
+if [[ -z "$SLUG" && -n "$_ENTRY_FILE" ]]; then
+  _RAW_CACHE=$(cat "$_ENTRY_FILE" 2>/dev/null || true)
+  if [[ "$_RAW_CACHE" == v2:* ]]; then
+    _CACHE_V2=1
+    _RAW_CACHE="${_RAW_CACHE#v2:}"
+  fi
+  _CACHED=$(printf '%s' "$_RAW_CACHE" | tr -cd 'a-zA-Z0-9._-')
+  if [[ -n "$_CACHED" ]]; then
+    _PWD_BASE=$(basename "$PROJECT_DIR" | tr -cd 'a-zA-Z0-9._-')
+    _ROOT_BASE=""
+    if [[ -n "$PROJECT_ROOT" ]]; then
+      _ROOT_BASE=$(basename "$PROJECT_ROOT" | tr -cd 'a-zA-Z0-9._-')
+    fi
+    if [[ "$_CACHED" == "$_PWD_BASE" && -n "$PROJECT_ROOT" && "$PROJECT_ROOT" != "$PROJECT_DIR" ]]; then
+      : # old-bug shape — recompute below and self-heal the cache
+    elif [[ -n "$PROJECT_ROOT" && "$_CACHED" == "$_ROOT_BASE" && -e "$PROJECT_ROOT/.git" ]] \
+      && ! git -C "$PROJECT_ROOT" remote get-url origin >/dev/null 2>&1 \
+      && { _resolve_remote; [[ -n "$REMOTE_URL" && "$REMOTE_ROOT" != "$PROJECT_ROOT" ]]; }; then
+      : # degraded-ancestor (stray-repo) shape — recompute below and self-heal the cache
+    elif [[ "$_CACHE_V2" -eq 1 ]]; then
+      SLUG="$_CACHED"
+    else
+      # Unversioned (pre-#3003) entry: recompute once. Keep the sticky value
+      # unless it is exactly the old last-two slug of a 3+-segment remote.
+      SLUG="$_CACHED"
+      _resolve_remote
+      if [[ -n "$REMOTE_URL" ]]; then
+        gstack_remote_slug "$REMOTE_URL"
+        if [[ -n "$_gri_slug" && "$_gri_slug" != "$_gri_legacy_slug" && "$_CACHED" == "$_gri_legacy_slug" ]]; then
+          SLUG="$_gri_slug"
+          LEGACY_NOTICE_SLUG="$_gri_legacy_slug"
+        fi
+      fi
+    fi
+  fi
+fi
+
+# 2. Canonical remote-derived slug. Sourced from the outermost remote-bearing
+#    repo (see 1a) — NOT from PROJECT_ROOT, which may be a marker-only
+#    ancestor with no remote. The slug rule (legacy owner-repo for 2-segment
+#    and local remotes, "<last-two>-<16 hex>" for 3+-segment hosted remotes)
+#    is shared with browse/bin/remote-slug through gstack-remote-identity.sh,
+#    so the two bins agree on every canonical-remote repo, worktrees included.
+#    Parity pinned by test/gstack-slug-parity.test.ts.
+if [[ -z "$SLUG" ]]; then
+  _resolve_remote
   if [[ -n "$REMOTE_URL" ]]; then
-    RAW_SLUG=$(printf '%s' "$REMOTE_URL" | sed 's|.*[:/]\([^/]*/[^/]*\)\.git$|\1|;s|.*[:/]\([^/]*/[^/]*\)$|\1|' | tr '/' '-')
-    SLUG=$(printf '%s' "$RAW_SLUG" | tr -cd 'a-zA-Z0-9._-')
+    gstack_remote_slug "$REMOTE_URL"
+    SLUG="$_gri_slug"
+    if [[ -n "$SLUG" && "$_gri_slug" != "$_gri_legacy_slug" ]]; then
+      LEGACY_NOTICE_SLUG="$_gri_legacy_slug"
+    fi
+    # Dot-only / degenerate guard: a hostile origin like `url = ..` (git
+    # accepts it) passes sed unchanged and would become SLUG=".." — filing
+    # state one level ABOVE ~/.gstack/projects/. Reject empty/"."/".."/
+    # slash-bearing slugs and fall through to the basename fallback below.
+    # (tr -cd already deletes "/", so */* is belt-and-braces.)
+    case "$SLUG" in ""|.|..|*/*) SLUG="" ;; esac
   fi
 fi
 
-# 3. Fallback to basename only when there's truly no git remote configured
-SLUG="${SLUG:-$(basename "$PWD" | tr -cd 'a-zA-Z0-9._-')}"
+# 3. No git remote (or no remote at all) — use the project root's basename.
+if [[ -z "$SLUG" && -n "$PROJECT_ROOT" ]]; then
+  SLUG=$(basename "$PROJECT_ROOT" | tr -cd 'a-zA-Z0-9._-')
+fi
 
-# 4. Cache the slug for future sessions (atomic write, fail silently)
-if [[ -n "$SLUG" ]]; then
-  mkdir -p "$CACHE_DIR" 2>/dev/null || true
-  CACHE_TMP=$(mktemp "$CACHE_DIR/.slug-XXXXXX" 2>/dev/null) || CACHE_TMP=""
-  if [[ -n "$CACHE_TMP" ]]; then
-    printf '%s' "$SLUG" > "$CACHE_TMP" && mv "$CACHE_TMP" "$CACHE_FILE" 2>/dev/null || rm -f "$CACHE_TMP" 2>/dev/null
+# 4. Final fallback: no project root found anywhere on the chain. Use pwd's
+#    basename (preserves the old behavior for plain non-project folders).
+SLUG="${SLUG:-$(basename "$PROJECT_DIR" | tr -cd 'a-zA-Z0-9._-')}"
+
+# Cache compare/evict/write — self-healing. Compute the cache decision AFTER
+# fresh resolution so a stale cached value gets corrected on next invocation
+# rather than perpetuated. Single-shot: we only ever touch the cache entry for
+# the literal current pwd's key, never sweep others.
+# 3b. Re-sanitize unconditionally before the value is echoed into `eval`/`source`
+#     output — honors the [a-zA-Z0-9._-] invariant promised in the header on
+#     every path (the fresh-compute design already prevents poisoned-cache
+#     injection, but the invariant should not depend on that reasoning).
+SLUG=$(printf '%s' "$SLUG" | tr -cd 'a-zA-Z0-9._-')
+
+# A worktree whose own pre-#2767 entry named a different bucket that still
+# holds data: remember it so skill start can name the merge command.
+if [[ -n "$SLUG" && "$SLUG_FROM_ENV" -eq 0 && "$_ENTRY_FILE" != "$LEGACY_CACHE_FILE" && -f "$LEGACY_CACHE_FILE" ]]; then
+  _OWN=$(cat "$LEGACY_CACHE_FILE" 2>/dev/null || true)
+  _OWN=$(printf '%s' "${_OWN#v2:}" | tr -cd 'a-zA-Z0-9._-')
+  _FORMER_FILE="$GSTACK_STATE_ROOT/projects/$SLUG/.former-slugs"
+  if [[ -n "$_OWN" && "$_OWN" != "$SLUG" && "$_OWN" != . && "$_OWN" != .. && -n "$(ls -A "$GSTACK_STATE_ROOT/projects/$_OWN" 2>/dev/null)" ]] \
+    && ! grep -qxF -- "$_OWN" "$_FORMER_FILE" 2>/dev/null; then
+    mkdir -p "$(dirname "$_FORMER_FILE")" 2>/dev/null && printf '%s\n' "$_OWN" >> "$_FORMER_FILE" 2>/dev/null || true
   fi
+fi
+
+if [[ -n "$SLUG" && "$SLUG_FROM_ENV" -eq 0 ]]; then
+  for _f in "$CACHE_FILE" "$LEGACY_CACHE_FILE"; do
+    CURRENT_CACHE=""
+    if [[ -f "$_f" ]]; then
+      CURRENT_CACHE=$(cat "$_f" 2>/dev/null || true)
+    fi
+    if [[ "$CURRENT_CACHE" != "v2:$SLUG" ]]; then
+      mkdir -p "$CACHE_DIR" 2>/dev/null || true
+      CACHE_TMP=$(mktemp "$CACHE_DIR/.slug-XXXXXX" 2>/dev/null) || CACHE_TMP=""
+      if [[ -n "$CACHE_TMP" ]]; then
+        printf 'v2:%s' "$SLUG" > "$CACHE_TMP" && mv "$CACHE_TMP" "$_f" 2>/dev/null || rm -f "$CACHE_TMP" 2>/dev/null
+      fi
+    fi
+    [[ "$CACHE_FILE" == "$LEGACY_CACHE_FILE" ]] && break
+  done
+fi
+
+# One notice on the resolve that first files this project under its new
+# nested-group slug while the old shared bucket still exists (stderr only, so
+# eval consumers are unaffected; later runs are v2 cache hits and stay quiet).
+if [[ -n "$LEGACY_NOTICE_SLUG" && "$SLUG" != "$LEGACY_NOTICE_SLUG" && -d "$GSTACK_STATE_ROOT/projects/$LEGACY_NOTICE_SLUG" ]]; then
+  echo "gstack now files this project under projects/$SLUG; earlier data is still in projects/$LEGACY_NOTICE_SLUG (review and copy it with: gstack-slug --adopt-legacy)" >&2
 fi
 
 RAW_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null) || RAW_BRANCH=""
-BRANCH=$(printf '%s' "${RAW_BRANCH:-}" | tr -cd 'a-zA-Z0-9._-')
+BRANCH=$(printf '%s' "${RAW_BRANCH:-}" | tr '/' '-' | tr -cd 'a-zA-Z0-9._-')
 BRANCH="${BRANCH:-unknown}"
-echo "SLUG=$SLUG"
-echo "BRANCH=$BRANCH"
+
+if [[ "$MODE" == "get" && ( "$MODE_ARG" == SLUG || "$MODE_ARG" == BRANCH ) ]]; then
+  if [[ "$MODE_ARG" == SLUG ]]; then printf '%s\n' "$SLUG"; else printf '%s\n' "$BRANCH"; fi
+  exit 0
+fi
+FORMER_FILE="$GSTACK_STATE_ROOT/projects/$SLUG/.former-slugs"
+if [[ "$MODE" == "get" && "$MODE_ARG" == FORMER_SLUGS ]]; then
+  # Former buckets still holding data and not yet adopted or dismissed.
+  while IFS= read -r _former || [[ -n "$_former" ]]; do
+    _former=$(printf '%s' "$_former" | tr -cd 'a-zA-Z0-9._-')
+    case "$_former" in ""|.|..) continue ;; esac
+    [[ -n "$(ls -A "$GSTACK_STATE_ROOT/projects/$_former" 2>/dev/null)" ]] && printf '%s\n' "$_former"
+  done < <(cat "$FORMER_FILE" 2>/dev/null || true)
+  exit 0
+fi
+_forget_former() {
+  [[ -f "$FORMER_FILE" ]] || return 0
+  local tmp
+  tmp=$(mktemp "$FORMER_FILE.XXXXXX") || return 1
+  grep -vxF -- "$1" "$FORMER_FILE" > "$tmp" || true
+  mv "$tmp" "$FORMER_FILE"
+}
+if [[ "$MODE" == "adopt-dismiss" ]]; then
+  _forget_former "$MODE_ARG" && echo "Dismissed projects/$MODE_ARG; its files are kept and skill start no longer names it."
+  exit $?
+fi
+if [[ "$MODE" == "adopt-from" ]]; then
+  FROM_BUCKET="$GSTACK_STATE_ROOT/projects/$MODE_ARG"
+  TO_BUCKET="$GSTACK_STATE_ROOT/projects/$SLUG"
+  [[ "$MODE_ARG" != "$SLUG" ]] || { echo "gstack-slug: projects/$MODE_ARG is this project's own bucket." >&2; exit 2; }
+  [[ -d "$FROM_BUCKET" && ! -L "$FROM_BUCKET" ]] || { echo "gstack-slug: no bucket at $FROM_BUCKET." >&2; exit 1; }
+  mkdir -p "$TO_BUCKET" || exit 1
+  MIGRATED=0; PENDING=0; CONFLICTING=0; UNCHANGED=0; CONFLICTS=""; PENDINGS=""
+  while IFS= read -r -d '' rel; do
+    rel="${rel#./}"
+    src="$FROM_BUCKET/$rel"; dst="$TO_BUCKET/$rel"
+    if [[ -L "$src" || ! -f "$src" ]]; then
+      PENDING=$((PENDING + 1)); PENDINGS="$PENDINGS  $rel (not a regular file; review by hand)"$'\n'; continue
+    fi
+    if [[ ! -e "$dst" ]]; then
+      mkdir -p "$(dirname "$dst")" && cp -p "$src" "$dst" && MIGRATED=$((MIGRATED + 1)) && continue
+      PENDING=$((PENDING + 1)); PENDINGS="$PENDINGS  $rel (copy failed)"$'\n'; continue
+    fi
+    if cmp -s "$src" "$dst"; then UNCHANGED=$((UNCHANGED + 1)); continue; fi
+    if [[ "$rel" == *.jsonl && -f "$dst" && ! -L "$dst" ]]; then
+      # Append-only logs: add the lines this bucket lacks, keeping its order.
+      tmp=$(mktemp "$dst.XXXXXX") || { PENDING=$((PENDING + 1)); continue; }
+      if { cat "$dst"; awk 'FNR == NR { seen[$0] = 1; next } !($0 in seen) { seen[$0] = 1; print }' "$dst" "$src"; } > "$tmp"; then
+        if cmp -s "$tmp" "$dst"; then rm -f "$tmp"; UNCHANGED=$((UNCHANGED + 1)); else mv "$tmp" "$dst"; MIGRATED=$((MIGRATED + 1)); fi
+      else
+        rm -f "$tmp"; PENDING=$((PENDING + 1)); PENDINGS="$PENDINGS  $rel (merge failed)"$'\n'
+      fi
+      continue
+    fi
+    CONFLICTING=$((CONFLICTING + 1)); CONFLICTS="$CONFLICTS  $rel"$'\n'
+  done < <(cd "$FROM_BUCKET" && find . \( -type f -o -type l \) ! -name .former-slugs -print0 2>/dev/null)
+  echo "adopt-legacy --from $MODE_ARG into projects/$SLUG: migrated $MIGRATED, pending $PENDING, conflicting $CONFLICTING, unchanged $UNCHANGED"
+  [[ -z "$PENDINGS" ]] || printf 'Pending (left in projects/%s):\n%s' "$MODE_ARG" "$PENDINGS"
+  [[ -z "$CONFLICTS" ]] || printf 'Conflicting (both differ; nothing overwritten, compare by hand):\n%s' "$CONFLICTS"
+  echo "projects/$MODE_ARG is kept; delete it yourself once you are satisfied."
+  _forget_former "$MODE_ARG" || true
+  [[ "$PENDING" -eq 0 ]]
+  exit $?
+fi
+if [[ "$MODE" == "default" ]]; then
+  echo "SLUG=$SLUG"
+  echo "BRANCH=$BRANCH"
+  exit 0
+fi
+
+# ── Project identity (#3003) ─────────────────────────────────────────────────
+# Identity = canonical remote; the root is identity only when there is no
+# remote. Roots are physical (pwd -P) so a symlinked spelling compares equal.
+ID_REMOTE=""
+ID_ROOT=""
+ID_LEGACY=""
+_resolve_identity() {
+  _resolve_remote
+  if [[ -n "$REMOTE_URL" ]]; then
+    gstack_remote_slug "$REMOTE_URL"
+    ID_REMOTE="$_gri_canon"
+    ID_ROOT="$REMOTE_ROOT"
+    if [[ -n "$_gri_legacy_slug" && "$_gri_slug" != "$_gri_legacy_slug" && "$_gri_legacy_slug" != "$SLUG" ]]; then
+      ID_LEGACY="$_gri_legacy_slug"
+    fi
+  else
+    ID_ROOT="${PROJECT_ROOT:-$(_outermost_project_root "$PROJECT_DIR")}"
+    ID_ROOT="${ID_ROOT:-$PROJECT_DIR}"
+  fi
+  ID_ROOT=$(cd "$ID_ROOT" 2>/dev/null && pwd -P) || ID_ROOT="$PROJECT_DIR"
+}
+
+# Prints "<remote>\037<project_root>" from the file's leading frontmatter only.
+_checkpoint_fields() {
+  awk 'NR == 1 { if ($0 != "---") exit; next }
+       $0 == "---" { exit }
+       /^remote:/ && !r { v = $0; sub(/^remote:[ \t]*/, "", v); sub(/[ \t\r]+$/, "", v); rem = v; r = 1 }
+       /^project_root:/ && !p { v = $0; sub(/^project_root:[ \t]*/, "", v); sub(/[ \t\r]+$/, "", v); root = v; p = 1 }
+       END { printf "%s\037%s\n", rem, root }' "$1" 2>/dev/null || true
+}
+
+# Sets _ck_status: match | match-root (same remote, different root: info only)
+# | foreign | unstamped (checkpoint written before identity stamping existed).
+_classify_checkpoint() {
+  local fields r root
+  fields=$(_checkpoint_fields "$1")
+  r="${fields%%$'\037'*}"
+  root="${fields#*$'\037'}"
+  if [[ -n "$ID_REMOTE" && -n "$r" ]]; then
+    if [[ "$r" != "$ID_REMOTE" ]]; then _ck_status=foreign
+    elif [[ -n "$root" && "$root" != "$ID_ROOT" ]]; then _ck_status=match-root
+    else _ck_status=match
+    fi
+  elif [[ -n "$root" ]]; then
+    if [[ "$root" == "$ID_ROOT" ]]; then _ck_status=match; else _ck_status=foreign; fi
+  elif [[ -n "$r" ]]; then
+    _ck_status=foreign
+  else
+    _ck_status=unstamped
+  fi
+}
+
+# Physical root of the checkout holding $1 (nearest .git entry), or nothing.
+_git_toplevel() {
+  local dir="$1" parent="" depth=0
+  while [[ -n "$dir" && $depth -lt 64 ]]; do
+    if [[ -e "$dir/.git" ]]; then (cd "$dir" 2>/dev/null && pwd -P); return 0; fi
+    parent=$(dirname "$dir")
+    [[ "$parent" == "$dir" ]] && break
+    dir="$parent"
+    depth=$((depth + 1))
+  done
+  return 0
+}
+
+# Prints "<branch>\037<project_root>\037<worktree>\037<title>": frontmatter
+# fields and the "## Working on:" heading (the filename's title part without it).
+_checkpoint_meta() {
+  local name
+  name=$(basename "$1" .md)
+  awk -v fallback="$name" '
+    function val(key) { v = $0; sub("^" key ":[ \t]*", "", v); sub(/[ \t\r]+$/, "", v); return v }
+    NR == 1 && $0 == "---" { fm = 1; next }
+    fm && $0 == "---" { fm = 0; next }
+    fm && /^branch:/ && !hb { b = val("branch"); hb = 1 }
+    fm && /^project_root:/ && !hr { r = val("project_root"); hr = 1 }
+    fm && /^worktree:/ && !hw { w = val("worktree"); hw = 1 }
+    !fm && /^## Working on:/ { t = val("## Working on"); exit }
+    END {
+      if (t == "") { t = fallback; sub(/^[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9]-?/, "", t) }
+      printf "%s\037%s\037%s\037%s\n", b, r, w, t
+    }' "$1" 2>/dev/null || true
+}
+
+# Task-title form: lowercased, a leading date removed, punctuation and
+# whitespace collapsed to single spaces. Generic titles normalize to nothing.
+_norm_title() {
+  local t
+  t=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]' \
+    | sed -E 's/^[[:space:]]*[0-9]{4}-?[0-9]{2}-?[0-9]{2}([-_t ]?[0-9]{2}:?[0-9]{2}(:?[0-9]{2})?)?//; s/[[:punct:][:space:]]+/ /g; s/^ //; s/ $//')
+  case "$t" in wip|checkpoint|save|notes|todo) t="" ;; esac
+  printf '%s' "$t"
+}
+
+# Ticket tokens (#123, ABC-123), one per line.
+_ticket_tokens() {
+  printf '%s\n' "$@" | grep -oE '#[0-9]+|[A-Z][A-Z0-9]+-[0-9]+' 2>/dev/null | sort -u || true
+}
+
+_json_str() {
+  local v="${1//\\/\\\\}"
+  v="${v//\"/\\\"}"
+  printf '"%s"' "$v"
+}
+
+# Prints the checkpoint path recorded in pointer $1 when it names a regular
+# file inside a bucket's checkpoints directory; nothing otherwise.
+_pointer_target() {
+  local v dir
+  v=$(sed -n 's/^  "checkpoint": "\(.*\)",$/\1/p' "$1" 2>/dev/null | head -1)
+  v="${v//\\\"/\"}"
+  v="${v//\\\\/\\}"
+  [[ -n "$v" && -f "$v" && ! -L "$v" ]] || return 0
+  dir=$(cd "$(dirname "$v")" 2>/dev/null && pwd -P) || return 0
+  [[ "$(basename "$dir")" == checkpoints && "$(dirname "$(dirname "$dir")")" == "$STATE_PHYS/projects" ]] || return 0
+  printf '%s\n' "$v"
+}
+
+_resolve_identity
+STATE_PHYS=$(cd "$GSTACK_STATE_ROOT" 2>/dev/null && pwd -P) || STATE_PHYS="$GSTACK_STATE_ROOT"
+
+case "$MODE" in
+  get)
+    case "$MODE_ARG" in
+      PROJECT_REMOTE) printf '%s\n' "$ID_REMOTE" ;;
+      PROJECT_ROOT) printf '%s\n' "$ID_ROOT" ;;
+      LEGACY_SLUG) printf '%s\n' "$ID_LEGACY" ;;
+    esac
+    ;;
+
+  identity)
+    echo "SLUG=$SLUG"
+    echo "BRANCH=$BRANCH"
+    printf 'PROJECT_REMOTE=%q\n' "$ID_REMOTE"
+    printf 'PROJECT_ROOT=%q\n' "$ID_ROOT"
+    echo "LEGACY_SLUG=$ID_LEGACY"
+    ;;
+
+  stamp)
+    [[ -f "$MODE_ARG" ]] || { echo "gstack-slug: no such checkpoint file: $MODE_ARG" >&2; exit 1; }
+    STAMP_TMP=$(mktemp "${MODE_ARG}.stamp-XXXXXX") || exit 1
+    STAMP_WORKTREE=$(_git_toplevel "$PROJECT_DIR")
+    [[ "$STAMP_WORKTREE" != "$ID_ROOT" ]] || STAMP_WORKTREE=""
+    if GRI_REMOTE="$ID_REMOTE" GRI_ROOT="$ID_ROOT" GRI_WORKTREE="$STAMP_WORKTREE" awk '
+      function ids() {
+        if (ENVIRON["GRI_REMOTE"] != "") print "remote: " ENVIRON["GRI_REMOTE"]
+        print "project_root: " ENVIRON["GRI_ROOT"]
+        if (ENVIRON["GRI_WORKTREE"] != "") print "worktree: " ENVIRON["GRI_WORKTREE"]
+      }
+      NR == 1 { if ($0 == "---") { infm = 1; print; next } print "---"; ids(); print "---" }
+      infm && $0 == "---" { ids(); print; infm = 0; next }
+      infm && (/^remote:/ || /^project_root:/ || /^worktree:/) { next }
+      { print }
+      END { if (NR == 0) { print "---"; ids(); print "---" } }' "$MODE_ARG" > "$STAMP_TMP"; then
+      mv "$STAMP_TMP" "$MODE_ARG"
+    else
+      rm -f "$STAMP_TMP"
+      exit 1
+    fi
+    ;;
+
+  classify)
+    while IFS= read -r ck_file || [[ -n "$ck_file" ]]; do
+      [[ -n "$ck_file" ]] || continue
+      _classify_checkpoint "$ck_file"
+      printf '%s\t%s\n' "$_ck_status" "$ck_file"
+    done
+    ;;
+
+  below)
+    # Checkpoints a session saved in a repository below this directory: the
+    # pointers a /context-save started here left, and (outside git) other
+    # buckets' checkpoints whose project_root lies below the cwd. Only the 200
+    # newest are read; from $HOME each project shows only its newest.
+    BELOW_CWD=$(cd "$PROJECT_DIR" 2>/dev/null && pwd -P) || BELOW_CWD="$PROJECT_DIR"
+    BELOW_HOME=$(cd "${HOME:-/nonexistent}" 2>/dev/null && pwd -P) || BELOW_HOME=""
+    BELOW_SEEN=$'\n'; BELOW_ROOTS=$'\n'; BELOW_OUT=""
+    while IFS= read -r ptr; do
+      [[ -n "$ptr" ]] || continue
+      target=$(_pointer_target "$ptr")
+      [[ -n "$target" && "$BELOW_SEEN" != *$'\n'"$target"$'\n'* ]] || continue
+      BELOW_SEEN="$BELOW_SEEN$target"$'\n'
+      BELOW_OUT="$BELOW_OUT$(basename "$target")"$'\t'"POINTER $target"$'\n'
+    done < <(find "$STATE_PHYS/projects/$SLUG/checkpoint-pointers" -maxdepth 1 -name '*.json' -type f 2>/dev/null | LC_ALL=C sort -r | head -200)
+    if [[ -z "$GIT_COMMON_DIR" ]]; then
+      while IFS= read -r f; do
+        [[ -n "$f" && "$BELOW_SEEN" != *$'\n'"$f"$'\n'* ]] || continue
+        meta=$(_checkpoint_meta "$f")
+        IFS=$'\037' read -r _b root _w _t <<<"$meta"
+        [[ -n "$root" && "$root" == "$BELOW_CWD"/* ]] || continue
+        if [[ "$BELOW_CWD" == "$BELOW_HOME" ]]; then
+          [[ "$BELOW_ROOTS" != *$'\n'"$root"$'\n'* ]] || continue
+          BELOW_ROOTS="$BELOW_ROOTS$root"$'\n'
+        fi
+        BELOW_OUT="$BELOW_OUT$(basename "$f")"$'\t'"BELOW_CWD $f"$'\n'
+      done < <(find "$STATE_PHYS/projects" -mindepth 3 -maxdepth 3 -path '*/checkpoints/*.md' -type f \
+        ! -path "$STATE_PHYS/projects/$SLUG/*" 2>/dev/null \
+        | awk -F/ '{ print $NF "\t" $0 }' | LC_ALL=C sort -r | head -200 | cut -f2-)
+    fi
+    printf '%s' "$BELOW_OUT" | LC_ALL=C sort -r | head -20 | cut -f2-
+    ;;
+
+  point)
+    # A /context-save that started in DIR but filed elsewhere (a nested repo)
+    # leaves a JSON pointer in DIR's bucket so /context-restore there finds it.
+    [[ -d "$MODE_ARG" ]] || { echo "gstack-slug: no such start directory: $MODE_ARG" >&2; exit 1; }
+    [[ -f "$MODE_ARG2" && ! -L "$MODE_ARG2" ]] || { echo "gstack-slug: no such checkpoint file: $MODE_ARG2" >&2; exit 1; }
+    PT_FILE="$(cd "$(dirname "$MODE_ARG2")" && pwd -P)/$(basename "$MODE_ARG2")"
+    PT_BUCKET=$(basename "$(dirname "$(dirname "$PT_FILE")")")
+    [[ "$(basename "$(dirname "$PT_FILE")")" == checkpoints && "$(dirname "$(dirname "$(dirname "$PT_FILE")")")" == "$STATE_PHYS/projects" ]] \
+      || { echo "gstack-slug: $MODE_ARG2 is not a saved checkpoint under $GSTACK_STATE_ROOT/projects" >&2; exit 1; }
+    PT_START=$(cd "$MODE_ARG" && "$0" --get SLUG 2>/dev/null) || exit 1
+    case "$PT_START" in ""|.|..) exit 1 ;; esac
+    [[ "$PT_START" != "$PT_BUCKET" ]] || exit 0
+    IFS=$'\037' read -r _b PT_ROOT _w _t <<<"$(_checkpoint_meta "$PT_FILE")"
+    PT_DIR="$GSTACK_STATE_ROOT/projects/$PT_START/checkpoint-pointers"
+    mkdir -p "$PT_DIR" || exit 1
+    PT_OUT="$PT_DIR/$(basename "$PT_FILE" .md)--$PT_BUCKET.json"
+    printf '{\n  "checkpoint": %s,\n  "bucket": %s,\n  "project_root": %s\n}\n' \
+      "$(_json_str "$PT_FILE")" "$(_json_str "$PT_BUCKET")" "$(_json_str "$PT_ROOT")" > "$PT_OUT" || exit 1
+    echo "POINTER_WRITTEN $PT_OUT"
+    ;;
+
+  newer-task)
+    # Restore candidates arrive current-branch first. When another branch of
+    # this repository holds a newer checkpoint for the same task (a worktree
+    # below the main tree, the same title, or the same ticket token), name it
+    # so /context-restore shows both instead of silently taking the branch match.
+    NT_FIRST=""; NT_FB=""; NT_FR=""; NT_FW=""; NT_FT=""; NT_FTOK=""
+    NT_HERE=$(_git_toplevel "$PROJECT_DIR")
+    NT_MAIN=""
+    [[ "$(basename "$GIT_COMMON_DIR")" != .git ]] || NT_MAIN=$(dirname "$GIT_COMMON_DIR")
+    while IFS= read -r f || [[ -n "$f" ]]; do
+      [[ -n "$f" ]] || continue
+      if [[ -n "$NT_FIRST" ]]; then
+        nb=$(basename "$f"); fb=$(basename "$NT_FIRST")
+        [[ "${nb:0:15}" > "${fb:0:15}" ]] || continue
+      fi
+      IFS=$'\037' read -r b root wt title <<<"$(_checkpoint_meta "$f")"
+      if [[ -z "$NT_FIRST" ]]; then
+        [[ -n "$MODE_ARG" && "$b" == "$MODE_ARG" ]] || exit 0
+        NT_FIRST="$f"; NT_FB="$b"; NT_FT=$(_norm_title "$title"); NT_FTOK=$(_ticket_tokens "$title" "$b")
+        continue
+      fi
+      [[ "$b" != "$NT_FB" ]] || continue
+      wt="${wt:-$root}"
+      if [[ -n "$NT_MAIN" && "$NT_HERE" == "$NT_MAIN" && "$wt" == "$NT_MAIN"/* ]]; then
+        echo "NEWER_TASK $f"; exit 0
+      fi
+      nt=$(_norm_title "$title")
+      if [[ -n "$nt" && "$nt" == "$NT_FT" ]]; then echo "NEWER_TASK $f"; exit 0; fi
+      if [[ -n "$NT_FTOK" ]] && [[ -n "$(comm -12 <(printf '%s\n' "$NT_FTOK") <(_ticket_tokens "$title" "$b") 2>/dev/null)" ]]; then
+        echo "NEWER_TASK $f"; exit 0
+      fi
+    done
+    ;;
+
+  adopt)
+    if [[ -z "$ID_LEGACY" ]]; then
+      echo "Nothing to adopt: this project's slug ($SLUG) did not change."
+      exit 0
+    fi
+    OLD_BUCKET="$GSTACK_STATE_ROOT/projects/$ID_LEGACY"
+    NEW_BUCKET="$GSTACK_STATE_ROOT/projects/$SLUG"
+    if [[ ! -d "$OLD_BUCKET" ]]; then
+      echo "Nothing to adopt: no earlier bucket at $OLD_BUCKET."
+      exit 0
+    fi
+    OLD_REAL=$(cd "$OLD_BUCKET" && pwd -P)
+
+    # Sets _ad_label and _ad_copyable (1/0) for one path relative to OLD_BUCKET.
+    _adopt_label() {
+      _ad_copyable=1
+      case "$1" in
+        checkpoints/*.md)
+          _classify_checkpoint "$OLD_BUCKET/$1"
+          case "$_ck_status" in
+            match|match-root) _ad_label="checkpoint: matching this project" ;;
+            foreign) _ad_label="checkpoint: another project (not copyable)"; _ad_copyable=0 ;;
+            *) _ad_label="checkpoint: unknown project (saved before identity stamps)" ;;
+          esac ;;
+        *) _ad_label="no project identity: the old bucket may be shared, check before copying" ;;
+      esac
+      if [[ "$_ad_copyable" -eq 1 && -e "$NEW_BUCKET/$1" ]]; then
+        _ad_label="$_ad_label; already in new bucket (skipped)"; _ad_copyable=0
+      fi
+    }
+
+    _adopt_copy() {
+      mkdir -p "$(dirname "$NEW_BUCKET/$1")" && cp -p "$OLD_BUCKET/$1" "$NEW_BUCKET/$1" && echo "COPIED $1"
+    }
+
+    if [[ ${#COPY_PATHS[@]} -gt 0 ]]; then
+      ADOPT_RC=0
+      for rel in "${COPY_PATHS[@]}"; do
+        case "/$rel/" in
+          */../*|*/./*|//*) echo "REFUSED $rel (must be a plain path relative to $OLD_BUCKET)"; ADOPT_RC=1; continue ;;
+        esac
+        src="$OLD_BUCKET/$rel"
+        src_dir=$(cd "$(dirname "$src")" 2>/dev/null && pwd -P) || src_dir=""
+        if [[ ! -f "$src" || -L "$src" || -z "$src_dir" ]] || [[ "$src_dir" != "$OLD_REAL" && "$src_dir" != "$OLD_REAL"/* ]]; then
+          echo "REFUSED $rel (not a regular file inside $OLD_BUCKET)"; ADOPT_RC=1; continue
+        fi
+        _adopt_label "$rel"
+        if [[ "$_ad_copyable" -eq 0 ]]; then
+          echo "SKIPPED $rel ($_ad_label)"; continue
+        fi
+        _adopt_copy "$rel" || ADOPT_RC=1
+      done
+      exit "$ADOPT_RC"
+    fi
+
+    echo "gstack now files this project under: $NEW_BUCKET"
+    echo "Earlier data (shared nested-group bucket): $OLD_BUCKET"
+    echo "Nothing is copied unless you confirm it. Files:"
+    ADOPT_FILES=$(cd "$OLD_BUCKET" && find . -type f 2>/dev/null | sed 's#^\./##' | LC_ALL=C sort)
+    INTERACTIVE=0
+    if [[ -t 0 && -t 1 ]]; then INTERACTIVE=1; fi
+    while IFS= read -r rel; do
+      [[ -n "$rel" ]] || continue
+      _adopt_label "$rel"
+      echo "  $rel  [$_ad_label]"
+      if [[ "$INTERACTIVE" -eq 1 && "$_ad_copyable" -eq 1 ]]; then
+        printf '    copy into the new bucket? [y/N] '
+        ans=""
+        read -r ans </dev/tty || ans=""
+        case "$ans" in y|Y|yes|YES) _adopt_copy "$rel" ;; esac
+      fi
+    done <<ADOPT_LIST
+$ADOPT_FILES
+ADOPT_LIST
+    if [[ "$INTERACTIVE" -eq 0 ]]; then
+      echo "Nothing copied. Copy chosen files with: gstack-slug --adopt-legacy --copy <path> [<path>...]"
+    fi
+    ;;
+esac

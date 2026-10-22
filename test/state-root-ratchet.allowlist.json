@@ -1,0 +1,13 @@
+[
+  { "path": "test/", "match": "*", "reason": "tests build fixtures with explicit state roots on purpose" },
+  { "path": "browse/test/", "match": "*", "reason": "tests build fixtures with explicit state roots on purpose" },
+  { "path": "docs/", "match": "*", "reason": "docs and design records quote paths as illustrative prose" },
+  { "path": "CHANGELOG.md", "match": "*", "reason": "release history quotes old and new chains as prose" },
+  { "path": "TODOS.md", "match": "*", "reason": "backlog prose, never executed" },
+  { "path": "lib/state-root.ts", "match": "*", "reason": "the TS owner of the chain" },
+  { "path": "bin/gstack-state-root.sh", "match": "*", "reason": "the bash owner of the chain" },
+  { "path": "careful/bin/check-careful.sh", "match": "_GSTACK_HOME_DIR=\"${GSTACK_HOME:-$HOME/.gstack}\"", "reason": "partial-upgrade fallback, reached only when an older hook-extract.sh lacks gstack_hook_state_root (legacy order kept on purpose)" },
+  { "path": "gstack-upgrade/SKILL.md.tmpl", "match": "elif [ -d \"$HOME/.gstack/repos/gstack/.git\" ]; then", "reason": "the relocated gstack checkout is an install location, not state" },
+  { "path": "gstack-upgrade/SKILL.md.tmpl", "match": "INSTALL_DIR=\"$HOME/.gstack/repos/gstack\"", "reason": "the relocated gstack checkout is an install location, not state" },
+  { "path": "land-and-deploy/sections/readiness-gate.md.tmpl", "match": "EVAL_DIR=~/.gstack/projects/$SLUG/evals", "reason": "reads gstack's own eval store, which test/helpers/eval-store.ts getProjectEvalDir writes under os.homedir()/.gstack/projects/<slug>/evals regardless of GSTACK_HOME; the reader must match the writer" }
+]

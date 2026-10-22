@@ -1,0 +1,6 @@
+Diff review.
+
+- [P1] The lock is released before the write lands. `bin/gstack-brain-sync:763`
+- P2/P3 nits: naming and a stale comment.
+
+Verdict: not ready

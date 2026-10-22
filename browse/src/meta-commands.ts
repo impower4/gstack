@@ -11,14 +11,14 @@ import { handleSkillCommand } from './browser-skill-commands';
 import { validateNavigationUrl } from './url-validation';
 import { checkScope, type TokenInfo } from './token-registry';
 import { validateOutputPath, validateReadPath, SAFE_DIRECTORIES, escapeRegExp } from './path-security';
-// Re-export for backward compatibility (tests import from meta-commands)
-export { validateOutputPath, escapeRegExp } from './path-security';
+import { guardScreenshotBuffer, guardScreenshotPath } from './screenshot-size-guard';
 import * as Diff from 'diff';
 import * as fs from 'fs';
 import * as path from 'path';
 import { writeSecureFile, mkdirSecure } from './file-permissions';
 import { TEMP_DIR } from './platform';
 import { resolveConfig } from './config';
+import { filterSessionCookies } from './session-persist';
 import type { Frame } from 'playwright';
 
 /** Tokenize a pipe segment respecting double-quoted strings. */
@@ -136,7 +136,7 @@ function parsePdfArgs(args: string[]): ParsedPdfArgs {
   return result;
 }
 
-function parsePdfFromFile(payloadPath: string): ParsedPdfArgs {
+export function parsePdfFromFile(payloadPath: string): ParsedPdfArgs {
   // Parity with load-html --from-file (browse/src/write-commands.ts) and
   // the direct load-html <file> path: every caller-supplied file path
   // must pass validateReadPath so the safe-dirs policy can't be skirted
@@ -149,7 +149,16 @@ function parsePdfFromFile(payloadPath: string): ParsedPdfArgs {
     );
   }
   const raw = fs.readFileSync(payloadPath, 'utf8');
-  const json = JSON.parse(raw);
+  let json: any;
+  try {
+    json = JSON.parse(raw);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    throw new Error(`pdf: --from-file ${payloadPath} is not valid JSON (${msg}).`);
+  }
+  if (json === null || typeof json !== 'object' || Array.isArray(json)) {
+    throw new Error(`pdf: --from-file ${payloadPath} must be a JSON object, got ${Array.isArray(json) ? 'array' : typeof json}.`);
+  }
   const out: ParsedPdfArgs = {
     output: json.output || `${TEMP_DIR}/browse-page.pdf`,
     format: json.format,
@@ -249,15 +258,14 @@ export async function handleMetaCommand(
   tokenInfo?: TokenInfo | null,
   opts?: MetaCommandOpts,
 ): Promise<string> {
-  // Per-tab operations use the active session; global operations use bm directly
-  const session = bm.getActiveSession();
-
+  // Per-tab operations read the active session where they run, so status,
+  // stop and restart still answer when every tab was closed (#3167).
   switch (command) {
     // ─── Tabs ──────────────────────────────────────────
     case 'tabs': {
       const tabs = await bm.getTabListWithTitles();
       return tabs.map(t =>
-        `${t.active ? '→ ' : '  '}[${t.id}] ${t.title || '(untitled)'} — ${t.url}`
+        `${t.active ? '→ ' : '  '}[${t.id}] ${t.busy ? '(not responding)' : t.title || '(untitled)'} — ${t.url}`
       ).join('\n');
     }
 
@@ -394,15 +402,19 @@ export async function handleMetaCommand(
 
     // ─── Server Control ────────────────────────────────
     case 'status': {
-      const page = bm.getPage();
       const tabs = bm.getTabCount();
       const mode = bm.getConnectionMode();
+      const activeTab = await bm.probeActiveTab();
       return [
         `Status: healthy`,
         `Mode: ${mode}`,
-        `URL: ${page.url()}`,
+        `URL: ${bm.getCurrentUrl()}`,
         `Tabs: ${tabs}`,
         `PID: ${process.pid}`,
+        // #3247: name the busy tab and the ways out that keep the session.
+        ...(activeTab && !activeTab.responsive
+          ? [`Active tab ${activeTab.id}: not responding. Switch with: browse tab <id>, or close it: browse closetab ${activeTab.id}`]
+          : []),
       ].join('\n');
     }
 
@@ -411,14 +423,17 @@ export async function handleMetaCommand(
     }
 
     case 'stop': {
-      await shutdown();
+      // Return the acknowledgement before closing the listener. Shutting down
+      // inline resets the CLI's fetch, which it reasonably interprets as a
+      // crash and then restarts the daemon it was asked to stop.
+      setTimeout(() => { void shutdown(); }, 25).unref?.();
       return 'Server stopped';
     }
 
     case 'restart': {
       // Signal that we want a restart — the CLI will detect exit and restart
       console.log('[browse] Restart requested. Exiting for CLI to restart.');
-      await shutdown();
+      setTimeout(() => { void shutdown(); }, 25).unref?.();
       return 'Restarting...';
     }
 
@@ -435,15 +450,18 @@ export async function handleMetaCommand(
       const remaining: string[] = [];
       let flagSelector: string | undefined;
       for (let i = 0; i < args.length; i++) {
-        if (args[i] === '--viewport') {
+        const inline = /^(--clip|--selector)=(.*)$/s.exec(args[i]);
+        const flag = inline ? inline[1] : args[i];
+        const flagValue = () => (inline ? inline[2] : args[++i]);
+        if (flag === '--viewport') {
           viewportOnly = true;
-        } else if (args[i] === '--base64') {
+        } else if (flag === '--base64') {
           base64Mode = true;
-        } else if (args[i] === '--selector') {
-          flagSelector = args[++i];
+        } else if (flag === '--selector') {
+          flagSelector = flagValue();
           if (!flagSelector) throw new Error('Usage: screenshot --selector <css> [path]');
-        } else if (args[i] === '--clip') {
-          const coords = args[++i];
+        } else if (flag === '--clip') {
+          const coords = flagValue();
           if (!coords) throw new Error('Usage: screenshot --clip x,y,w,h [path]');
           const parts = coords.split(',').map(Number);
           if (parts.length !== 4 || parts.some(isNaN))
@@ -497,6 +515,10 @@ export async function handleMetaCommand(
           buffer = await page.screenshot({ clip: clipRect });
         } else {
           buffer = await page.screenshot({ fullPage: !viewportOnly });
+          // Guard the most common API-bricking case (fullPage). Element /
+          // clip captures usually stay within the cap; we still guard the
+          // path-mode below for fullPage writes.
+          ({ buffer } = await guardScreenshotBuffer(buffer));
         }
         if (buffer.length > 10 * 1024 * 1024) {
           throw new Error('Screenshot too large for --base64 (>10MB). Use disk path instead.');
@@ -517,6 +539,7 @@ export async function handleMetaCommand(
       }
 
       await page.screenshot({ path: outputPath, fullPage: !viewportOnly });
+      if (!viewportOnly) await guardScreenshotPath(outputPath);
       return `Screenshot saved${viewportOnly ? ' (viewport)' : ''}: ${outputPath}`;
     }
 
@@ -567,6 +590,7 @@ export async function handleMetaCommand(
         const screenshotPath = `${prefix}-${vp.name}.png`;
         validateOutputPath(screenshotPath);
         await page.screenshot({ path: screenshotPath, fullPage: true });
+        await guardScreenshotPath(screenshotPath);
         results.push(`${vp.name} (${vp.width}x${vp.height}): ${screenshotPath}`);
       }
 
@@ -651,40 +675,13 @@ export async function handleMetaCommand(
           lastWasWrite = WRITE_COMMANDS.has(c.name);
         }
       } else {
-        // Fallback: direct dispatch (CLI mode, no server context)
-        const { handleReadCommand } = await import('./read-commands');
-        const { handleWriteCommand } = await import('./write-commands');
-
-        for (const c of commands) {
-          const name = c.name;
-          const cmdArgs = c.args;
-          const label = c.rawName === name ? name : `${c.rawName}→${name}`;
-          try {
-            let result: string;
-            if (WRITE_COMMANDS.has(name)) {
-              if (bm.isWatching()) {
-                result = 'BLOCKED: write commands disabled in watch mode';
-              } else {
-                result = await handleWriteCommand(name, cmdArgs, session, bm);
-              }
-              lastWasWrite = true;
-            } else if (READ_COMMANDS.has(name)) {
-              result = await handleReadCommand(name, cmdArgs, session);
-              if (PAGE_CONTENT_COMMANDS.has(name)) {
-                result = wrapUntrustedContent(result, bm.getCurrentUrl());
-              }
-              lastWasWrite = false;
-            } else if (META_COMMANDS.has(name)) {
-              result = await handleMetaCommand(name, cmdArgs, bm, shutdown, tokenInfo, opts);
-              lastWasWrite = false;
-            } else {
-              throw new Error(`Unknown command: ${c.rawName}`);
-            }
-            results.push(`[${label}] ${result}`);
-          } catch (err: any) {
-            results.push(`[${label}] ERROR: ${err.message}`);
-          }
-        }
+        // No fallback dispatcher. The old direct-dispatch branch here
+        // re-implemented command routing WITHOUT the server pipeline's
+        // security gates (scope, domain, tab ownership, rate limit, hidden
+        // element stripping, scoped-token enveloping, JS-origin assertion).
+        // It was unreachable in production (server.ts always passes
+        // executeCommand) and one boolean away from being live.
+        throw new Error('chain requires the browse server (no executeCommand context)');
       }
 
       // Wait for network to settle after write commands before returning
@@ -726,7 +723,7 @@ export async function handleMetaCommand(
     // ─── Snapshot ─────────────────────────────────────
     case 'snapshot': {
       const isScoped = tokenInfo && tokenInfo.clientId !== 'root';
-      const snapshotResult = await handleSnapshot(args, session, {
+      const snapshotResult = await handleSnapshot(args, bm.getActiveSession(), {
         splitForScoped: !!isScoped,
       });
       // Scoped tokens get split format (refs outside envelope); root gets basic wrapping
@@ -743,6 +740,7 @@ export async function handleMetaCommand(
     }
 
     case 'resume': {
+      const session = bm.getActiveSession();
       bm.resume();
       // Re-snapshot to capture current page state after human interaction
       const isScoped2 = tokenInfo && tokenInfo.clientId !== 'root';
@@ -784,7 +782,7 @@ export async function handleMetaCommand(
         let activated = false;
         for (const appName of appNames) {
           try {
-            execSync(`osascript -e 'tell application "${appName}" to activate'`, { stdio: 'pipe', timeout: 3000 });
+            execSync(`osascript -e 'tell application "${appName}" to activate'`, { stdio: 'pipe', timeout: 3000, windowsHide: true });
             activated = true;
             break;
           } catch (err: any) {
@@ -848,7 +846,7 @@ export async function handleMetaCommand(
       const { execSync } = await import('child_process');
       let gitRoot: string;
       try {
-        gitRoot = execSync('git rev-parse --show-toplevel', { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
+        gitRoot = execSync('git rev-parse --show-toplevel', { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true }).trim();
       } catch (err: any) {
         // execSync throws with exit status on non-git directories
         if (err?.status === undefined && !err?.message?.includes('Command failed')) throw err;
@@ -940,15 +938,13 @@ export async function handleMetaCommand(
         if (!Array.isArray(data.cookies) || !Array.isArray(data.pages)) {
           throw new Error('Invalid state file: expected cookies and pages arrays');
         }
-        // Validate and filter cookies — reject malformed or internal-network cookies
-        const validatedCookies = data.cookies.filter((c: any) => {
-          if (typeof c !== 'object' || !c) return false;
-          if (typeof c.name !== 'string' || typeof c.value !== 'string') return false;
-          if (typeof c.domain !== 'string' || !c.domain) return false;
-          const d = c.domain.startsWith('.') ? c.domain.slice(1) : c.domain;
-          if (d === 'localhost' || d.endsWith('.internal') || d === '169.254.169.254') return false;
-          return true;
-        });
+        // Validate and filter cookies via the shared hygiene filter in
+        // session-persist.ts (isInternalCookieDomain): rejects malformed
+        // cookies and internal-network domains — localhost, *.internal,
+        // loopback literals (127.x, ::1), and link-local/cloud-metadata
+        // (169.254.x) — that a tampered state file could use to reach local
+        // services or the metadata endpoint.
+        const validatedCookies = filterSessionCookies(data.cookies);
         if (validatedCookies.length < data.cookies.length) {
           console.warn(`[browse] Filtered ${data.cookies.length - validatedCookies.length} invalid cookies from state file`);
         }
@@ -1143,6 +1139,13 @@ export async function handleMetaCommand(
       // for projects that never use the CDP escape hatch.
       const { handleCdpCommand } = await import('./cdp-commands');
       return await handleCdpCommand(args, bm);
+    }
+
+    case 'memory': {
+      // Lazy import — pulls in cdp-bridge + memory-snapshot + buffer accessors
+      // that aren't useful for projects that never run the diagnostic.
+      const { handleMemoryCommand } = await import('./memory-command');
+      return await handleMemoryCommand(args, bm);
     }
 
     default:

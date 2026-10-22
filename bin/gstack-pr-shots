@@ -1,0 +1,113 @@
+#!/usr/bin/env -S bun --no-env-file --config=/dev/null
+/**
+ * gstack-pr-shots — a before/after image of a change, for a PR body (/ship's
+ * Capy section, capy/skill/gstack/captain.md).
+ *
+ *   gstack-pr-shots --caption "<what changed and why>" --path <tracked file> [--heading "<section>"] [--base <ref>]
+ *   gstack-pr-shots --caption "<what changed and why>" --before <capture> --after <capture> [--kind terminal|prompt]
+ *     [--title <text>] [--name <slug>] [--out <dir>] [--json]
+ *
+ * Writes shot.html (stacked Before/After, changed hunks only, −/+ gutter), text.md (the collapsed text
+ * version for the PR body) and, when a browser is available, pair.png; prints SHOT_HTML:, SHOT_TEXT: and
+ * SHOT_PNG: (a path, or `unavailable (<reason>)` with exit 0 so the caller screenshots shot.html itself).
+ * Inputs are read as data and secret-scanned before rendering. Logic: lib/pr-shots.ts.
+ */
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import { spawnSync } from 'node:child_process';
+import { slugFromEnvironment } from '../lib/bin-context';
+import { EXIT, exitTableHelp } from '../lib/headless-artifacts';
+import { pickEngine, render } from '../lib/aside-render';
+import { buildPage, defaultBase, pathSides, readCapture, resolveCommit, scanSides, type ShotError, type ShotKind, type Side } from '../lib/pr-shots';
+import { resultLine } from '../lib/result-codes';
+import { resolveStateRoot } from '../lib/state-root';
+
+const HELP = `gstack-pr-shots — before/after image of a change for a PR body (capy/skill/gstack/captain.md)
+
+  --caption <text>        required: what changed and why (shown under the title and in the text version)
+  --path <file>           a tracked file: base version vs working tree (source text, nothing executed)
+    [--heading <title>]   only that Markdown section (fence-aware, same parser as the Captain brief)
+    [--base <ref>]        default: the merge base with origin/HEAD
+  --before <file> --after <file>   two captures (terminal output, a rendered prompt) inside the repo or state root
+  [--kind terminal|prompt]  pane styling (default prompt; terminal is a dark panel)
+  [--title <text>] [--name <slug>] [--out <dir>] [--json]
+
+Example:
+  gstack-pr-shots --path ship/SKILL.md --heading "Step 19: Create PR/MR" --caption "PR body opens with What changed, Why and Approvals under Capy"
+
+${exitTableHelp()}`;
+
+const VALUE = new Set(['--caption', '--path', '--heading', '--base', '--before', '--after', '--kind', '--title', '--name', '--out']);
+
+function fail(e: ShotError): number {
+  process.stderr.write(resultLine('gstack-pr-shots', e.code, e.message) + '\n');
+  return e.code === 'PR_SHOTS_IDENTICAL' || e.code === 'PR_SHOTS_RENDER_FAILED' ? EXIT.fail : EXIT.refused;
+}
+
+async function main(argv: string[]): Promise<number> {
+  if (!argv.length || argv[0] === '--help' || argv[0] === '-h') { process.stdout.write(HELP + '\n'); return argv.length ? EXIT.ok : EXIT.usage; }
+  const f: Record<string, string> = {}; let json = false;
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i]!;
+    if (a === '--json') { json = true; continue; }
+    if (!VALUE.has(a) || argv[i + 1] === undefined) { process.stderr.write(`gstack-pr-shots: ${VALUE.has(a) ? `${a} needs a value` : `unknown argument ${a}`}\n${HELP}\n`); return EXIT.usage; }
+    f[a] = argv[++i]!;
+  }
+  const usage = (m: string) => { process.stderr.write(`gstack-pr-shots: ${m}\n`); return EXIT.usage; };
+  if (!f['--caption']?.trim()) return usage('--caption "<what changed and why>" is required');
+  const byPath = f['--path'] !== undefined; const byFiles = f['--before'] !== undefined || f['--after'] !== undefined;
+  if (byPath === byFiles) return usage('give either --path <file> or both --before <file> --after <file>');
+  if (byFiles && (!f['--before'] || !f['--after'])) return usage('--before and --after go together');
+  if (byFiles && (f['--heading'] || f['--base'])) return usage('--heading and --base apply to --path only');
+  const kind = (f['--kind'] ?? 'prompt') as ShotKind;
+  if (kind !== 'terminal' && kind !== 'prompt') return usage('--kind must be terminal or prompt');
+
+  const cwd = process.cwd();
+  const stateRoot = resolveStateRoot(process.env);
+  const top = spawnSync('git', ['rev-parse', '--show-toplevel'], { cwd, encoding: 'utf8' });
+  const repo = top.status === 0 ? top.stdout.trim() : cwd;
+  let before: Side; let after: Side;
+  if (byPath) {
+    const base = f['--base'] ? resolveCommit(repo, f['--base']) : defaultBase(repo);
+    if (typeof base !== 'string') return fail(base);
+    const sides = pathSides(cwd, f['--path']!, base, f['--heading']);
+    if ('code' in sides) return fail(sides);
+    ({ before, after } = sides);
+  } else {
+    const b = readCapture(path.resolve(f['--before']!), [repo, stateRoot], 'before');
+    if (typeof b !== 'string') return fail(b);
+    const a = readCapture(path.resolve(f['--after']!), [repo, stateRoot], 'after');
+    if (typeof a !== 'string') return fail(a);
+    const what = kind === 'terminal' ? 'captured output' : 'captured text';
+    before = { text: b, label: `Before · ${path.basename(f['--before']!)} · ${what}` };
+    after = { text: a, label: `After · ${path.basename(f['--after']!)} · ${what}` };
+  }
+  const title = f['--title'] ?? (byPath ? (f['--heading'] ? `${f['--path']} § ${f['--heading']}` : f['--path']!) : 'Before and after');
+  const refused = scanSides([['before', before.text], ['after', after.text], ['caption', f['--caption']!], ['title', title]]);
+  if (refused) return fail(refused);
+  const page = buildPage({ before, after, title, caption: f['--caption']!.trim(), kind });
+  if ('code' in page) return fail(page);
+
+  const name = (f['--name'] ?? title).replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^[-.]+|-+$/g, '').slice(0, 60) || 'shot';
+  const out = path.resolve(f['--out'] ?? path.join(stateRoot, 'projects', slugFromEnvironment(stateRoot, cwd) || 'unknown', 'pr-shots', name));
+  fs.mkdirSync(out, { recursive: true, mode: 0o700 });
+  for (const old of ['shot.html', 'text.md', 'pair.png']) fs.rmSync(path.join(out, old), { force: true });
+  const html = path.join(out, 'shot.html'); const text = path.join(out, 'text.md'); const png = path.join(out, 'pair.png');
+  fs.writeFileSync(html, page.html, { mode: 0o600 });
+  fs.writeFileSync(text, page.text, { mode: 0o600 });
+  const lines = [`SHOT_HTML: ${html}`, `SHOT_TEXT: ${text}`];
+  let pngLine: string; let code = EXIT.ok; let pngPath: string | null = null;
+  const engine = pickEngine();
+  if (!engine.engine) pngLine = `SHOT_PNG: unavailable (${engine.error}); screenshot ${html} at 880px wide with your own browser, or use ${text}`;
+  else {
+    const r = await render({ file: html, serveRoot: out, waitFor: { selector: '#shot' }, steps: [{ kind: 'screenshot', out: png, selector: '#shot', width: 912, deviceScaleFactor: 2 }] });
+    if (r.ok && fs.existsSync(png)) { pngLine = `SHOT_PNG: ${png} engine=${r.engine}`; pngPath = png; }
+    else { pngLine = `SHOT_PNG: failed (${(r.error ?? 'no output').split('\n')[0]})`; code = fail({ code: 'PR_SHOTS_RENDER_FAILED', message: (r.error ?? 'no output').split('\n')[0]! }); }
+  }
+  lines.push(pngLine, `SHOT_CHANGED: ${page.changed} line` + (page.changed === 1 ? '' : 's'));
+  if (json) process.stdout.write(JSON.stringify({ html, text, png: pngPath, changed: page.changed, caption: f['--caption']!.trim() }) + '\n');
+  else process.stdout.write(lines.join('\n') + '\n');
+  return code;
+}
+
+main(process.argv.slice(2)).then(c => { process.exitCode = c; });

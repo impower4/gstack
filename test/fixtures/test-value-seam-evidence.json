@@ -1,0 +1,14 @@
+{
+  "_comment": "Evidence fields from review test-value findings on the test-only export. known_good must pass recordsNonTestCallerSearch; known_bad must fail.",
+  "known_good": {
+    "git-grep": {"non_test_callers": 0, "search": "git grep -n -F -w resetPricingCache -- . ':!test/'"},
+    "ripgrep": {"non_test_callers": 0, "search": "rg -n -w resetPricingCache --glob '!test/**'"},
+    "grep-r": "non_test_callers: 0 (grep -rn resetPricingCache src/)",
+    "grep-tool": {"non_test_callers": 0, "search": "Grep tool for resetPricingCache outside test/"}
+  },
+  "known_bad": {
+    "no-search": {"non_test_callers": 0},
+    "no-caller-count": {"search": "git grep -n resetPricingCache"},
+    "prose-only": "Only tests seem to use it."
+  }
+}

@@ -1,0 +1,62 @@
+import { expect, test } from 'bun:test';
+import { cpuMs } from './helpers/cpu';
+
+test('wall-clock bounds', async () => {
+  const t0 = Date.now();
+  run();
+  expect(Date.now() - t0).toBeLessThan(400); // HIT wall-time-bound
+  const started = performance.now();
+  const elapsed = performance.now() - started;
+  expect(elapsed).toBeLessThan(500); // HIT wall-time-bound
+  expect(result.elapsedMs).toBeLessThanOrEqual(2_000); // HIT wall-time-bound
+  expect(r.wall).toBeGreaterThan(1500); // HIT wall-time-bound
+  assert.ok(Date.now() - t0 < 1000); // HIT wall-time-bound
+  expect(input.deadlineAt - Date.now()).toBeLessThanOrEqual(1_500_000); // HIT wall-time-bound
+});
+
+test('CPU-time bounds', () => {
+  const ms = cpuMs(() => parse(input));
+  expect(ms).toBeLessThan(150); // HIT cpu-time-bound
+  expect(cpuMs(() => parse(input))).toBeLessThan(1000); // HIT cpu-time-bound
+  const usage = process.cpuUsage();
+  expect(process.cpuUsage(usage).user / 1000).toBeLessThan(200); // HIT cpu-time-bound
+});
+
+test('sleep then assert', async () => {
+  fire();
+  await Bun.sleep(50); // HIT sleep-then-assert
+  expect(calls).toBe(1);
+  await new Promise((r) => setTimeout(r, 100)); // HIT sleep-then-assert
+
+  expect(seen).toEqual(['a']);
+});
+
+test('not timing-dependent', async () => {
+  expect(result.elapsedMs).toBeGreaterThanOrEqual(0); // CLEAN
+  expect(entity.ttl_ms).toBeGreaterThan(1000); // CLEAN
+  expect(opts.timeoutMs).toBeLessThanOrEqual(60_000); // CLEAN
+  expect(CAPTURE_LONG_MS + 10_000).toBeLessThan(DEFAULT_SHARD_TIMEOUT_MS); // CLEAN
+  expect(lease.expiresAt).toBeGreaterThan(Date.now()); // CLEAN
+  expect(stats.reportMtimeMs).toBeLessThan(later); // CLEAN
+  expect(kept.length).toBeLessThan(items.length); // CLEAN
+  for (let i = 0; i < 4; i++) expect(step(i)).toBe('question'); // CLEAN
+  const log = path.join(dir, `run-${Date.now()}.log`);
+  expect(log.length).toBeGreaterThan(10); // CLEAN
+  expect(spawn(['bash', '-c', 'sleep 2; echo --timeout-ms 600']).status).toBe(0); // CLEAN
+  while (!fs.existsSync(ready) && Date.now() < deadline) await Bun.sleep(10); // CLEAN
+  expect(fs.existsSync(ready)).toBe(true);
+  await new Promise((r) => setTimeout(r, 0)); // CLEAN
+  expect(flushed).toBe(true);
+  const src = text.indexOf('await Bun.sleep(100)'); // CLEAN
+  expect(src).toBeGreaterThan(-1);
+});
+
+test('escapes', async () => {
+  // gstack-timing-ok: the 30 s cap is the product contract, measured at 2 s p99 under full suite load
+  expect(Date.now() - t0).toBeLessThan(30_000); // ESCAPED wall-time-bound
+  expect(Date.now() - t0).toBeLessThan(5_000); /* gstack-timing-ok: a hang check; the call returns in 40 ms */ // ESCAPED wall-time-bound
+  // gstack-timing-ok:
+  expect(Date.now() - t0).toBeLessThan(5_000); // UNREASONED wall-time-bound
+  await Bun.sleep(1100); // gstack-timing-ok: the mtime resolution is one second; the assert reads the file, not a race // ESCAPED sleep-then-assert
+  expect(stat.mtimeMs).not.toBe(before);
+});

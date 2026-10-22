@@ -19,10 +19,12 @@
  */
 
 import { describe, test, expect, beforeAll, afterAll } from 'bun:test';
+import { JUDGE_MS, CAPTURE_MS } from './helpers/eval-budgets';
 import { ClaudeAdapter } from './helpers/providers/claude';
 import { GptAdapter } from './helpers/providers/gpt';
 import { GeminiAdapter } from './helpers/providers/gemini';
 import { runBenchmark } from './helpers/benchmark-runner';
+import { PRICING } from './helpers/pricing';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
@@ -30,9 +32,30 @@ import * as os from 'os';
 // --- Prerequisites / gating ---
 
 const evalsEnabled = !!process.env.EVALS;
-const describeIfEvals = evalsEnabled ? describe : describe.skip;
+// External-service tests are periodic-tier (CLAUDE.md tiering rule 3) —
+// the header above says so, but without a whole-file guard the sharded gate
+// runner still selects this file into gate. The positive form below is the
+// canonical guard shape classifyPaidTestFile greps for.
+const tierOk = process.env.EVALS_TIER === 'periodic';
+const describeIfEvals = evalsEnabled && tierOk ? describe : describe.skip;
+if (evalsEnabled && !tierOk) {
+  process.stderr.write('\nbenchmark-providers: SKIPPED — external-service test, periodic tier only\n');
+}
 
 const PROMPT = 'Reply with exactly this text and nothing else: ok';
+
+// New configured models can return valid completions before their prices are
+// published in our catalog. Preserve the estimator's explicit unknown-price
+// fallback; zero must still fail for a model whose price is known.
+function assertCostEstimate(cost: number, model: string): void {
+  expect(Number.isFinite(cost)).toBe(true);
+  if (Object.hasOwn(PRICING, model)) {
+    expect(cost).toBeGreaterThan(0);
+  } else {
+    expect(cost).toBe(0);
+    process.stderr.write(`\nCost estimate unavailable for ${model}; token counts remain verified.\n`);
+  }
+}
 
 // Per-provider gate — each test checks its own availability and skips cleanly.
 // We construct adapters outside `test` so Bun's test reporter shows the skip reason.
@@ -86,7 +109,7 @@ describeIfEvals('multi-provider benchmark adapters (live)', () => {
       process.stderr.write(`\nclaude live smoke: SKIPPED — ${check.reason}\n`);
       return;
     }
-    const result = await claude.run({ prompt: PROMPT, workdir, timeoutMs: 120_000 });
+    const result = await claude.run({ prompt: PROMPT, workdir, timeoutMs: JUDGE_MS });
     if (result.error) {
       throw new Error(`claude errored: ${result.error.code} — ${result.error.reason}`);
     }
@@ -97,8 +120,8 @@ describeIfEvals('multi-provider benchmark adapters (live)', () => {
     expect(typeof result.modelUsed).toBe('string');
     expect(result.modelUsed.length).toBeGreaterThan(0);
     const cost = claude.estimateCost(result.tokens, result.modelUsed);
-    expect(cost).toBeGreaterThan(0);
-  }, 150_000);
+    assertCostEstimate(cost, result.modelUsed);
+  }, CAPTURE_MS);
 
   test('gpt: trivial prompt produces parseable output', async () => {
     const check = await gpt.available();
@@ -106,7 +129,7 @@ describeIfEvals('multi-provider benchmark adapters (live)', () => {
       process.stderr.write(`\ngpt live smoke: SKIPPED — ${check.reason}\n`);
       return;
     }
-    const result = await gpt.run({ prompt: PROMPT, workdir, timeoutMs: 120_000 });
+    const result = await gpt.run({ prompt: PROMPT, workdir, timeoutMs: JUDGE_MS });
     if (result.error) {
       throw new Error(`gpt errored: ${result.error.code} — ${result.error.reason}`);
     }
@@ -115,9 +138,10 @@ describeIfEvals('multi-provider benchmark adapters (live)', () => {
     expect(result.tokens.output).toBeGreaterThan(0);
     expect(result.durationMs).toBeGreaterThan(0);
     expect(typeof result.modelUsed).toBe('string');
+    expect(result.modelUsed.length).toBeGreaterThan(0);
     const cost = gpt.estimateCost(result.tokens, result.modelUsed);
-    expect(cost).toBeGreaterThan(0);
-  }, 150_000);
+    assertCostEstimate(cost, result.modelUsed);
+  }, CAPTURE_MS);
 
   test('gemini: trivial prompt produces parseable output', async () => {
     const check = await gemini.available();
@@ -125,24 +149,29 @@ describeIfEvals('multi-provider benchmark adapters (live)', () => {
       process.stderr.write(`\ngemini live smoke: SKIPPED — ${check.reason}\n`);
       return;
     }
-    const result = await gemini.run({ prompt: PROMPT, workdir, timeoutMs: 120_000 });
+    const result = await gemini.run({ prompt: PROMPT, workdir, timeoutMs: JUDGE_MS });
     if (result.error) {
+      // auth / rate_limit are ENVIRONMENT conditions the test can't act on
+      // (e.g. Google deprecated the individual code-assist auth path — the
+      // adapter classifies "no longer supported" as auth). A live smoke
+      // reports them as a skip, not a false adapter failure. timeout/unknown
+      // still fail: those are the drift classes this test exists to catch.
+      if (result.error.code === 'auth' || result.error.code === 'rate_limit') {
+        process.stderr.write(`\ngemini live smoke: SKIPPED — ${result.error.code}: ${result.error.reason.slice(0, 160)}\n`);
+        return;
+      }
       throw new Error(`gemini errored: ${result.error.code} — ${result.error.reason}`);
     }
-    // Gemini CLI occasionally returns empty output even on successful runs
-    // (model returned content the CLI parser missed, intermittent stream issues).
-    // We assert the adapter ran end-to-end without erroring and reports a non-
-    // empty token count instead of grepping the literal "ok" — that string
-    // assertion was too brittle for a smoke that's really about "did the
-    // adapter wire up and the run terminate successfully?"
-    expect(typeof result.output).toBe('string');
-    // Gemini CLI sometimes returns 0 tokens in the result event (older responses);
-    // assert non-negative instead of strictly positive.
-    expect(result.tokens.input).toBeGreaterThanOrEqual(0);
-    expect(result.tokens.output).toBeGreaterThanOrEqual(0);
+    // Adapter must never report empty-success (#2159). After content/stats
+    // parsing, a healthy run has non-empty assistant text + token counts.
+    expect(result.output.trim().length).toBeGreaterThan(0);
+    expect(result.output.toLowerCase()).toContain('ok');
+    expect(result.tokens.input).toBeGreaterThan(0);
+    expect(result.tokens.output).toBeGreaterThan(0);
     expect(result.durationMs).toBeGreaterThan(0);
     expect(typeof result.modelUsed).toBe('string');
-  }, 150_000);
+    expect(result.modelUsed.length).toBeGreaterThan(0);
+  }, CAPTURE_MS);
 
   test('timeout error surfaces as error.code=timeout (no exception)', async () => {
     // Use whatever adapter is available first — all three should share timeout semantics.
@@ -170,7 +199,7 @@ describeIfEvals('multi-provider benchmark adapters (live)', () => {
       prompt: PROMPT,
       workdir,
       providers: ['claude', 'gpt', 'gemini'],
-      timeoutMs: 120_000,
+      timeoutMs: JUDGE_MS,
       skipUnavailable: false,
     });
     expect(report.entries).toHaveLength(3);
@@ -188,5 +217,5 @@ describeIfEvals('multi-provider benchmark adapters (live)', () => {
     if (!hadSuccess) {
       process.stderr.write('\nrunBenchmark live: no provider produced a clean result (no auth?)\n');
     }
-  }, 300_000);
+  }, CAPTURE_MS);
 });

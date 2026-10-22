@@ -1,17 +1,23 @@
 import { describe, test, expect, beforeAll, afterAll } from 'bun:test';
-import { runSkillTest } from './helpers/session-runner';
+import { JUDGE_MS, CAPTURE_MS } from './helpers/eval-budgets';
+import { runSkillTest, SESSION_DRAIN_GRACE_MS } from './helpers/session-runner';
 import {
   ROOT, browseBin, runId, evalsEnabled, selectedTests,
   describeIfSelected, testConcurrentIfSelected,
   copyDirSync, setupBrowseShims, logCost, recordE2E,
   createEvalCollector, finalizeEvalCollector,
 } from './helpers/e2e-helpers';
+import { extractSkillSections, REVIEW_E2E_SECTIONS } from './helpers/skill-fixture';
+import { expectContract } from './helpers/eval-store';
 import { spawnSync } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
+import { carriesDetectorRows, DETECT_SAMPLE, installFakeImpeccable } from './helpers/fake-impeccable';
 
 const evalCollector = createEvalCollector('e2e-review');
+// Capture cleanup and recording must finish before Bun starts its retry.
+const REVIEW_FINALIZE_MS = SESSION_DRAIN_GRACE_MS + 5_000;
 
 // --- B5: Review skill E2E ---
 
@@ -41,8 +47,12 @@ describeIfSelected('Review skill E2E', ['review-sql-injection'], () => {
     run('git', ['add', 'user_controller.rb']);
     run('git', ['commit', '-m', 'add user controller']);
 
-    // Copy review skill files
-    fs.copyFileSync(path.join(ROOT, 'review', 'SKILL.md'), path.join(reviewDir, 'review-SKILL.md'));
+    // Review skill files — extract only the core review workflow sections
+    // (CLAUDE.md: "E2E test fixtures: extract, don't copy").
+    fs.writeFileSync(
+      path.join(reviewDir, 'review-SKILL.md'),
+      extractSkillSections(path.join(ROOT, 'review'), REVIEW_E2E_SECTIONS),
+    );
     fs.copyFileSync(path.join(ROOT, 'review', 'checklist.md'), path.join(reviewDir, 'review-checklist.md'));
     fs.copyFileSync(path.join(ROOT, 'review', 'greptile-triage.md'), path.join(reviewDir, 'review-greptile-triage.md'));
   });
@@ -61,18 +71,18 @@ Run /review on the current diff (git diff main...HEAD).
 Write your review findings to ${reviewDir}/review-output.md`,
       workingDirectory: reviewDir,
       maxTurns: 20,
-      timeout: 180_000,
+      timeout: CAPTURE_MS,
       testName: 'review-sql-injection',
       runId,
     });
 
     logCost('/review', result);
-    recordE2E(evalCollector, '/review SQL injection', 'Review skill E2E', result);
-    expect(result.exitReason).toBe('success');
-
-    // Verify the review output mentions SQL injection-related findings
-    const reviewOutputPath = path.join(reviewDir, 'review-output.md');
-    if (fs.existsSync(reviewOutputPath)) {
+    let passed = false;
+    try {
+      expect(result.exitReason).toBe('success');
+      expect(result.browseErrors).toEqual([]);
+      const reviewOutputPath = path.join(reviewDir, 'review-output.md');
+      expect(fs.existsSync(reviewOutputPath)).toBe(true);
       const reviewContent = fs.readFileSync(reviewOutputPath, 'utf-8').toLowerCase();
       const hasSqlContent =
         reviewContent.includes('sql') ||
@@ -83,14 +93,18 @@ Write your review findings to ${reviewDir}/review-output.md`,
         reviewContent.includes('user_input') ||
         reviewContent.includes('unsanitized');
       expect(hasSqlContent).toBe(true);
+      passed = true;
+    } finally {
+      recordE2E(evalCollector, '/review SQL injection', 'Review skill E2E', result, { passed });
     }
-  }, 210_000);
+  }, CAPTURE_MS + REVIEW_FINALIZE_MS);
 });
 
 // --- Review: Enum completeness E2E ---
 
 describeIfSelected('Review enum completeness E2E', ['review-enum-completeness'], () => {
   let enumDir: string;
+  let enumCaptureSequence = 0;
 
   beforeAll(() => {
     enumDir = fs.mkdtempSync(path.join(os.tmpdir(), 'skill-e2e-enum-'));
@@ -115,8 +129,11 @@ describeIfSelected('Review enum completeness E2E', ['review-enum-completeness'],
     run('git', ['add', 'order.rb']);
     run('git', ['commit', '-m', 'add returned status']);
 
-    // Copy review skill files
-    fs.copyFileSync(path.join(ROOT, 'review', 'SKILL.md'), path.join(enumDir, 'review-SKILL.md'));
+    // Review skill files — extracted sections, not the full 1870-line file.
+    fs.writeFileSync(
+      path.join(enumDir, 'review-SKILL.md'),
+      extractSkillSections(path.join(ROOT, 'review'), REVIEW_E2E_SECTIONS),
+    );
     fs.copyFileSync(path.join(ROOT, 'review', 'checklist.md'), path.join(enumDir, 'review-checklist.md'));
     fs.copyFileSync(path.join(ROOT, 'review', 'greptile-triage.md'), path.join(enumDir, 'review-greptile-triage.md'));
   });
@@ -126,43 +143,51 @@ describeIfSelected('Review enum completeness E2E', ['review-enum-completeness'],
   });
 
   testConcurrentIfSelected('review-enum-completeness', async () => {
+    const attempt = ++enumCaptureSequence;
+    for (const f of fs.readdirSync(enumDir)) if (/^review-output.*\.md$/.test(f)) fs.rmSync(path.join(enumDir, f));
+    const reviewPath = path.join(enumDir, `review-output-${attempt}.md`);
     const result = await runSkillTest({
-      prompt: `You are in a git repo on branch feature/add-returned-status with changes against main.
-Read review-SKILL.md for the review workflow instructions.
-Also read review-checklist.md and apply it — pay special attention to the Enum & Value Completeness section.
-Run /review on the current diff (git diff main...HEAD).
-Write your review findings to ${enumDir}/review-output.md
+      prompt: `You are in a git repo on branch feature/add-returned-status with changes against main. This is a focused, read-only core review: run only the checklist's static Enum & Value Completeness check on this diff. Do not run the full /review lifecycle, QA or exploratory probes (for example Step 4.7), Greptile, hosting/PR/review-log setup, or any command that is not a git read or a file read.
+This fixture provides only static Ruby source with no configured runnable application, dependencies or runtime/test harness; base main is local and there is no remote or PR. Do not fetch, install, run, or probe an app or dependencies, and any tools that happen to be installed on the host do not expand this scope.
+Read review-SKILL.md for the review workflow instructions, then read review-checklist.md and apply its Enum & Value Completeness section.
+Statically inspect the change: read git diff main...HEAD, then grep the sibling status values through the actual authored source and read every match in full, including unchanged consumers, checking whether each handles the new value.
+Write your review findings once to ${reviewPath} and then stop with a brief final response. Do not re-run the review, reuse a prior report, or invent runtime checks.
 
 The diff adds a new "returned" status to the Order model. Your job is to check if all consumers handle it.`,
       workingDirectory: enumDir,
       maxTurns: 15,
-      timeout: 90_000,
+      timeout: JUDGE_MS,
       testName: 'review-enum-completeness',
-      runId,
+      runId: `${process.env.EVALS_RUN_ID ?? runId}-review-enum-${process.pid}-${attempt}`,
+      publicStreamDiagnostics: true,
     });
 
     logCost('/review enum', result);
-    recordE2E(evalCollector, '/review enum completeness', 'Review enum completeness E2E', result);
-    expect(result.exitReason).toBe('success');
+    let passed = false;
+    try {
+      expect(result.exitReason).toBe('success');
 
-    // Verify the review caught the missing enum handlers
-    const reviewPath = path.join(enumDir, 'review-output.md');
-    if (fs.existsSync(reviewPath)) {
+      // Verify the review caught the missing enum handlers
+      expect(fs.existsSync(reviewPath)).toBe(true);
       const review = fs.readFileSync(reviewPath, 'utf-8');
-      // Should mention the missing "returned" handling in at least one of the methods
       const mentionsReturned = review.toLowerCase().includes('returned');
       const mentionsEnum = review.toLowerCase().includes('enum') || review.toLowerCase().includes('status');
       const mentionsCritical = review.toLowerCase().includes('critical');
       expect(mentionsReturned).toBe(true);
       expect(mentionsEnum || mentionsCritical).toBe(true);
+      passed = result.browseErrors.length === 0;
+    } finally {
+      recordE2E(evalCollector, '/review enum completeness', 'Review enum completeness E2E', result, { passed });
     }
-  }, 120_000);
+    // The runner can drain stderr for 5s after exit; reserve 1s for assertions/recording.
+  }, JUDGE_MS + REVIEW_FINALIZE_MS);
 });
 
 // --- Review: Design review lite E2E ---
 
 describeIfSelected('Review design lite E2E', ['review-design-lite'], () => {
   let designDir: string;
+  let fakeEngineDir: string;
 
   beforeAll(() => {
     designDir = fs.mkdtempSync(path.join(os.tmpdir(), 'skill-e2e-design-lite-'));
@@ -189,15 +214,39 @@ describeIfSelected('Review design lite E2E', ['review-design-lite'], () => {
     run('git', ['add', '.']);
     run('git', ['commit', '-m', 'add landing page']);
 
-    // Copy review skill files
-    fs.copyFileSync(path.join(ROOT, 'review', 'SKILL.md'), path.join(designDir, 'review-SKILL.md'));
+    // Review skill files — extracted sections, not the full 1870-line file.
+    // The design checks come from review-design-checklist.md (copied whole,
+    // it is a 134-line checklist, not a generated SKILL.md).
+    fs.writeFileSync(
+      path.join(designDir, 'review-SKILL.md'),
+      extractSkillSections(path.join(ROOT, 'review'), REVIEW_E2E_SECTIONS),
+    );
     fs.copyFileSync(path.join(ROOT, 'review', 'checklist.md'), path.join(designDir, 'review-checklist.md'));
-    fs.copyFileSync(path.join(ROOT, 'review', 'design-checklist.md'), path.join(designDir, 'review-design-checklist.md'));
+    // The checklist's mechanical pass (step 0) runs the design detector from the
+    // installed gstack bin; point it at THIS checkout so the test is hermetic.
+    fs.writeFileSync(
+      path.join(designDir, 'review-design-checklist.md'),
+      fs.readFileSync(path.join(ROOT, 'review', 'design-checklist.md'), 'utf-8').replaceAll('~/.claude/skills/gstack/bin', path.join(ROOT, 'bin')),
+    );
     fs.copyFileSync(path.join(ROOT, 'review', 'greptile-triage.md'), path.join(designDir, 'review-greptile-triage.md'));
+    // Fake impeccable engine OUTSIDE the repo (the wrapper ignores an in-repo IMPECCABLE_BIN).
+    fakeEngineDir = installFakeImpeccable('skill-e2e-fake-impeccable-').dir;
+    // Point the sample's rows at this diff's files so the review does not spend
+    // turns mapping a foreign fixture path; rule ids and snippets are unchanged.
+    const lineOf = (file: string, needle: string) => fs.readFileSync(path.join(designDir, file), 'utf-8').split('\n').findIndex(line => line.includes(needle)) + 1;
+    const locations: Array<[string, string, string]> = [['#8b5cf6', 'styles.css', 'linear-gradient'], ['#6366f1', 'styles.css', 'background: #6366f1'],
+      ['#1e1b4b', 'styles.css', 'background: #1e1b4b'], ['<h3>', 'landing.html', '<h3>'], ['Purple', 'styles.css', 'linear-gradient'], ['streamline', 'landing.html', 'streamline']];
+    const rows = JSON.parse(fs.readFileSync(DETECT_SAMPLE, 'utf-8')).map((row: { snippet: string }) => {
+      const [, file, needle] = locations.find(([key]) => row.snippet.includes(key))!;
+      return { ...row, file, line: lineOf(file, needle) };
+    });
+    if (rows.some((row: { line: number }) => row.line < 1)) throw new Error('review-design-lite: a detector row did not map to the diff');
+    fs.writeFileSync(path.join(fakeEngineDir, 'landing-detect.json'), JSON.stringify(rows, null, 2));
   });
 
   afterAll(() => {
     try { fs.rmSync(designDir, { recursive: true, force: true }); } catch {}
+    try { fs.rmSync(fakeEngineDir, { recursive: true, force: true }); } catch {}
   });
 
   testConcurrentIfSelected('review-design-lite', async () => {
@@ -216,9 +265,13 @@ Write your review findings to ${designDir}/review-output.md
 Important: The design checklist should catch issues like blacklisted fonts, small font sizes, outline:none, !important, AI slop patterns (purple gradients, generic hero copy, 3-column feature grid), etc.`,
       workingDirectory: designDir,
       maxTurns: 35,
-      timeout: 240_000,
+      timeout: CAPTURE_MS,
       testName: 'review-design-lite',
       runId,
+      env: {
+        IMPECCABLE_BIN: path.join(fakeEngineDir, 'impeccable'),
+        IMPECCABLE_FAKE_OUTPUT: path.join(fakeEngineDir, 'landing-detect.json'),
+      },
     });
 
     logCost('/review design lite', result);
@@ -245,411 +298,22 @@ Important: The design checklist should catch issues like blacklisted fonts, smal
       if (review.includes('welcome to') || review.includes('all-in-one') || review.includes('generic') || review.includes('hero copy') || review.includes('ai slop')) detected++;
       // Issue 7: 3-column feature grid — LOW
       if (review.includes('3-column') || review.includes('three-column') || review.includes('feature grid') || review.includes('icon') || review.includes('circle')) detected++;
+      // Signal 8: the mechanical pass (fake impeccable engine via IMPECCABLE_BIN) surfaced a detector row.
+      // Only rule ids the checklist never names count; claiming the detector is absent is not a row.
+      const detectorSeen = carriesDetectorRows(review, fs.readFileSync(path.join(designDir, 'review-design-checklist.md'), 'utf-8'));
 
-      console.log(`Design review detected ${detected}/7 planted issues`);
-      expect(detected).toBeGreaterThanOrEqual(4);
+      console.log(`Design review detected ${detected}/7 planted checklist signals; detector rows surfaced: ${detectorSeen}`);
+      expect(detected).toBeGreaterThanOrEqual(4); // the LLM-checklist bar, unchanged by the detector
+      // The fake engine's rows are deterministic; carrying them is the contract.
+      expectContract(detectorSeen, 'review-design-lite: the review omitted the mechanical detector rows', { collector: evalCollector, name: '/review design lite' });
     }
-  }, 300_000);
+  }, CAPTURE_MS + REVIEW_FINALIZE_MS);
 });
 
-// --- Base branch detection smoke tests ---
-
-describeIfSelected('Base branch detection', ['review-base-branch', 'ship-base-branch', 'retro-base-branch'], () => {
-  let baseBranchDir: string;
-  const run = (cmd: string, args: string[], cwd: string) =>
-    spawnSync(cmd, args, { cwd, stdio: 'pipe', timeout: 5000 });
-
-  beforeAll(() => {
-    baseBranchDir = fs.mkdtempSync(path.join(os.tmpdir(), 'skill-e2e-basebranch-'));
-  });
-
-  afterAll(() => {
-    try { fs.rmSync(baseBranchDir, { recursive: true, force: true }); } catch {}
-  });
-
-  testConcurrentIfSelected('review-base-branch', async () => {
-    const dir = path.join(baseBranchDir, 'review-base');
-    fs.mkdirSync(dir, { recursive: true });
-
-    // Create git repo with a feature branch off main
-    run('git', ['init'], dir);
-    run('git', ['config', 'user.email', 'test@test.com'], dir);
-    run('git', ['config', 'user.name', 'Test'], dir);
-
-    fs.writeFileSync(path.join(dir, 'app.rb'), '# clean base\nclass App\nend\n');
-    run('git', ['add', 'app.rb'], dir);
-    run('git', ['commit', '-m', 'initial commit'], dir);
-
-    // Create feature branch with a change
-    run('git', ['checkout', '-b', 'feature/test-review'], dir);
-    fs.writeFileSync(path.join(dir, 'app.rb'), '# clean base\nclass App\n  def hello; "world"; end\nend\n');
-    run('git', ['add', 'app.rb'], dir);
-    run('git', ['commit', '-m', 'feat: add hello method'], dir);
-
-    // Extract only Step 0 (base branch detection) + minimal review instructions
-    // Full SKILL.md is ~1500 lines — copying it causes the agent to spend all turns reading
-    const full = fs.readFileSync(path.join(ROOT, 'review', 'SKILL.md'), 'utf-8');
-    const step0Start = full.indexOf('## Step 0: Detect platform and base branch');
-    const step1Start = full.indexOf('## Step 1: Check branch');
-    const step1End = full.indexOf('---', step1Start + 10);
-    const extracted = full.slice(step0Start, step1End > step1Start ? step1End : step1Start + 500);
-    fs.writeFileSync(path.join(dir, 'review-SKILL.md'), extracted);
-
-    const result = await runSkillTest({
-      prompt: `You are in a git repo on a feature branch with changes.
-Read review-SKILL.md for the base branch detection instructions.
-
-IMPORTANT: Follow Step 0 to detect the base branch. Since there is no remote, gh commands will fail — fall back to main.
-Then run git diff against the detected base branch and write a brief review.
-Write your findings to ${dir}/review-output.md`,
-      workingDirectory: dir,
-      maxTurns: 15,
-      timeout: 90_000,
-      testName: 'review-base-branch',
-      runId,
-    });
-
-    logCost('/review base-branch', result);
-    recordE2E(evalCollector, '/review base branch detection', 'Base branch detection', result);
-    expect(result.exitReason).toBe('success');
-
-    // Verify the review used "base branch" language (from Step 0)
-    const toolOutputs = result.toolCalls.map(tc => tc.output || '').join('\n');
-    const allOutput = (result.output || '') + toolOutputs;
-    // The agent should have run git diff against main (the fallback)
-    const usedGitDiff = result.toolCalls.some(tc => {
-      if (tc.tool !== 'Bash') return false;
-      const cmd = typeof tc.input === 'string' ? tc.input : tc.input?.command || JSON.stringify(tc.input);
-      return cmd.includes('git diff');
-    });
-    expect(usedGitDiff).toBe(true);
-  }, 120_000);
-
-  testConcurrentIfSelected('ship-base-branch', async () => {
-    const dir = path.join(baseBranchDir, 'ship-base');
-    fs.mkdirSync(dir, { recursive: true });
-
-    // Create git repo with feature branch
-    run('git', ['init'], dir);
-    run('git', ['config', 'user.email', 'test@test.com'], dir);
-    run('git', ['config', 'user.name', 'Test'], dir);
-
-    fs.writeFileSync(path.join(dir, 'app.ts'), 'console.log("v1");\n');
-    run('git', ['add', 'app.ts'], dir);
-    run('git', ['commit', '-m', 'initial'], dir);
-
-    run('git', ['checkout', '-b', 'feature/ship-test'], dir);
-    fs.writeFileSync(path.join(dir, 'app.ts'), 'console.log("v2");\n');
-    run('git', ['add', 'app.ts'], dir);
-    run('git', ['commit', '-m', 'feat: update to v2'], dir);
-
-    // Extract only Step 0 (base branch detection) from ship/SKILL.md
-    // (copying the full 1900-line file causes agent context bloat and flaky timeouts)
-    const fullShipSkill = fs.readFileSync(path.join(ROOT, 'ship', 'SKILL.md'), 'utf-8');
-    const step0Start = fullShipSkill.indexOf('## Step 0: Detect platform and base branch');
-    const step0End = fullShipSkill.indexOf('## Step 1: Pre-flight');
-    const shipSection = fullShipSkill.slice(step0Start, step0End > step0Start ? step0End : undefined);
-    fs.writeFileSync(path.join(dir, 'ship-SKILL.md'), shipSection);
-
-    const result = await runSkillTest({
-      prompt: `Read ship-SKILL.md. It contains Step 0 (Detect base branch) from the ship workflow.
-
-Run the base branch detection. Since there is no remote, gh commands will fail — fall back to main.
-
-Then run git diff and git log against the detected base branch.
-
-Write a summary to ${dir}/ship-preflight.md including:
-- The detected base branch name
-- The current branch name
-- The diff stat against the base branch`,
-      workingDirectory: dir,
-      maxTurns: 18,
-      timeout: 150_000,
-      testName: 'ship-base-branch',
-      runId,
-    });
-
-    logCost('/ship base-branch', result);
-    recordE2E(evalCollector, '/ship base branch detection', 'Base branch detection', result);
-    expect(result.exitReason).toBe('success');
-
-    // Verify preflight output was written
-    const preflightPath = path.join(dir, 'ship-preflight.md');
-    if (fs.existsSync(preflightPath)) {
-      const content = fs.readFileSync(preflightPath, 'utf-8');
-      expect(content.length).toBeGreaterThan(20);
-      // Should mention the branch name
-      expect(content.toLowerCase()).toMatch(/main|base/);
-    }
-
-    // Verify no destructive actions — no push, no PR creation
-    const destructiveTools = result.toolCalls.filter(tc =>
-      tc.tool === 'Bash' && typeof tc.input === 'string' &&
-      (tc.input.includes('git push') || tc.input.includes('gh pr create'))
-    );
-    expect(destructiveTools).toHaveLength(0);
-  }, 180_000);
-
-  testConcurrentIfSelected('retro-base-branch', async () => {
-    const dir = path.join(baseBranchDir, 'retro-base');
-    fs.mkdirSync(dir, { recursive: true });
-
-    // Create git repo with commit history
-    run('git', ['init'], dir);
-    run('git', ['config', 'user.email', 'dev@example.com'], dir);
-    run('git', ['config', 'user.name', 'Dev'], dir);
-
-    fs.writeFileSync(path.join(dir, 'app.ts'), 'console.log("hello");\n');
-    run('git', ['add', 'app.ts'], dir);
-    run('git', ['commit', '-m', 'feat: initial app', '--date', '2026-03-14T09:00:00'], dir);
-
-    fs.writeFileSync(path.join(dir, 'auth.ts'), 'export function login() {}\n');
-    run('git', ['add', 'auth.ts'], dir);
-    run('git', ['commit', '-m', 'feat: add auth', '--date', '2026-03-15T10:00:00'], dir);
-
-    fs.writeFileSync(path.join(dir, 'test.ts'), 'test("it works", () => {});\n');
-    run('git', ['add', 'test.ts'], dir);
-    run('git', ['commit', '-m', 'test: add tests', '--date', '2026-03-16T11:00:00'], dir);
-
-    // Copy retro skill
-    fs.mkdirSync(path.join(dir, 'retro'), { recursive: true });
-    fs.copyFileSync(path.join(ROOT, 'retro', 'SKILL.md'), path.join(dir, 'retro', 'SKILL.md'));
-
-    const result = await runSkillTest({
-      prompt: `Read retro/SKILL.md for instructions on how to run a retrospective.
-
-IMPORTANT: Follow the "Detect default branch" step first. Since there is no remote, gh will fail — fall back to main.
-Then use the detected branch name for all git queries.
-
-Run /retro for the last 7 days of this git repo. Skip any AskUserQuestion calls — this is non-interactive.
-This is a local-only repo so use the local branch (main) instead of origin/main for all git log commands.
-
-Write your retrospective to ${dir}/retro-output.md`,
-      workingDirectory: dir,
-      maxTurns: 25,
-      timeout: 240_000,
-      testName: 'retro-base-branch',
-      runId,
-    });
-
-    logCost('/retro base-branch', result);
-    recordE2E(evalCollector, '/retro default branch detection', 'Base branch detection', result, {
-      passed: ['success', 'error_max_turns'].includes(result.exitReason),
-    });
-    expect(['success', 'error_max_turns']).toContain(result.exitReason);
-
-    // Verify retro output was produced
-    const retroPath = path.join(dir, 'retro-output.md');
-    if (fs.existsSync(retroPath)) {
-      const content = fs.readFileSync(retroPath, 'utf-8');
-      expect(content.length).toBeGreaterThan(100);
-    }
-  }, 300_000);
-});
-
-// --- Retro E2E ---
-
-describeIfSelected('Retro E2E', ['retro'], () => {
-  let retroDir: string;
-
-  beforeAll(() => {
-    retroDir = fs.mkdtempSync(path.join(os.tmpdir(), 'skill-e2e-retro-'));
-    const run = (cmd: string, args: string[]) =>
-      spawnSync(cmd, args, { cwd: retroDir, stdio: 'pipe', timeout: 5000 });
-
-    // Create a git repo with varied commit history
-    run('git', ['init', '-b', 'main']);
-    run('git', ['config', 'user.email', 'dev@example.com']);
-    run('git', ['config', 'user.name', 'Dev']);
-
-    // Day 1 commits
-    fs.writeFileSync(path.join(retroDir, 'app.ts'), 'console.log("hello");\n');
-    run('git', ['add', 'app.ts']);
-    run('git', ['commit', '-m', 'feat: initial app setup', '--date', '2026-03-10T09:00:00']);
-
-    fs.writeFileSync(path.join(retroDir, 'auth.ts'), 'export function login() {}\n');
-    run('git', ['add', 'auth.ts']);
-    run('git', ['commit', '-m', 'feat: add auth module', '--date', '2026-03-10T11:00:00']);
-
-    // Day 2 commits
-    fs.writeFileSync(path.join(retroDir, 'app.ts'), 'import { login } from "./auth";\nconsole.log("hello");\nlogin();\n');
-    run('git', ['add', 'app.ts']);
-    run('git', ['commit', '-m', 'fix: wire up auth to app', '--date', '2026-03-11T10:00:00']);
-
-    fs.writeFileSync(path.join(retroDir, 'test.ts'), 'import { test } from "bun:test";\ntest("login", () => {});\n');
-    run('git', ['add', 'test.ts']);
-    run('git', ['commit', '-m', 'test: add login test', '--date', '2026-03-11T14:00:00']);
-
-    // Day 3 commits
-    fs.writeFileSync(path.join(retroDir, 'api.ts'), 'export function getUsers() { return []; }\n');
-    run('git', ['add', 'api.ts']);
-    run('git', ['commit', '-m', 'feat: add users API endpoint', '--date', '2026-03-12T09:30:00']);
-
-    fs.writeFileSync(path.join(retroDir, 'README.md'), '# My App\nA test application.\n');
-    run('git', ['add', 'README.md']);
-    run('git', ['commit', '-m', 'docs: add README', '--date', '2026-03-12T16:00:00']);
-
-    // Copy retro skill
-    fs.mkdirSync(path.join(retroDir, 'retro'), { recursive: true });
-    fs.copyFileSync(
-      path.join(ROOT, 'retro', 'SKILL.md'),
-      path.join(retroDir, 'retro', 'SKILL.md'),
-    );
-  });
-
-  afterAll(() => {
-    try { fs.rmSync(retroDir, { recursive: true, force: true }); } catch {}
-  });
-
-  testConcurrentIfSelected('retro', async () => {
-    const result = await runSkillTest({
-      prompt: `Read retro/SKILL.md for instructions on how to run a retrospective.
-
-Run /retro for the last 7 days of this git repo. Skip any AskUserQuestion calls — this is non-interactive.
-Write your retrospective report to ${retroDir}/retro-output.md
-
-Analyze the git history and produce the narrative report as described in the SKILL.md.`,
-      workingDirectory: retroDir,
-      maxTurns: 30,
-      timeout: 300_000,
-      testName: 'retro',
-      runId,
-      model: 'claude-opus-4-7',
-    });
-
-    logCost('/retro', result);
-    recordE2E(evalCollector, '/retro', 'Retro E2E', result, {
-      passed: ['success', 'error_max_turns'].includes(result.exitReason),
-    });
-    // Accept error_max_turns — retro does many git commands to analyze history
-    expect(['success', 'error_max_turns']).toContain(result.exitReason);
-
-    // Verify the retro was written
-    const retroPath = path.join(retroDir, 'retro-output.md');
-    if (fs.existsSync(retroPath)) {
-      const retro = fs.readFileSync(retroPath, 'utf-8');
-      expect(retro.length).toBeGreaterThan(100);
-    }
-  }, 420_000);
-});
-
-// --- Review Dashboard Via Attribution E2E ---
-
-describeIfSelected('Review Dashboard Via Attribution', ['review-dashboard-via'], () => {
-  let dashDir: string;
-
-  beforeAll(() => {
-    dashDir = fs.mkdtempSync(path.join(os.tmpdir(), 'skill-e2e-dashboard-via-'));
-    const run = (cmd: string, args: string[], cwd = dashDir) =>
-      spawnSync(cmd, args, { cwd, stdio: 'pipe', timeout: 5000 });
-
-    // Create git repo with feature branch
-    run('git', ['init', '-b', 'main']);
-    run('git', ['config', 'user.email', 'test@test.com']);
-    run('git', ['config', 'user.name', 'Test']);
-
-    fs.writeFileSync(path.join(dashDir, 'app.ts'), 'console.log("v1");\n');
-    run('git', ['add', 'app.ts']);
-    run('git', ['commit', '-m', 'initial']);
-
-    run('git', ['checkout', '-b', 'feature/dashboard-test']);
-    fs.writeFileSync(path.join(dashDir, 'app.ts'), 'console.log("v2");\n');
-    run('git', ['add', 'app.ts']);
-    run('git', ['commit', '-m', 'feat: update']);
-
-    // Get HEAD commit for review entries
-    const headResult = spawnSync('git', ['rev-parse', '--short', 'HEAD'], { cwd: dashDir, stdio: 'pipe' });
-    const commit = headResult.stdout.toString().trim();
-
-    // Pre-populate review log with autoplan-sourced entries
-    // gstack-review-read reads from ~/.gstack/projects/$SLUG/$BRANCH-reviews.jsonl
-    // For the test, we'll write a mock gstack-review-read script that returns our test data
-    const timestamp = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
-    const reviewData = [
-      `{"skill":"plan-eng-review","timestamp":"${timestamp}","status":"clean","unresolved":0,"critical_gaps":0,"issues_found":0,"mode":"FULL_REVIEW","via":"autoplan","commit":"${commit}"}`,
-      `{"skill":"plan-ceo-review","timestamp":"${timestamp}","status":"clean","unresolved":0,"critical_gaps":0,"mode":"SELECTIVE_EXPANSION","via":"autoplan","commit":"${commit}"}`,
-      `{"skill":"codex-plan-review","timestamp":"${timestamp}","status":"clean","source":"codex","commit":"${commit}"}`,
-    ].join('\n');
-
-    // Write a mock gstack-review-read that returns our test data
-    const mockBinDir = path.join(dashDir, '.mock-bin');
-    fs.mkdirSync(mockBinDir, { recursive: true });
-    fs.writeFileSync(path.join(mockBinDir, 'gstack-review-read'), [
-      '#!/usr/bin/env bash',
-      `echo '${reviewData.split('\n').join("'\necho '")}'`,
-      'echo "---CONFIG---"',
-      'echo "false"',
-      'echo "---HEAD---"',
-      `echo "${commit}"`,
-    ].join('\n'));
-    fs.chmodSync(path.join(mockBinDir, 'gstack-review-read'), 0o755);
-
-    // Extract only the Review Readiness Dashboard section from ship/SKILL.md
-    // (copying the full 1900-line file causes agent context bloat and timeouts)
-    const fullSkill = fs.readFileSync(path.join(ROOT, 'ship', 'SKILL.md'), 'utf-8');
-    const dashStart = fullSkill.indexOf('## Review Readiness Dashboard');
-    const dashEnd = fullSkill.indexOf('\n---\n', dashStart);
-    const dashSection = fullSkill.slice(dashStart, dashEnd > dashStart ? dashEnd : undefined);
-    fs.writeFileSync(path.join(dashDir, 'ship-SKILL.md'), dashSection);
-  });
-
-  afterAll(() => {
-    try { fs.rmSync(dashDir, { recursive: true, force: true }); } catch {}
-  });
-
-  testConcurrentIfSelected('review-dashboard-via', async () => {
-    const mockBinDir = path.join(dashDir, '.mock-bin');
-
-    const result = await runSkillTest({
-      prompt: `Read ship-SKILL.md. You only need to run the Review Readiness Dashboard section.
-
-Instead of running ~/.claude/skills/gstack/bin/gstack-review-read, run this mock: ${mockBinDir}/gstack-review-read
-
-Parse the output and display the dashboard table. Pay attention to:
-1. The "via" field in entries — show source attribution (e.g., "via /autoplan")
-2. The codex-plan-review entry — it should populate the Outside Voice row
-3. Since Eng Review IS clear, there should be NO gate blocking — just display the dashboard
-
-Skip the preamble, lake intro, telemetry, and all other ship steps.
-Write the dashboard output to ${dashDir}/dashboard-output.md`,
-      workingDirectory: dashDir,
-      maxTurns: 12,
-      timeout: 180_000,
-      testName: 'review-dashboard-via',
-      runId,
-    });
-
-    logCost('/ship dashboard-via', result);
-    recordE2E(evalCollector, '/ship review dashboard via attribution', 'Dashboard via field', result);
-    expect(result.exitReason).toBe('success');
-
-    // Check dashboard output for via attribution
-    const dashPath = path.join(dashDir, 'dashboard-output.md');
-    const allOutput = [
-      result.output || '',
-      ...result.toolCalls.map(tc => tc.output || ''),
-    ].join('\n').toLowerCase();
-
-    // Verify via attribution appears somewhere (conversation or file)
-    let dashContent = '';
-    if (fs.existsSync(dashPath)) {
-      dashContent = fs.readFileSync(dashPath, 'utf-8').toLowerCase();
-    }
-    const combined = allOutput + dashContent;
-
-    // Should mention autoplan attribution
-    expect(combined).toMatch(/autoplan/);
-    // Should show eng review as CLEAR (it has a clean entry)
-    expect(combined).toMatch(/clear/i);
-    // Should NOT contain AskUserQuestion gate (no blocking)
-    const gateQuestions = result.toolCalls.filter(tc =>
-      tc.tool === 'mcp__conductor__AskUserQuestion' ||
-      (tc.tool === 'AskUserQuestion')
-    );
-    // Ship dashboard should not gate when eng review is clear
-    expect(gateQuestions).toHaveLength(0);
-  }, 240_000);
-});
+// Base branch detection tests for review/ship + the Review Dashboard Via
+// Attribution describe live in test/skill-e2e-review-attribution.test.ts.
+// Retro tests (retro, retro-base-branch) live in test/skill-e2e-retro.test.ts.
+// Split so CI's per-file matrix can run them in parallel.
 
 // Module-level afterAll — finalize eval collector after all tests complete
 afterAll(async () => {

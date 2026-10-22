@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+# gstack-design-doc-find — print the design doc a plan review should read.
+#
+# Usage: gstack-design-doc-find <slug> <branch>
+#
+# Prints one absolute path, or nothing when no design doc exists. Exit 0 either
+# way; exit 2 on a usage error.
+#
+# Precedence:
+#   1. newest $GSTACK_STATE_ROOT/projects/<slug>/*-<branch>-design-*.md
+#   2. else newest $GSTACK_STATE_ROOT/projects/<slug>/*-design-*.md
+#   3. the newest repo doc under $TOP/docs/designs/ wins when no state-root doc
+#      exists or it is newer than the state-root doc. A root DESIGN.md is the
+#      design system /design-consultation writes, never a design doc (#2839).
+#      office-hours writes both copies; the committed copy is what teammates
+#      see, but a stale repo doc never shadows a newer private session.
+set -u
+
+if [ "$#" -ne 2 ] || [ -z "$1" ]; then
+  echo "usage: gstack-design-doc-find <slug> <branch>" >&2
+  exit 2
+fi
+SLUG=$1
+BRANCH=$2
+
+eval "$("$(dirname "$0")/gstack-paths")"; : "${GSTACK_STATE_ROOT:?gstack-paths failed; reinstall with ./setup or /gstack-upgrade}"
+
+newest() {
+  ls -t "$@" 2>/dev/null | head -1
+}
+
+PROJECT_DIR="$GSTACK_STATE_ROOT/projects/$SLUG"
+LOCALDOC=$(newest "$PROJECT_DIR"/*-"$BRANCH"-design-*.md)
+[ -z "$LOCALDOC" ] && LOCALDOC=$(newest "$PROJECT_DIR"/*-design-*.md)
+
+REPODOC=""
+TOP=$(git rev-parse --show-toplevel 2>/dev/null || true)
+[ -n "$TOP" ] && REPODOC=$(newest "$TOP"/docs/designs/*.md)
+
+DESIGN="$LOCALDOC"
+if [ -n "$REPODOC" ] && { [ -z "$LOCALDOC" ] || [ "$REPODOC" -nt "$LOCALDOC" ]; }; then
+  DESIGN="$REPODOC"
+fi
+[ -n "$DESIGN" ] && printf '%s\n' "$DESIGN"
+exit 0

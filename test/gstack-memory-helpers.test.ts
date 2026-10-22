@@ -4,6 +4,7 @@
  * Covers the public surface used by Lanes A, B, C:
  *   - canonicalizeRemote: 8 cases across https/ssh/git@/.git/empty
  *   - secretScanFile: gitleaks-missing fallback + redactMatch behavior
+ *   - secretScanText: scans the exact text via a removed temp file
  *   - parseSkillManifest: valid manifest + missing manifest + multi-kind
  *   - withErrorContext: success path + error path + log writing
  *   - detectEngineTier: cache TTL + fresh-detect fallback
@@ -11,18 +12,21 @@
  * Free-tier (~50ms total). Runs in `bun test`.
  */
 
-import { describe, it, expect, beforeEach, afterAll } from "bun:test";
-import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync, mkdirSync } from "fs";
+import { describe, it, expect, beforeEach, afterEach } from "bun:test";
+import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync, mkdirSync, chmodSync, copyFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 
 import {
   canonicalizeRemote,
   secretScanFile,
+  secretScanText,
   parseSkillManifest,
   withErrorContext,
   detectEngineTier,
   _resetGitleaksAvailabilityCache,
+  _setGitleaksProbeTimeouts,
+  _gitleaksCacheState,
 } from "../lib/gstack-memory-helpers";
 
 // ── canonicalizeRemote ─────────────────────────────────────────────────────
@@ -67,6 +71,30 @@ describe("canonicalizeRemote", () => {
   it("collapses redundant slashes", () => {
     expect(canonicalizeRemote("https://github.com//foo//bar")).toBe("github.com/foo/bar");
   });
+
+  it("strips .git even when the URL has a trailing slash", () => {
+    // A remote configured with both a .git suffix and a trailing slash must
+    // canonicalize to the same key as one without — otherwise the same repo
+    // gets two dedup/source-id keys across machines.
+    expect(canonicalizeRemote("https://github.com/garrytan/gstack.git/")).toBe("github.com/garrytan/gstack");
+    expect(canonicalizeRemote("git@github.com:garrytan/gstack.git/")).toBe("github.com/garrytan/gstack");
+    expect(canonicalizeRemote("https://github.com/foo/bar.git///")).toBe("github.com/foo/bar");
+  });
+
+  it("produces the same key with or without a trailing slash", () => {
+    expect(canonicalizeRemote("https://github.com/garrytan/gstack.git/")).toBe(
+      canonicalizeRemote("https://github.com/garrytan/gstack.git")
+    );
+  });
+
+  it("canonicalizes a path remote ending in a .git directory component", () => {
+    // Stripping the `.git` suffix exposes a new trailing slash
+    // ("/repo/.git" → "/repo/") which must also be stripped, or the same
+    // repo splits into two identities.
+    expect(canonicalizeRemote("file:///Users/x/repo/.git")).toBe(
+      canonicalizeRemote("file:///Users/x/repo")
+    );
+  });
 });
 
 // ── secretScanFile ─────────────────────────────────────────────────────────
@@ -95,6 +123,306 @@ describe("secretScanFile", () => {
       expect(result.findings).toEqual([]);
     }
     rmSync(dir, { recursive: true, force: true });
+  });
+
+  (process.env.GSTACK_TEST_GITLEAKS ? it : it.skip)("captures a real clean gitleaks report through private portable storage", () => {
+    const dir = mkdtempSync(join(tmpdir(), "gstack-scan-real-"));
+    const file = join(dir, "clean.md");
+    const oldHome = process.env.HOME;
+    const oldConfig = process.env.GITLEAKS_CONFIG;
+    writeFileSync(file, "ordinary conversation\n");
+    copyFileSync(process.env.GSTACK_TEST_GITLEAKS!, join(dir, "gitleaks"));
+    chmodSync(join(dir, "gitleaks"), 0o700);
+    process.env.HOME = dir;
+    delete process.env.GITLEAKS_CONFIG;
+    try {
+      const result = withFakeOnPath(dir, () => secretScanFile(file));
+      expect(result).toEqual({ scanned: true, findings: [], scanner: "gitleaks" });
+    } finally {
+      if (oldHome === undefined) delete process.env.HOME;
+      else process.env.HOME = oldHome;
+      if (oldConfig === undefined) delete process.env.GITLEAKS_CONFIG;
+      else process.env.GITLEAKS_CONFIG = oldConfig;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("probes the gitleaks executable directly before scanning", () => {
+    const dir = mkdtempSync(join(tmpdir(), "gstack-test-"));
+    const binDir = join(dir, "bin");
+    const log = join(dir, "gitleaks-calls.log");
+    const file = join(dir, "clean.txt");
+    mkdirSync(binDir, { recursive: true });
+    writeFileSync(file, "no secrets here\n");
+    writeFileSync(
+      join(binDir, "gitleaks"),
+      `#!/bin/sh
+printf '%s\\n' "$*" >> "${log}"
+if [ "$1" = "version" ]; then
+  exit 0
+fi
+if [ "$1" = "detect" ]; then
+  while [ "$#" -gt 0 ]; do
+    if [ "$1" = "--report-path" ]; then printf '[]' > "$2"; break; fi
+    shift
+  done
+  exit 0
+fi
+exit 2
+`,
+      "utf-8",
+    );
+    chmodSync(join(binDir, "gitleaks"), 0o755);
+
+    const oldPath = process.env.PATH;
+    process.env.PATH = `${binDir}:${oldPath || ""}`;
+    try {
+      _resetGitleaksAvailabilityCache();
+      const result = secretScanFile(file);
+      expect(result.scanner).toBe("gitleaks");
+      expect(result.findings).toEqual([]);
+      const calls = readFileSync(log, "utf-8").trim().split("\n");
+      // Under load the first probe can expire and retry, so assert the shape:
+      // one or more `version` probes, then the scan. Pinning calls[1] made a
+      // busy machine look like a broken scanner.
+      expect(calls[0]).toBe("version");
+      expect(calls.at(-1)).toContain("detect --no-git --source");
+      expect(calls.slice(0, -1).every((c) => c === "version")).toBe(true);
+    } finally {
+      if (oldPath === undefined) delete process.env.PATH;
+      else process.env.PATH = oldPath;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // ── probe timeout vs missing binary ──────────────────────────────────────
+  //
+  // A timeout used to be cached as "gitleaks is absent", which turned one busy
+  // moment into an entire run of unscanned files behind a single stderr line.
+  // These pin the two outcomes apart. Budgets are shrunk via the test-only
+  // hook so a sleeping fake costs milliseconds, not seconds.
+
+  /**
+   * Fake gitleaks. With a `marker` path, the FIRST `version` call hangs far
+   * past any budget and later calls answer instantly; with an empty marker it
+   * hangs every time. Timing is expressed as "hangs forever" vs "immediate"
+   * rather than as a race between a short sleep and a short budget — a race is
+   * exactly the flake being fixed here.
+   */
+  function fakeGitleaks(binDir: string, log: string, marker: string): void {
+    mkdirSync(binDir, { recursive: true });
+    writeFileSync(
+      join(binDir, "gitleaks"),
+      `#!/bin/sh
+printf '%s\\n' "$*" >> "${log}"
+if [ "$1" = "version" ]; then
+  if [ -n "${marker}" ] && [ -f "${marker}" ]; then
+    exit 0
+  fi
+  if [ -n "${marker}" ]; then
+    touch "${marker}"
+  fi
+  sleep 30
+  exit 0
+fi
+if [ "$1" = "detect" ]; then
+  while [ "$#" -gt 0 ]; do
+    if [ "$1" = "--report-path" ]; then printf '[]' > "$2"; break; fi
+    shift
+  done
+  exit 0
+fi
+exit 2
+`,
+      "utf-8",
+    );
+    chmodSync(join(binDir, "gitleaks"), 0o755);
+  }
+
+  function withFakeOnPath<T>(binDir: string, fn: () => T): T {
+    const oldPath = process.env.PATH;
+    process.env.PATH = `${binDir}:${oldPath || ""}`;
+    try {
+      return fn();
+    } finally {
+      if (oldPath === undefined) delete process.env.PATH;
+      else process.env.PATH = oldPath;
+    }
+  }
+
+  const versionProbes = (log: string): number =>
+    existsSync(log)
+      ? readFileSync(log, "utf-8").trim().split("\n").filter((c) => c === "version").length
+      : 0;
+
+  it("retries a slow probe instead of declaring gitleaks missing", () => {
+    const dir = mkdtempSync(join(tmpdir(), "gstack-test-"));
+    const binDir = join(dir, "bin");
+    const log = join(dir, "calls.log");
+    const file = join(dir, "clean.txt");
+    writeFileSync(file, "no secrets here\n");
+    fakeGitleaks(binDir, log, join(dir, "hung-once"));
+    try {
+      // Budgets are picked so neither outcome can hinge on machine speed: 3s is
+      // ample for a shell to start and log even on a loaded box (yet the hung
+      // `sleep 30` still cannot answer within it), and the 30s retry cannot
+      // expire against a fake that exits immediately. The first draft used
+      // 1s/5s and flaked under the 7-way shard runner — the very failure mode
+      // this file is about.
+      _setGitleaksProbeTimeouts(3_000, 30_000);
+      const result = withFakeOnPath(binDir, () => secretScanFile(file));
+      expect(result.scanner).toBe("gitleaks");
+      expect(versionProbes(log)).toBe(2);
+      expect(_gitleaksCacheState()).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not cache a timed-out probe, so the next file tries again", () => {
+    const dir = mkdtempSync(join(tmpdir(), "gstack-test-"));
+    const binDir = join(dir, "bin");
+    const log = join(dir, "calls.log");
+    const file = join(dir, "clean.txt");
+    writeFileSync(file, "no secrets here\n");
+    // Empty marker: EVERY call hangs, so both budgets expire.
+    fakeGitleaks(binDir, log, "");
+    try {
+      // Short on purpose, and safe to be short: the fake hangs for 30s, so the
+      // probe times out at ANY budget — load cannot flip this outcome the way
+      // it can in the retry case above. 800ms only has to cover writing one
+      // line to the log.
+      _setGitleaksProbeTimeouts(800, 800);
+      const first = withFakeOnPath(binDir, () => secretScanFile(file));
+      expect(first.scanner).toBe("missing");
+      // The question stays open: nothing was learned about the binary.
+      expect(_gitleaksCacheState()).toBeNull();
+
+      const before = versionProbes(log);
+      withFakeOnPath(binDir, () => secretScanFile(file));
+      expect(versionProbes(log)).toBeGreaterThan(before);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("stops probing after 3 consecutive slow answers (per-run cooldown), never caching unavailability", () => {
+    const dir = mkdtempSync(join(tmpdir(), "gstack-test-"));
+    const binDir = join(dir, "bin");
+    const log = join(dir, "calls.log");
+    const file = join(dir, "clean.txt");
+    writeFileSync(file, "no secrets here\n");
+    // Empty marker: EVERY call hangs, so both budgets expire on each probe.
+    fakeGitleaks(binDir, log, "");
+    try {
+      _setGitleaksProbeTimeouts(800, 800);
+      // Three slow rounds: each pays probe+retry (2 spawns), each unscanned.
+      for (let i = 0; i < 3; i++) {
+        const r = withFakeOnPath(binDir, () => secretScanFile(file));
+        expect(r.scanner).toBe("missing");
+      }
+      const probesAtLimit = versionProbes(log);
+      expect(probesAtLimit).toBe(6);
+      // Fourth file: cooldown short-circuits — no spawn, still unscanned,
+      // and the question stays open for the NEXT process (cache never set).
+      const fourth = withFakeOnPath(binDir, () => secretScanFile(file));
+      expect(fourth.scanner).toBe("missing");
+      expect(versionProbes(log)).toBe(probesAtLimit);
+      expect(_gitleaksCacheState()).toBeNull();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("caches an absent binary, so it is probed once per process", () => {
+    const dir = mkdtempSync(join(tmpdir(), "gstack-test-"));
+    const binDir = join(dir, "empty-bin");
+    mkdirSync(binDir, { recursive: true });
+    const file = join(dir, "clean.txt");
+    writeFileSync(file, "no secrets here\n");
+    const oldPath = process.env.PATH;
+    try {
+      // Nothing named gitleaks anywhere on PATH -> ENOENT, a permanent fact.
+      process.env.PATH = binDir;
+      const result = secretScanFile(file);
+      expect(result.scanner).toBe("missing");
+      expect(_gitleaksCacheState()).toBe(false);
+    } finally {
+      if (oldPath === undefined) delete process.env.PATH;
+      else process.env.PATH = oldPath;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+// ── secretScanText ─────────────────────────────────────────────────────────
+
+describe("secretScanText", () => {
+  beforeEach(() => {
+    _resetGitleaksAvailabilityCache();
+  });
+
+  it("scans the exact text through a temp file that is gone afterwards", () => {
+    const dir = mkdtempSync(join(tmpdir(), "gstack-test-"));
+    const binDir = join(dir, "bin");
+    const log = join(dir, "scanned-paths.log");
+    mkdirSync(binDir, { recursive: true });
+    // Flags the unescaped `KEY="` only: the byte-for-byte form a rendered
+    // page carries and a JSON-escaped source line does not.
+    writeFileSync(
+      join(binDir, "gitleaks"),
+      `#!/bin/sh
+if [ "$1" = "version" ]; then exit 0; fi
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "--source" ]; then SRC="$2"; fi
+  if [ "$1" = "--report-path" ]; then REPORT="$2"; fi
+  shift
+done
+printf '%s\\n' "$SRC" >> "${log}"
+if grep -qF 'KEY="' "$SRC"; then
+  echo '[{"RuleID":"fake-rule","Description":"fake finding","StartLine":4}]' > "$REPORT"
+else
+  echo '[]' > "$REPORT"
+fi
+`,
+      "utf-8",
+    );
+    chmodSync(join(binDir, "gitleaks"), 0o755);
+
+    const oldPath = process.env.PATH;
+    process.env.PATH = `${binDir}:${oldPath || ""}`;
+    try {
+      const hit = secretScanText('---\ntitle: "x"\n---\nKEY="not-a-real-value"\n');
+      expect(hit.scanner).toBe("gitleaks");
+      expect(hit.findings.map((f) => f.rule_id)).toEqual(["fake-rule"]);
+
+      const escaped = secretScanText('{"text":"KEY=\\"not-a-real-value\\""}\n');
+      expect(escaped.scanner).toBe("gitleaks");
+      expect(escaped.findings).toEqual([]);
+
+      const scanned = readFileSync(log, "utf-8").trim().split("\n");
+      expect(scanned.length).toBe(2);
+      for (const p of scanned) expect(existsSync(p)).toBe(false);
+    } finally {
+      if (oldPath === undefined) delete process.env.PATH;
+      else process.env.PATH = oldPath;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("reports scanner=missing, not a clean result, when gitleaks is absent", () => {
+    const dir = mkdtempSync(join(tmpdir(), "gstack-test-"));
+    const oldPath = process.env.PATH;
+    try {
+      process.env.PATH = dir; // nothing named gitleaks here
+      const result = secretScanText('KEY="not-a-real-value"\n');
+      expect(result.scanned).toBe(false);
+      expect(result.scanner).toBe("missing");
+    } finally {
+      if (oldPath === undefined) delete process.env.PATH;
+      else process.env.PATH = oldPath;
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 
@@ -203,6 +531,62 @@ body
     expect(m!.context_queries[0].id).toBe("complete");
     rmSync(dir, { recursive: true, force: true });
   });
+
+  it("parses a nested filter: block on a list query", () => {
+    const dir = mkdtempSync(join(tmpdir(), "gstack-test-"));
+    const file = join(dir, "filtered.md");
+    writeFileSync(
+      file,
+      `---
+name: investigate
+gbrain:
+  schema: 1
+  context_queries:
+    - id: prior-investigations
+      kind: list
+      filter:
+        type: timeline
+        tags_contains: "repo:{repo_slug}"
+        content_contains: "investigate"
+      sort: updated_at_desc
+      limit: 5
+      render_as: "## Prior investigations in this repo"
+    - id: recent-no-filter
+      kind: list
+      sort: created_at_desc
+      limit: 3
+      render_as: "## Recent (no filter)"
+---
+
+body
+`
+    );
+
+    const m = parseSkillManifest(file);
+    expect(m).not.toBeNull();
+    expect(m!.context_queries).toHaveLength(2);
+
+    // The filter: sub-block is parsed into a key/value map, with quotes
+    // stripped and template vars left intact for downstream substitution.
+    const filtered = m!.context_queries[0];
+    expect(filtered.id).toBe("prior-investigations");
+    expect(filtered.filter).toEqual({
+      type: "timeline",
+      tags_contains: "repo:{repo_slug}",
+      content_contains: "investigate",
+    });
+    // Sibling fields on the same item still parse alongside the filter.
+    expect(filtered.sort).toBe("updated_at_desc");
+    expect(filtered.limit).toBe(5);
+    expect(filtered.render_as).toBe("## Prior investigations in this repo");
+
+    // A list query with no filter: leaves filter undefined (no regression).
+    expect(m!.context_queries[1].id).toBe("recent-no-filter");
+    expect(m!.context_queries[1].filter).toBeUndefined();
+    expect(m!.context_queries[1].sort).toBe("created_at_desc");
+
+    rmSync(dir, { recursive: true, force: true });
+  });
 });
 
 // ── withErrorContext ───────────────────────────────────────────────────────
@@ -217,7 +601,11 @@ describe("withErrorContext", () => {
     process.env.GSTACK_HOME = testHome;
   });
 
-  afterAll(() => {
+  // afterEach, not afterAll: the save happens in beforeEach, so an afterAll
+  // restore would put back the PREVIOUS test's temp dir (the last beforeEach
+  // overwrote savedHome) and leak a gstack-test-home-* dir into every test
+  // file that runs after this one in the same bun process.
+  afterEach(() => {
     if (savedHome === undefined) delete process.env.GSTACK_HOME;
     else process.env.GSTACK_HOME = savedHome;
   });
@@ -293,7 +681,13 @@ describe("detectEngineTier", () => {
     process.env.HOME = testHome;
   });
 
-  afterAll(() => {
+  // afterEach, not afterAll: the save happens in beforeEach, so an afterAll
+  // restore would put back the PREVIOUS test's gstack-test-engine-* temp dir
+  // (the last beforeEach overwrote the saved values). That leaked
+  // HOME/GSTACK_HOME/PATH into every test file that ran after this one in the
+  // same bun process — child processes then looked for Playwright's Chromium
+  // cache and ~/.gstack config under a throwaway temp HOME.
+  afterEach(() => {
     if (savedHome === undefined) delete process.env.GSTACK_HOME;
     else process.env.GSTACK_HOME = savedHome;
     if (savedGbrainHome === undefined) delete process.env.GBRAIN_HOME;
@@ -331,14 +725,55 @@ describe("detectEngineTier", () => {
     // Regression test for #1415: gbrain >=0.25 doctor output dropped the
     // top-level `engine` field. The detect path must fall back to config.json.
     // We force the doctor call to fail (PATH stripped of gbrain) and write a
-    // synthetic config to GBRAIN_HOME so the fallback path is deterministic.
+    // synthetic config under GBRAIN_HOME so the fallback path is
+    // deterministic. Per gbrain's configDir() contract (#2521), GBRAIN_HOME
+    // is a parent dir — the config lives at $GBRAIN_HOME/.gbrain/config.json.
     process.env.PATH = "/nonexistent-no-gbrain-here";
+    mkdirSync(join(testGbrainHome, ".gbrain"), { recursive: true });
     writeFileSync(
-      join(testGbrainHome, "config.json"),
+      join(testGbrainHome, ".gbrain", "config.json"),
       JSON.stringify({ engine: "postgres", database_url: "postgresql://test/example" }),
       "utf-8"
     );
     const result = detectEngineTier();
     expect(result.engine).toBe("supabase");
+  });
+
+  it("parses schema_version:2 doctor JSON via the exec path (regression for #1418)", () => {
+    // Stronger pin than the PATH-stripped fallback above: install a fake
+    // gbrain shim that successfully exits with status 1 (health_score < 100,
+    // mirroring real-world Supabase brains) and emits the v2 doctor JSON
+    // shape — schema_version: 2, status: "warnings", no top-level `engine`.
+    // The parser must still produce a usable EngineDetect by falling back
+    // to GBRAIN_HOME/config.json when `engine` is absent from doctor output.
+    const binDir = mkdtempSync(join(tmpdir(), "gstack-gbrain-shim-"));
+    const shim = join(binDir, "gbrain");
+    writeFileSync(
+      shim,
+      `#!/bin/sh
+if [ "$1" = "doctor" ]; then
+  cat <<'JSON'
+{"schema_version":2,"status":"warnings","health_score":90,"checks":[{"name":"resolver_health","status":"ok","message":"42 skills"}]}
+JSON
+  exit 1
+fi
+if [ "$1" = "--version" ]; then
+  echo "gbrain 0.35.0.0"
+  exit 0
+fi
+exit 0
+`,
+      { mode: 0o755 }
+    );
+    process.env.PATH = `${binDir}:${process.env.PATH || ""}`;
+    mkdirSync(join(testGbrainHome, ".gbrain"), { recursive: true });
+    writeFileSync(
+      join(testGbrainHome, ".gbrain", "config.json"),
+      JSON.stringify({ engine: "pglite" }),
+      "utf-8"
+    );
+    const result = detectEngineTier();
+    expect(result.engine).toBe("pglite");
+    rmSync(binDir, { recursive: true, force: true });
   });
 });

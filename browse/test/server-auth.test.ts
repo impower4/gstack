@@ -1,13 +1,22 @@
 /**
- * Server auth security tests — verify security remediation in server.ts
+ * Server auth security tests.
  *
- * Tests are source-level: they read server.ts and verify that auth checks,
- * CORS restrictions, and token removal are correctly in place.
+ * Route auth is asserted behaviorally: requests go through a real
+ * buildFetchHandler() (makeServer) or through one route's real handler with a
+ * stub RouteContext (callRoute), so the tests pin what each route does, not
+ * where its code sits. The remaining source-level checks cover code with no
+ * behavioral seam (command-pipeline internals, cli.ts, the cookie-picker UI,
+ * the constant-time compare, the ngrok authtoken file lookup).
  */
 
-import { describe, test, expect } from 'bun:test';
+import { describe, test, expect, beforeAll, afterAll } from 'bun:test';
 import * as fs from 'fs';
 import * as path from 'path';
+import { buildHeadedServerEnv } from '../src/cli';
+import { GSTACK_EXTENSION_ID } from '../src/server';
+import { DEFAULT_PAIR_SCOPES, createToken } from '../src/token-registry';
+import { getActivityHistory } from '../src/activity';
+import { makeServer, stubRouteContext, callRoute, fakeTunnel, type TestServer } from './route-test-harness';
 
 const SERVER_SRC = fs.readFileSync(path.join(import.meta.dir, '../src/server.ts'), 'utf-8');
 const CLI_SRC = fs.readFileSync(path.join(import.meta.dir, '../src/cli.ts'), 'utf-8');
@@ -21,22 +30,51 @@ function sliceBetween(source: string, startMarker: string, endMarker: string): s
   return source.slice(startIdx, endIdx);
 }
 
-describe('Server auth security', () => {
-  // Test 1: /health serves token conditionally (headed mode or chrome extension only)
-  test('/health serves token only in headed mode or to chrome extensions', () => {
-    const healthBlock = sliceBetween(SERVER_SRC, "url.pathname === '/health'", "url.pathname === '/connect'");
-    // v1.35.0.0: AUTH_TOKEN const was deleted; factory uses cfg-derived authToken.
-    // Token must be conditional, not unconditional
-    expect(healthBlock).toContain('token: authToken');
-    expect(healthBlock).toContain('headed');
-    expect(healthBlock).toContain('chrome-extension://');
-  });
+const UNAUTHORIZED = { status: 401, body: { error: 'Unauthorized' } };
+const ROOT_REQUIRED = { status: 403, body: { error: 'Root token required' } };
 
-  // Test 1b: /health does not expose sensitive browsing state
-  test('/health does not expose currentUrl or currentMessage', () => {
-    const healthBlock = sliceBetween(SERVER_SRC, "url.pathname === '/health'", "url.pathname === '/connect'");
-    expect(healthBlock).not.toContain('currentUrl');
-    expect(healthBlock).not.toContain('currentMessage');
+async function statusAndJson(resp: Response): Promise<{ status: number; body: any }> {
+  const text = await resp.text();
+  let body: any = text;
+  try { body = JSON.parse(text); } catch {}
+  return { status: resp.status, body };
+}
+
+let server: TestServer;
+let scoped = '';
+const bearer = (token: string) => ({ Authorization: `Bearer ${token}` });
+const savedPairAgent = process.env.GSTACK_PAIR_AGENT;
+
+beforeAll(() => {
+  server = makeServer();
+  scoped = server.scopedToken('auth-suite-agent');
+});
+afterAll(() => {
+  server.cleanup();
+  if (savedPairAgent === undefined) delete process.env.GSTACK_PAIR_AGENT;
+  else process.env.GSTACK_PAIR_AGENT = savedPairAgent;
+});
+
+describe('Server auth security', () => {
+  // Test 1a: the pinned-origin bootstrap endpoint releases the token only to
+  // the exact extension Origin with a loopback Host (parsed from host:port,
+  // never compared literally against the raw header).
+  test('POST /extension-token gates on pinned Origin and loopback Host', async () => {
+    const pinned = `chrome-extension://${GSTACK_EXTENSION_ID}`;
+    const post = (headers: Record<string, string>) => server.local('/extension-token', { method: 'POST', headers });
+    for (const host of ['127.0.0.1:34567', 'localhost:34567']) {
+      const ok = await statusAndJson(await post({ Origin: pinned, Host: host }));
+      expect(ok).toEqual({ status: 200, body: { token: server.rootToken } });
+    }
+    for (const headers of [
+      { Origin: pinned, Host: 'evil.example:34567' },
+      { Origin: pinned },
+      { Origin: 'chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', Host: '127.0.0.1:34567' },
+      { Host: '127.0.0.1:34567', ...bearer(server.rootToken) },
+    ]) {
+      const denied = await statusAndJson(await post(headers));
+      expect(denied).toEqual({ status: 403, body: { error: 'Forbidden' } });
+    }
   });
 
   // Test 1c: newtab must check domain restrictions (CSO finding #5)
@@ -49,94 +87,156 @@ describe('Server auth security', () => {
     expect(scopeBlock).toContain('Domain not allowed');
   });
 
-  // Test 2: /refs endpoint requires auth via validateAuth
-  test('/refs endpoint requires authentication', () => {
-    const refsBlock = sliceBetween(SERVER_SRC, "url.pathname === '/refs'", "url.pathname === '/activity/stream'");
-    expect(refsBlock).toContain('validateAuth');
+  // Test 1d: validateAuth compares the bearer token in CONSTANT TIME with a
+  // length gate. A revert to `header === \`Bearer ${authToken}\`` keeps
+  // accept/reject behavior identical (functional tests still pass) but silently
+  // reintroduces the byte-by-byte timing side-channel; dropping the length gate
+  // makes timingSafeEqual throw RangeError (500 instead of 401) on a wrong-length
+  // token. Pin both properties, mirroring the token-registry sibling guard.
+  test('validateAuth uses constant-time comparison with a length gate', () => {
+    const authBlock = sliceBetween(SERVER_SRC, 'function validateAuth(req: Request): boolean {', '// Factory-scoped shutdown');
+    expect(authBlock).toContain('crypto.timingSafeEqual');
+    expect(authBlock).toContain('got.length === want.length');
+    // The null-header guard must remain (Buffer.from(null) would otherwise throw).
+    expect(authBlock).toContain('header === null');
+    // The raw === comparison of the header against the bearer string must be gone.
+    expect(authBlock).not.toContain('header === `Bearer ${authToken}`');
   });
 
-  // Test 3: /refs has no wildcard CORS header
-  test('/refs has no wildcard CORS header', () => {
-    const refsBlock = sliceBetween(SERVER_SRC, "url.pathname === '/refs'", "url.pathname === '/activity/stream'");
-    expect(refsBlock).not.toContain("'*'");
-  });
+  // Tests 2-5: /refs and /activity/history require the root bearer and never
+  // send a wildcard CORS header, on the denial or the success path.
+  for (const route of ['/refs', '/activity/history']) {
+    test(`${route} endpoint requires authentication`, async () => {
+      expect(await statusAndJson(await server.local(route))).toEqual(UNAUTHORIZED);
+      expect(await statusAndJson(await server.local(route, { headers: bearer(scoped) }))).toEqual(UNAUTHORIZED);
+      expect((await server.local(route, { headers: bearer(server.rootToken) })).status).toBe(200);
+    });
 
-  // Test 4: /activity/history requires auth via validateAuth
-  test('/activity/history requires authentication', () => {
-    const historyBlock = sliceBetween(SERVER_SRC, "url.pathname === '/activity/history'", 'Sidebar endpoints');
-    expect(historyBlock).toContain('validateAuth');
-  });
-
-  // Test 5: /activity/history has no wildcard CORS header
-  test('/activity/history has no wildcard CORS header', () => {
-    const historyBlock = sliceBetween(SERVER_SRC, "url.pathname === '/activity/history'", 'Sidebar endpoints');
-    expect(historyBlock).not.toContain("'*'");
-  });
+    test(`${route} has no wildcard CORS header`, async () => {
+      for (const headers of [{}, bearer(server.rootToken)]) {
+        const resp = await server.local(route, { headers: { Origin: 'https://evil.example', ...headers } });
+        expect(resp.headers.get('access-control-allow-origin')).toBeNull();
+      }
+    });
+  }
 
   // Test 6: /activity/stream requires auth via Bearer OR view-only session cookie
   // (N1: ?token= query param was dropped in v1.6.0.0 — URLs leak to logs/referer)
-  test('/activity/stream requires authentication with inline token check', () => {
-    const streamBlock = sliceBetween(SERVER_SRC, "url.pathname === '/activity/stream'", "url.pathname === '/activity/history'");
-    expect(streamBlock).toContain('validateAuth');
-    expect(streamBlock).toContain('validateSseSessionToken');
-    // Should not have wildcard CORS for the SSE stream
-    expect(streamBlock).not.toContain("Access-Control-Allow-Origin': '*'");
-    // ?token= query param must NOT be accepted anymore
-    expect(streamBlock).not.toContain("searchParams.get('token')");
+  test('/activity/stream requires authentication with inline token check', async () => {
+    expect(await statusAndJson(await server.local('/activity/stream'))).toEqual(UNAUTHORIZED);
+    const viaQuery = await server.local(`/activity/stream?token=${server.rootToken}`);
+    expect(await statusAndJson(viaQuery)).toEqual(UNAUTHORIZED);
+
+    const viaBearer = await server.local('/activity/stream', { headers: bearer(server.rootToken) });
+    expect(viaBearer.status).toBe(200);
+    expect(viaBearer.headers.get('access-control-allow-origin')).toBeNull();
+    await viaBearer.body?.cancel();
+
+    const minted = await server.local('/sse-session', { method: 'POST', headers: bearer(server.rootToken) });
+    const cookie = (minted.headers.get('set-cookie') ?? '').split(';')[0];
+    expect(cookie).toStartWith('gstack_sse=');
+    const viaCookie = await server.local('/activity/stream', { headers: { Cookie: cookie } });
+    expect(viaCookie.status).toBe(200);
+    expect(viaCookie.headers.get('access-control-allow-origin')).toBeNull();
+    await viaCookie.body?.cancel();
   });
 
-  // Test 7: /command accepts scoped tokens (not just root)
-  // This was the Wintermute bug — /command was BELOW the blanket validateAuth gate
-  // which only accepts root tokens. Scoped tokens got 401'd before reaching getTokenInfo.
-  test('/command endpoint sits ABOVE the blanket root-only auth gate', () => {
-    const commandIdx = SERVER_SRC.indexOf("url.pathname === '/command'");
-    const blanketGateIdx = SERVER_SRC.indexOf("Auth-required endpoints (root token only)");
-    // /command must appear BEFORE the blanket gate in source order
-    expect(commandIdx).toBeGreaterThan(0);
-    expect(blanketGateIdx).toBeGreaterThan(0);
-    expect(commandIdx).toBeLessThan(blanketGateIdx);
+  // Test 7: /command accepts scoped tokens (not just root). This was the
+  // Wintermute bug — /command sat below the blanket root-only check, so scoped
+  // tokens got 401'd before reaching getTokenInfo.
+  test('/command endpoint sits ABOVE the blanket root-only auth gate', async () => {
+    const resp = await statusAndJson(await server.local('/command', {
+      method: 'POST', headers: bearer(scoped), body: JSON.stringify({ command: '__auth_suite_unknown__' }),
+    }));
+    expect(resp.status).not.toBe(401);
+    expect(resp.body).not.toEqual({ error: 'Unauthorized' });
   });
 
-  // Test 7b: /command uses getTokenInfo (accepts scoped tokens), not validateAuth (root-only)
-  test('/command uses getTokenInfo for auth, not validateAuth', () => {
-    const commandBlock = sliceBetween(SERVER_SRC, "url.pathname === '/command'", "Auth-required endpoints");
-    expect(commandBlock).toContain('getTokenInfo');
-    expect(commandBlock).not.toContain('validateAuth');
+  // Test 7b: /command authenticates with getTokenInfo (root or scoped), so an
+  // unknown bearer is still rejected.
+  test('/command uses getTokenInfo for auth, not validateAuth', async () => {
+    const body = JSON.stringify({ command: '__auth_suite_unknown__' });
+    expect(await statusAndJson(await server.local('/command', { method: 'POST', body }))).toEqual(UNAUTHORIZED);
+    expect(await statusAndJson(await server.local('/command', {
+      method: 'POST', body, headers: bearer('gsk_sess_not-a-real-token'),
+    }))).toEqual(UNAUTHORIZED);
+    expect((await server.local('/command', { method: 'POST', body, headers: bearer(server.rootToken) })).status).not.toBe(401);
   });
 
   // Test 8: /tunnel/start requires root token
-  test('/tunnel/start requires root token', () => {
-    const tunnelBlock = sliceBetween(SERVER_SRC, "/tunnel/start", "Refs endpoint");
-    expect(tunnelBlock).toContain('isRootRequest');
-    expect(tunnelBlock).toContain('Root token required');
+  test('/tunnel/start requires root token', async () => {
+    for (const headers of [{}, bearer(scoped)]) {
+      expect(await statusAndJson(await server.local('/tunnel/start', { method: 'POST', headers }))).toEqual(ROOT_REQUIRED);
+    }
   });
 
-  // Test 8b: /tunnel/start checks ngrok native config paths
-  test('/tunnel/start reads ngrok native config files', () => {
-    const tunnelBlock = sliceBetween(SERVER_SRC, "/tunnel/start", "Refs endpoint");
-    expect(tunnelBlock).toContain("'ngrok.yml'");
-    expect(tunnelBlock).toContain('authtoken');
+  // Test 8b: the ngrok authtoken lookup reads ngrok's native config files, and
+  // /tunnel/start asks for it only after the cached-tunnel check. The file
+  // lookup (resolveNgrokAuthtoken in server.ts) has no seam without a real
+  // ngrok config, so that half stays a source check.
+  test('/tunnel/start reads ngrok native config files', async () => {
+    const lookup = sliceBetween(SERVER_SRC, 'function resolveNgrokAuthtoken', 'async function closeTunnel');
+    expect(lookup).toContain("'ngrok.yml'");
+    expect(lookup).toContain('authtoken');
+
+    process.env.GSTACK_PAIR_AGENT = 'on';
+    const inactive = { active: false, url: null, hasListener: false };
+    const missing = await statusAndJson(await callRoute('POST', '/tunnel/start', stubRouteContext({
+      tunnel: { state: () => inactive, close: async () => {}, resolveAuthtoken: () => null, start: async () => { throw new Error('must not start'); } },
+    })));
+    expect(missing).toEqual({ status: 400, body: { error: 'No ngrok authtoken found', hint: 'Run: ngrok config add-authtoken YOUR_TOKEN' } });
+
+    const started: string[] = [];
+    const ok = await statusAndJson(await callRoute('POST', '/tunnel/start', stubRouteContext({
+      tunnel: {
+        state: () => inactive, close: async () => {}, resolveAuthtoken: () => 'ngrok-token-from-config',
+        start: async (authtoken) => { started.push(authtoken); return { ok: true, url: 'https://fresh.ngrok.example' }; },
+      },
+    })));
+    expect(ok).toEqual({ status: 200, body: { url: 'https://fresh.ngrok.example' } });
+    expect(started).toEqual(['ngrok-token-from-config']);
   });
 
-  // Test 8c: /tunnel/start returns already_active if tunnel is running
-  test('/tunnel/start returns already_active when tunnel exists', () => {
-    const tunnelBlock = sliceBetween(SERVER_SRC, "/tunnel/start", "Refs endpoint");
-    expect(tunnelBlock).toContain('already_active');
-    expect(tunnelBlock).toContain('tunnelActive');
+  // Test 8c: /tunnel/start returns already_active if the cached tunnel answers
+  test('/tunnel/start returns already_active when tunnel exists', async () => {
+    process.env.GSTACK_PAIR_AGENT = 'on';
+    const tunnel = fakeTunnel(200);
+    try {
+      const resp = await statusAndJson(await callRoute('POST', '/tunnel/start', stubRouteContext({
+        tunnel: {
+          state: () => ({ active: true, url: tunnel.url, hasListener: true }),
+          close: async () => { throw new Error('a live tunnel must not be closed'); },
+          resolveAuthtoken: () => { throw new Error('a live tunnel must not be restarted'); },
+          start: async () => { throw new Error('a live tunnel must not be restarted'); },
+        },
+      })));
+      expect(resp).toEqual({ status: 200, body: { url: tunnel.url, already_active: true } });
+      expect(tunnel.hits).toEqual(['GET /connect']);
+    } finally { tunnel.stop(); }
   });
 
   // Test 9: /pair requires root token
-  test('/pair requires root token', () => {
-    const pairBlock = sliceBetween(SERVER_SRC, "url.pathname === '/pair'", "/tunnel/start");
-    expect(pairBlock).toContain('isRootRequest');
-    expect(pairBlock).toContain('Root token required');
+  test('/pair requires root token', async () => {
+    for (const headers of [{}, bearer(scoped)]) {
+      expect(await statusAndJson(await server.local('/pair', { method: 'POST', headers, body: '{}' }))).toEqual(ROOT_REQUIRED);
+    }
   });
 
-  // Test 9b: /pair calls createSetupKey (not createToken)
-  test('/pair creates setup keys, not session tokens', () => {
-    const pairBlock = sliceBetween(SERVER_SRC, "url.pathname === '/pair'", "/tunnel/start");
-    expect(pairBlock).toContain('createSetupKey');
-    expect(pairBlock).not.toContain('createToken');
+  // Test 9b: /pair mints a one-time setup key (pending until /connect), never a
+  // session token a caller could use directly.
+  test('/pair creates setup keys, not session tokens', async () => {
+    const pair = await statusAndJson(await server.local('/pair', {
+      method: 'POST', headers: bearer(server.rootToken), body: JSON.stringify({ clientId: 'pair-setup-check' }),
+    }));
+    expect(pair.status).toBe(200);
+    expect(pair.body.setup_key).toStartWith('gsk_setup_');
+    const agents = await statusAndJson(await server.local('/agents', { headers: bearer(server.rootToken) }));
+    expect(agents.body.agents.find((a: any) => a.clientId === 'pair-setup-check')?.pending).toBe(true);
+    const exchanged = await statusAndJson(await server.local('/connect', {
+      method: 'POST', body: JSON.stringify({ setup_key: pair.body.setup_key }),
+    }));
+    expect(exchanged.status).toBe(200);
+    expect(exchanged.body.token).toStartWith('gsk_sess_');
   });
 
   // Test 10: tab ownership check happens before command dispatch
@@ -207,36 +307,68 @@ describe('Server auth security', () => {
 
   // ─── Tunnel liveness verification ─────────────────────────────
 
-  // Test 11a: /pair endpoint probes tunnel before returning tunnel_url
-  test('/pair verifies tunnel is alive before returning tunnel_url', () => {
-    const pairBlock = sliceBetween(SERVER_SRC, "url.pathname === '/pair'", "url.pathname === '/tunnel/start'");
-    // Must probe the tunnel URL
-    expect(pairBlock).toContain('verifiedTunnelUrl');
-    expect(pairBlock).toContain('Tunnel probe failed');
-    expect(pairBlock).toContain('marking tunnel as dead');
-    // Must tear down tunnel state on failure (via closeTunnel helper — clears
-    // tunnelActive, tunnelUrl, tunnelListener, and the tunnel Bun.serve listener)
-    expect(pairBlock).toContain('closeTunnel()');
+  // Tests 11a/11b: /pair probes the tunnel before reporting tunnel_url, tears
+  // the tunnel down when the probe fails, and never reports a raw
+  // tunnelActive flag.
+  test('/pair verifies tunnel is alive before returning tunnel_url', async () => {
+    for (const [status, expectUrl] of [[200, true], [503, false]] as const) {
+      const tunnel = fakeTunnel(status);
+      let closed = 0;
+      try {
+        const resp = await statusAndJson(await callRoute('POST', '/pair', stubRouteContext({
+          tunnel: {
+            state: () => ({ active: true, url: tunnel.url, hasListener: true }),
+            close: async () => { closed++; },
+            resolveAuthtoken: () => null, start: async () => { throw new Error('unused'); },
+          },
+        }), { body: {} }));
+        expect(resp.status).toBe(200);
+        expect(resp.body.tunnel_url).toBe(expectUrl ? tunnel.url : null);
+        expect(tunnel.hits).toEqual(['GET /connect']);
+        expect(closed).toBe(expectUrl ? 0 : 1);
+      } finally { tunnel.stop(); }
+    }
   });
 
-  // Test 11b: /pair returns null tunnel_url when tunnel is dead
-  test('/pair returns verified tunnel URL, not raw tunnelActive flag', () => {
-    const pairBlock = sliceBetween(SERVER_SRC, "url.pathname === '/pair'", "url.pathname === '/tunnel/start'");
-    // Should use verifiedTunnelUrl (probe result), not raw tunnelUrl
-    expect(pairBlock).toContain('tunnel_url: verifiedTunnelUrl');
-    // Must NOT use raw tunnelActive check for the response
-    expect(pairBlock).not.toContain('tunnel_url: tunnelActive ? tunnelUrl');
+  test('/pair returns verified tunnel URL, not raw tunnelActive flag', async () => {
+    const resp = await statusAndJson(await callRoute('POST', '/pair', stubRouteContext({
+      tunnel: {
+        state: () => ({ active: true, url: 'http://127.0.0.1:1', hasListener: true }),
+        close: async () => {}, resolveAuthtoken: () => null, start: async () => { throw new Error('unused'); },
+      },
+    }), { body: {} }));
+    expect(resp.status).toBe(200);
+    expect(resp.body.tunnel_url).toBeNull();
+    const inactive = await statusAndJson(await callRoute('POST', '/pair', stubRouteContext({
+      tunnel: {
+        state: () => ({ active: false, url: null, hasListener: false }),
+        close: async () => { throw new Error('nothing to close'); },
+        resolveAuthtoken: () => null, start: async () => { throw new Error('unused'); },
+      },
+    }), { body: {} }));
+    expect(inactive.body.tunnel_url).toBeNull();
+    expect(inactive.body.server_url).toBe('http://127.0.0.1:34567');
   });
 
-  // Test 11c: /tunnel/start probes cached tunnel before returning already_active
-  test('/tunnel/start verifies cached tunnel is alive before returning already_active', () => {
-    const tunnelBlock = sliceBetween(SERVER_SRC, "url.pathname === '/tunnel/start'", "url.pathname === '/refs'");
-    // Must probe before returning cached URL
-    expect(tunnelBlock).toContain('Cached tunnel is dead');
-    // Must tear down tunnel state on stale detection (via closeTunnel helper)
-    expect(tunnelBlock).toContain('closeTunnel()');
-    // Must fall through to restart when dead
-    expect(tunnelBlock).toContain('restarting');
+  // Test 11c: /tunnel/start probes the cached tunnel before returning
+  // already_active; a dead one is torn down and restarted.
+  test('/tunnel/start verifies cached tunnel is alive before returning already_active', async () => {
+    process.env.GSTACK_PAIR_AGENT = 'on';
+    const tunnel = fakeTunnel(502);
+    const calls: string[] = [];
+    try {
+      const resp = await statusAndJson(await callRoute('POST', '/tunnel/start', stubRouteContext({
+        tunnel: {
+          state: () => ({ active: true, url: tunnel.url, hasListener: true }),
+          close: async () => { calls.push('close'); },
+          resolveAuthtoken: () => { calls.push('resolve'); return 'ngrok-token'; },
+          start: async () => { calls.push('start'); return { ok: true, url: 'https://restarted.ngrok.example' }; },
+        },
+      })));
+      expect(resp).toEqual({ status: 200, body: { url: 'https://restarted.ngrok.example' } });
+      expect(calls).toEqual(['close', 'resolve', 'start']);
+      expect(tunnel.hits).toEqual(['GET /connect']);
+    } finally { tunnel.stop(); }
   });
 
   // Test 11d: CLI verifies tunnel_url from server before printing instruction block
@@ -251,62 +383,104 @@ describe('Server auth security', () => {
 
   // ─── Batch endpoint security ─────────────────────────────────
 
-  // Test 12a: /batch endpoint sits ABOVE the blanket root-only auth gate (same as /command)
-  test('/batch endpoint sits ABOVE the blanket root-only auth gate', () => {
-    const batchIdx = SERVER_SRC.indexOf("url.pathname === '/batch'");
-    const blanketGateIdx = SERVER_SRC.indexOf("Auth-required endpoints (root token only)");
-    expect(batchIdx).toBeGreaterThan(0);
-    expect(blanketGateIdx).toBeGreaterThan(0);
-    expect(batchIdx).toBeLessThan(blanketGateIdx);
+  // Tests 12a/12b: /batch accepts root and scoped tokens (like /command) and
+  // rejects an unknown bearer.
+  test('/batch endpoint sits ABOVE the blanket root-only auth gate', async () => {
+    const resp = await statusAndJson(await server.local('/batch', {
+      method: 'POST', headers: bearer(scoped), body: JSON.stringify({ commands: [] }),
+    }));
+    expect(resp).toEqual({ status: 400, body: { error: '"commands" must be a non-empty array' } });
   });
 
-  // Test 12b: /batch uses getTokenInfo (accepts scoped tokens), not validateAuth (root-only)
-  test('/batch uses getTokenInfo for auth, not validateAuth', () => {
-    const batchBlock = sliceBetween(SERVER_SRC, "url.pathname === '/batch'", "url.pathname === '/command'");
-    expect(batchBlock).toContain('getTokenInfo');
-    expect(batchBlock).not.toContain('validateAuth');
+  test('/batch uses getTokenInfo for auth, not validateAuth', async () => {
+    const body = JSON.stringify({ commands: [] });
+    expect(await statusAndJson(await server.local('/batch', { method: 'POST', body }))).toEqual(UNAUTHORIZED);
+    expect(await statusAndJson(await server.local('/batch', {
+      method: 'POST', body, headers: bearer('gsk_sess_not-a-real-token'),
+    }))).toEqual(UNAUTHORIZED);
+    expect((await server.local('/batch', { method: 'POST', body, headers: bearer(server.rootToken) })).status).toBe(400);
   });
+
+  function batchContext(calls: Array<{ body: any; opts: any }>) {
+    return stubRouteContext({
+      browserManager: { getCurrentUrl: () => 'about:blank', getTabCount: () => 1, getConnectionMode: () => 'launched' } as any,
+      resetIdleTimer: () => {},
+      commands: {
+        handle: async () => { throw new Error('/batch must not use the single-command wrapper'); },
+        handleInternal: async (body, _tokenInfo, opts) => { calls.push({ body, opts }); return { status: 200, result: 'ok' }; },
+      },
+    });
+  }
 
   // Test 12c: /batch enforces max command limit
-  test('/batch enforces max 50 commands per batch', () => {
-    const batchBlock = sliceBetween(SERVER_SRC, "url.pathname === '/batch'", "url.pathname === '/command'");
-    expect(batchBlock).toContain('commands.length > 50');
-    expect(batchBlock).toContain('Max 50 commands per batch');
+  test('/batch enforces max 50 commands per batch', async () => {
+    const calls: Array<{ body: any; opts: any }> = [];
+    const commands = Array.from({ length: 51 }, () => ({ command: 'url' }));
+    const resp = await statusAndJson(await callRoute('POST', '/batch', batchContext(calls), { body: { commands } }));
+    expect(resp).toEqual({ status: 400, body: { error: 'Max 50 commands per batch' } });
+    expect(calls).toEqual([]);
   });
 
   // Test 12d: /batch rejects nested batches
-  test('/batch rejects nested batch commands', () => {
-    const batchBlock = sliceBetween(SERVER_SRC, "url.pathname === '/batch'", "url.pathname === '/command'");
-    expect(batchBlock).toContain("cmd.command === 'batch'");
-    expect(batchBlock).toContain('Nested batch commands are not allowed');
+  test('/batch rejects nested batch commands', async () => {
+    const calls: Array<{ body: any; opts: any }> = [];
+    const resp = await statusAndJson(await callRoute('POST', '/batch', batchContext(calls), {
+      body: { commands: [{ command: 'batch', args: [] }, { command: 'url' }] },
+    }));
+    expect(resp.status).toBe(200);
+    expect(resp.body.results[0]).toMatchObject({ index: 0, status: 400, command: 'batch' });
+    expect(JSON.parse(resp.body.results[0].result)).toEqual({ error: 'Nested batch commands are not allowed' });
+    expect(calls.map(c => c.body.command)).toEqual(['url']);
   });
 
-  // Test 12e: /batch skips per-command rate limiting (batch counts as 1 request)
-  test('/batch skips per-command rate limiting', () => {
-    const batchBlock = sliceBetween(SERVER_SRC, "url.pathname === '/batch'", "url.pathname === '/command'");
-    expect(batchBlock).toContain('skipRateCheck: true');
+  // Tests 12e/12f/12h: each sub-command runs through handleCommandInternal
+  // with per-command rate limiting and activity suppressed, tabId passed
+  // through, and one batch-level command_start/command_end pair emitted.
+  test('/batch skips per-command rate limiting', async () => {
+    const calls: Array<{ body: any; opts: any }> = [];
+    await callRoute('POST', '/batch', batchContext(calls), { body: { commands: [{ command: 'url' }, { command: 'text' }] } });
+    expect(calls.map(c => c.opts.skipRateCheck)).toEqual([true, true]);
   });
 
-  // Test 12f: /batch skips per-command activity events (emits batch-level events)
-  test('/batch emits batch-level activity, not per-command', () => {
-    const batchBlock = sliceBetween(SERVER_SRC, "url.pathname === '/batch'", "url.pathname === '/command'");
-    expect(batchBlock).toContain('skipActivity: true');
-    // Should emit batch-level start and end events
-    expect(batchBlock).toContain("command: 'batch'");
+  test('/batch emits batch-level activity, not per-command', async () => {
+    const calls: Array<{ body: any; opts: any }> = [];
+    const before = getActivityHistory(1000).totalAdded;
+    await callRoute('POST', '/batch', batchContext(calls), {
+      body: { commands: [{ command: 'url' }, { command: 'text' }] },
+      tokenInfo: { clientId: 'batch-activity-agent' } as any,
+    });
+    expect(calls.map(c => c.opts.skipActivity)).toEqual([true, true]);
+    const { entries, totalAdded } = getActivityHistory(1000);
+    const added = entries.slice(-(totalAdded - before));
+    expect(added.map(e => [e.type, e.command, e.clientId])).toEqual([
+      ['command_start', 'batch', 'batch-activity-agent'],
+      ['command_end', 'batch', 'batch-activity-agent'],
+    ]);
   });
 
   // Test 12g: /batch validates command field in each command
-  test('/batch validates each command has a command field', () => {
-    const batchBlock = sliceBetween(SERVER_SRC, "url.pathname === '/batch'", "url.pathname === '/command'");
-    expect(batchBlock).toContain("typeof cmd.command !== 'string'");
-    expect(batchBlock).toContain('Missing "command" field');
+  test('/batch validates each command has a command field', async () => {
+    const calls: Array<{ body: any; opts: any }> = [];
+    const resp = await statusAndJson(await callRoute('POST', '/batch', batchContext(calls), {
+      body: { commands: [{}, { command: 42 }] },
+    }));
+    expect(resp.body.results.map((r: any) => [r.status, JSON.parse(r.result).error])).toEqual([
+      [400, 'Missing "command" field'],
+      [400, 'Missing "command" field'],
+    ]);
+    expect(calls).toEqual([]);
   });
 
-  // Test 12h: /batch passes tabId through to handleCommandInternal
-  test('/batch passes tabId to handleCommandInternal for multi-tab support', () => {
-    const batchBlock = sliceBetween(SERVER_SRC, "url.pathname === '/batch'", "url.pathname === '/command'");
-    expect(batchBlock).toContain('tabId: cmd.tabId');
-    expect(batchBlock).toContain('handleCommandInternal');
+  test('/batch passes tabId to handleCommandInternal for multi-tab support', async () => {
+    const calls: Array<{ body: any; opts: any }> = [];
+    const resp = await statusAndJson(await callRoute('POST', '/batch', batchContext(calls), {
+      body: { commands: [{ command: 'url', tabId: 7 }, { command: 'text', args: ['x'], tabId: 9 }] },
+    }));
+    expect(calls.map(c => c.body)).toEqual([
+      { command: 'url', args: undefined, tabId: 7 },
+      { command: 'text', args: ['x'], tabId: 9 },
+    ]);
+    expect(resp.body.results.map((r: any) => r.tabId)).toEqual([7, 9]);
   });
 
   // ─── Pair-agent regression tests ──────────────────────────
@@ -314,7 +488,7 @@ describe('Server auth security', () => {
   // Regression: connect command crashed with "domains is not defined" because
   // a stray `domains,` variable was in the status fetch body (cli.ts:852).
   test('connect command status fetch body has no undefined variable references', () => {
-    const connectBlock = sliceBetween(CLI_SRC, 'Launching headed Chromium', 'Sidebar agent started');
+    const connectBlock = sliceBetween(CLI_SRC, 'Launching headed Chromium', 'Terminal agent started');
     // The status fetch should use a clean JSON body
     expect(connectBlock).toContain("command: 'status'");
     // Must NOT contain a bare `domains` reference in the fetch body
@@ -335,10 +509,12 @@ describe('Server auth security', () => {
     // The connect subprocess env must override BROWSE_PARENT_PID
     expect(pairBlock).toContain("BROWSE_PARENT_PID");
     expect(pairBlock).toContain("'0'");
-    // The connect command must propagate BROWSE_PARENT_PID=0 to serverEnv
-    const connectBlock = sliceBetween(CLI_SRC, 'Launching headed Chromium', 'Sidebar agent started');
-    expect(connectBlock).toContain("BROWSE_PARENT_PID");
-    expect(connectBlock).toContain("serverEnv.BROWSE_PARENT_PID");
+    // The connect command starts its server with buildHeadedServerEnv, the
+    // same env the --supervise respawn uses, and that env disables the
+    // parent-PID watchdog.
+    const connectBlock = sliceBetween(CLI_SRC, 'Launching headed Chromium', 'Terminal agent started');
+    expect(connectBlock).toContain('startServer(buildHeadedServerEnv(globalFlags))');
+    expect(buildHeadedServerEnv({ proxyUrl: null, configHash: '' }).BROWSE_PARENT_PID).toBe('0');
   });
 
   // Regression: newtab returned 403 for scoped tokens because the tab ownership
@@ -371,5 +547,54 @@ describe('Server auth security', () => {
     // Must set HttpOnly session cookie
     expect(routeSrc).toContain('HttpOnly');
     expect(routeSrc).toContain('SameSite=Strict');
+  });
+});
+
+describe('Pair scope defaults and revocation surface', () => {
+  // Regression: the CLI only sent scopes when --restrict was passed, so the
+  // effective pairing default lived in two places (CLI omission + server
+  // fallback) and could silently drift. Both sides must use the shared
+  // DEFAULT_PAIR_SCOPES constant, and the CLI must send scopes
+  // unconditionally (the old conditional-spread shape is banned).
+  test('/pair default and CLI pairing body share DEFAULT_PAIR_SCOPES', async () => {
+    const pair = await statusAndJson(await server.local('/pair', {
+      method: 'POST', headers: bearer(server.rootToken), body: '{}',
+    }));
+    expect(pair.status).toBe(200);
+    expect(pair.body.scopes).toEqual([...DEFAULT_PAIR_SCOPES]);
+    const cliBlock = sliceBetween(CLI_SRC, 'async function handlePairAgent', 'Determine the URL to use');
+    // Match the CODE shape, not a comment: a bare toContain('DEFAULT_PAIR_SCOPES')
+    // is satisfied by the explanatory comment and passes vacuously on a revert.
+    expect(cliBlock).toMatch(/scopes:\s*restrict\s*\?[\s\S]{0,200}?:\s*\[\.\.\.DEFAULT_PAIR_SCOPES\]/);
+    expect(cliBlock).not.toMatch(/\.\.\.\(restrict\s*\?/);
+  });
+
+  // control is the only scope behind an explicit flag; a scopes list must
+  // not be able to smuggle it into a pairing grant.
+  test('/pair rejects control inside a scopes list without the control flag', async () => {
+    const pair = (body: unknown) => server.local('/pair', {
+      method: 'POST', headers: bearer(server.rootToken), body: JSON.stringify(body),
+    });
+    expect(await statusAndJson(await pair({ scopes: ['read', 'control'] }))).toEqual({
+      status: 400,
+      body: { error: 'The control scope requires the control flag (--control); it cannot be granted via a scopes list.' },
+    });
+    const flagged = await statusAndJson(await pair({ control: true }));
+    expect(flagged.status).toBe(200);
+    expect(flagged.body.scopes).toContain('control');
+  });
+
+  // CLI-encoded clientIds (spaces, UTF-8) must round-trip through the revoke
+  // route; slicing the raw pathname 404s on every encoded name.
+  test('DELETE /token decodes the clientId path segment', async () => {
+    createToken({ clientId: 'encoded agent é', scopes: ['read'] });
+    const resp = await statusAndJson(await server.local(`/token/${encodeURIComponent('encoded agent é')}`, {
+      method: 'DELETE', headers: bearer(server.rootToken),
+    }));
+    expect(resp).toEqual({ status: 200, body: { revoked: 'encoded agent é', tokens_deleted: 1, tabs_released: 0 } });
+    const malformed = await statusAndJson(await server.local('/token/%E0%A4%A', {
+      method: 'DELETE', headers: bearer(server.rootToken),
+    }));
+    expect(malformed).toEqual({ status: 400, body: { error: 'Malformed client ID encoding' } });
   });
 });

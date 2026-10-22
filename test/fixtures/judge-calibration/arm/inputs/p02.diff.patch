@@ -1,0 +1,25 @@
+diff --git a/run-tests.js b/run-tests.js
+index b5c9a56..6011cdc 100644
+--- a/run-tests.js
++++ b/run-tests.js
+@@ -4,5 +4,7 @@ const { formatPrice } = require('./src/format-price');
+ assert.strictEqual(formatPrice(1250), '$12.50');
+ assert.strictEqual(formatPrice(1005), '$10.05');
+ assert.strictEqual(formatPrice(999), '$9.99');
++assert.strictEqual(formatPrice(5), '$0.05');
++assert.strictEqual(formatPrice(100), '$1.00');
+ 
+ console.log('all price tests passed');
+diff --git a/src/format-price.js b/src/format-price.js
+index 86851d8..3181046 100644
+--- a/src/format-price.js
++++ b/src/format-price.js
+@@ -2,7 +2,7 @@
+ function formatPrice(cents) {
+   const dollars = Math.floor(cents / 100);
+   const rem = cents % 100;
+-  return '$' + dollars + '.' + rem;
++  return '$' + dollars + '.' + String(rem).padStart(2, '0');
+ }
+ 
+ module.exports = { formatPrice };

@@ -1,0 +1,30 @@
+{
+  "kinds": [
+    "add",
+    "remove",
+    "deactivate",
+    "replace"
+  ],
+  "actions": [
+    "accept",
+    "drop"
+  ],
+  "untested": [
+    {
+      "kind": "deactivate",
+      "action": "accept"
+    },
+    {
+      "kind": "deactivate",
+      "action": "drop"
+    },
+    {
+      "kind": "replace",
+      "action": "drop"
+    },
+    {
+      "kind": "add",
+      "action": "drop"
+    }
+  ]
+}

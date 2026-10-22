@@ -21,6 +21,16 @@
 # on completion. Re-running this script is silent if the touchfile exists,
 # OR if local_code_index_offered=true.
 
+# Heredoc delivery guard. bash 5.2+ writes a heredoc body <=64KiB through a
+# pipe in the forked child before exec, with no reader on the other end. On
+# macOS under pipe-KVA pressure a fresh pipe gets a 512-byte buffer, so any
+# body >=512B blocks write() forever and the script hangs at startup with no
+# output. Compat level 50 restores the tempfile path. These scripts are
+# bash-3.2-clean, so the compat level costs them nothing. Not exported: the
+# guard is per-script, and it survives `bash script.sh` call sites that
+# bypass the shebang.
+BASH_COMPAT=50
+
 set -euo pipefail
 
 if [ -z "${HOME:-}" ]; then
@@ -28,7 +38,9 @@ if [ -z "${HOME:-}" ]; then
   exit 0
 fi
 
-GSTACK_HOME="${GSTACK_HOME:-$HOME/.gstack}"
+_gstack_migration_dir="${BASH_SOURCE[0]//\\//}"; _gstack_migration_dir="${_gstack_migration_dir%/*}"
+. "${_gstack_migration_dir}/../../bin/gstack-state-root.sh" 2>/dev/null || { echo "$0: cannot resolve the gstack state root: ${_gstack_migration_dir}/../../bin/gstack-state-root.sh is missing. fix: reinstall with ./setup or /gstack-upgrade (docs/state-root.md)" >&2; exit 1; }
+gstack_state_root_select; GSTACK_HOME="$_gstack_sr_root"
 MIGRATIONS_DIR="$GSTACK_HOME/.migrations"
 DONE_TOUCH="$MIGRATIONS_DIR/v1.37.0.0.done"
 CONFIG_BIN="$HOME/.claude/skills/gstack/bin/gstack-config"

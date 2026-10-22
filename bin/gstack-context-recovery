@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+# gstack-context-recovery — recent project context for the skill preamble's
+# "Context Recovery" step: newest plans/checkpoints, review count, recent
+# timeline, last completed session, active decisions. Read-only; safe to run
+# again after compaction.
+#
+# Replaces the inline fence every generated SKILL.md carried (#2763):
+# worktree-isolated Claude Code sessions refuse its `eval "$(gstack-slug)"`
+# and git-in-a-pipe forms, but run this one literal command.
+#
+# Branch-form discipline (#2550/#1851): review filenames use the slugged
+# BRANCH that gstack-review-log writes; timeline filters use the raw branch
+# (_BRANCH), which is what timeline JSON values hold.
+#
+# Passthrough text (timeline lines, file paths) is sanitized like
+# gstack-skill-start's (OV4): it cannot mint instruction blocks.
+
+_BIN=$(cd "$(dirname "$0")" 2>/dev/null && pwd)
+. "$_BIN/gstack-state-root.sh" 2>/dev/null || { echo "$0: cannot resolve the gstack state root: $_BIN/gstack-state-root.sh is missing. fix: reinstall with ./setup or /gstack-upgrade (docs/state-root.md)" >&2; exit 1; }
+gstack_state_root_select
+_GH="$_gstack_sr_root"
+_sanitize() { sed -e 's/GSTACK_INSTRUCTION/GSTACK-INSTRUCTION-(stripped)/g' -e 's/^SESSION_ID:/SESSION-ID-(stripped):/'; }
+
+SLUG=""; BRANCH=""
+eval "$("$_BIN/gstack-slug" 2>/dev/null)" 2>/dev/null || true
+_BRANCH=$(git branch --show-current 2>/dev/null | tr -cd 'a-zA-Z0-9._/-')
+_BRANCH=${_BRANCH:-unknown}
+_PROJ="$_GH/projects/${SLUG:-unknown}"
+[ -d "$_PROJ" ] || exit 0
+{
+  echo "--- RECENT ARTIFACTS ---"
+  find "$_PROJ/ceo-plans" "$_PROJ/checkpoints" -type f -name "*.md" 2>/dev/null | xargs -r ls -t 2>/dev/null | head -3
+  [ -f "$_PROJ/${BRANCH:-unknown}-reviews.jsonl" ] && echo "REVIEWS: $(wc -l < "$_PROJ/${BRANCH:-unknown}-reviews.jsonl" | tr -d ' ') entries"
+  if [ -f "$_PROJ/timeline.jsonl" ]; then
+    tail -5 "$_PROJ/timeline.jsonl"
+    _LAST=$(grep "\"branch\":\"${_BRANCH}\"" "$_PROJ/timeline.jsonl" 2>/dev/null | grep '"event":"completed"' | tail -1)
+    [ -n "$_LAST" ] && echo "LAST_SESSION: $_LAST"
+    _RECENT_SKILLS=$(grep "\"branch\":\"${_BRANCH}\"" "$_PROJ/timeline.jsonl" 2>/dev/null | grep '"event":"completed"' | tail -3 | grep -o '"skill":"[^"]*"' | sed 's/"skill":"//;s/"//' | tr '\n' ',')
+    [ -n "$_RECENT_SKILLS" ] && echo "RECENT_PATTERN: $_RECENT_SKILLS"
+  fi
+  _LATEST_CP=$(find "$_PROJ/checkpoints" -name "*.md" -type f 2>/dev/null | xargs -r ls -t 2>/dev/null | head -1)
+  [ -n "$_LATEST_CP" ] && echo "LATEST_CHECKPOINT: $_LATEST_CP"
+  if [ -f "$_PROJ/decisions.active.json" ]; then
+    echo "--- ACTIVE DECISIONS (recent, scope-relevant) ---"
+    "$_BIN/gstack-decision-search" --recent 5 2>/dev/null
+    echo "--- END DECISIONS ---"
+  fi
+  echo "--- END ARTIFACTS ---"
+} | _sanitize

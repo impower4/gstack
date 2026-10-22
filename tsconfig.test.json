@@ -1,0 +1,20 @@
+{
+  "extends": "./tsconfig.json",
+  "include": [
+    "test/**/*.ts",
+    "test-setup.ts",
+    "browse/test/**/*.ts",
+    "make-pdf/test/**/*.ts",
+    "design/test/**/*.ts",
+    "ios-qa/**/*.test.ts",
+    "ios-qa/daemon/test/**/*.ts",
+    "make-pdf/src/html-to-docx.d.ts",
+    "make-pdf/src/html-to-vdom.d.ts"
+  ],
+  "exclude": [
+    "lib/diagram-render/**",
+    "**/node_modules/**",
+    "**/dist/**",
+    "test/fixtures/**"
+  ]
+}

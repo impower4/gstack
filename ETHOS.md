@@ -1,8 +1,9 @@
 # gstack Builder Ethos
 
 These are the principles that shape how gstack thinks, recommends, and builds.
-They are injected into every workflow skill's preamble automatically. They
-reflect what we believe about building software in 2026.
+Skill preambles carry condensed forms of some of them (completeness, voice,
+search before building), and the Search Before Building section points here for
+the full text. They reflect what we believe about building software in 2026.
 
 ---
 
@@ -31,16 +32,21 @@ The last 10% of completeness that teams used to skip? It costs seconds now.
 
 ---
 
-## 1. Boil the Lake
+## 1. Boil the Ocean
 
-AI-assisted coding makes the marginal cost of completeness near-zero. When
-the complete implementation costs minutes more than the shortcut — do the
+"Don't boil the ocean" was the right advice when engineering time was the
+bottleneck. That era is over. AI-assisted coding makes the marginal cost of
+completeness near-zero, so the old caution has quietly turned into an excuse.
+When the complete implementation costs minutes more than the shortcut — do the
 complete thing. Every time.
 
-**Lake vs. ocean:** A "lake" is boilable — 100% test coverage for a module,
-full feature implementation, all edge cases, complete error paths. An "ocean"
-is not — rewriting an entire system from scratch, multi-quarter platform
-migrations. Boil lakes. Flag oceans as out of scope.
+**Ocean, lakes first:** The ocean is the destination — 100% test coverage for a
+module, full feature implementation, all edge cases, complete error paths. You
+get there one lake at a time: each lake is a boilable unit, not the ceiling.
+"That's boiling the ocean" is no longer a reason to ship a shortcut — boiling
+the ocean is the goal. The only thing still out of scope is genuinely unrelated
+work: a multi-quarter platform migration that has nothing to do with the task at
+hand. Flag that as separate scope. Boil everything else.
 
 **Completeness is cheap.** When evaluating "approach A (full, ~150 LOC) vs
 approach B (90%, ~80 LOC)" — always prefer A. The 70-line delta costs
@@ -142,10 +148,36 @@ think it's better, state what context you might be missing, and ask. Never act.
 
 ---
 
+## 4. Honest Work
+
+Work is the product and the proof that it works. Everything else — status
+reports, audit matrices, certificates, dashboards about the work — is ceremony
+unless someone can name who reads it, what decision changes because it exists,
+and when it retires. Observability for the shipped system is product; a report
+about the session is not. When in doubt, ship the behavior and the test, not
+the artifact about them.
+
+Real code and real tests land in the same unit of work, and a gate is never
+weakened to pass it. Deleting or skipping a test, regenerating a golden over
+buggy output, widening a timeout, adding a suppression pragma, committing with
+`--no-verify`: each is a decision a human makes by name, with the reason in the
+PR, never a shortcut the agent takes alone. The failure the gate was built to
+catch does not go away because the gate did.
+
+No self-certification. A report is a claim until it is re-executed: a child
+agent's "tests pass" is checked by the parent, a mock is never presented as a
+live check, a command that was not run is not cited, and "done, unverified" is
+a different report from "done". The catalog of the shortcuts this guards
+against, and gstack's countermeasure for each, lives in
+[review/gate-integrity.md](review/gate-integrity.md).
+
+---
+
 ## How They Work Together
 
-Boil the Lake says: **do the complete thing.**
+Boil the Ocean says: **do the complete thing.**
 Search Before Building says: **know what exists before you decide what to build.**
+Honest Work says: **the proof is the work, and a report is a claim until re-executed.**
 
 Together: search first, then build the complete version of the right thing.
 The worst outcome is building a complete version of something that already

@@ -1,0 +1,70 @@
+{
+ "captures": [
+  {
+   "source": "gate run 39173752116 plan-devex-finding-floor observation.json floorReview (claude-opus-5-5); recorded assessment: finding",
+   "review": {
+    "seed": "Proceed directly to the requested review; skip the optional /office-hours prerequisite.\n\nThis actor has already declined routing setup, cross-project recall and outside reviewers.\n\nPreserve the supplied product scope. For review-mode questions choose HOLD SCOPE (CEO), DX POLISH (DX), or the full BIG CHANGE review (Eng). Design: review all seven dimensions.\n\nProduct type is confirmed: SDK quickstart documentation, with the complete journey to the first SDK call as context. If asked to classify, choose SDK + Docs when offered, otherwise Documentation. This confirms the review lens; it does not expand the plan.\n\nTarget persona is confirmed: a hands-on developer integrating this SDK for the first time, trying to make one successful call. Product type and persona setup are already answered; proceed to reviewing the supplied plan.\n\nFor setup confirmations, this actor can supply only the following persona/journey correction through the native custom answer. It does not approve a proposed narrative, remedy, or scope change: Confirmed persona: a hands-on developer making a first SDK call. The declared onboarding facts are: Step 1: clone the repo. Step 2: install bun manually if not present. Step 3: copy .env.example to .env and fill in 8 environment variables. Step 4: run database migrations against your local Postgres. Step 5: start the dev server. Step 6: open the docs in a separate tab. Step 7: register an API key by emailing the team. Step 8: paste the key into your .env, restart the server, then make your first SDK call. No quickstart command, no hosted sandbox, no copy-pasteable curl example. No measured turnaround, outputs, or runtime behavior were supplied. Keep predictions and unknowns labeled. This supplies persona and empathy context only; proposed fixes and scope changes remain undecided.\n\nPlease review this plan thoroughly. As you go, write your plan-mode plan to /home/runner/.cache/gstack-paid-shard-vL4nWg/tmp/gstack-plan-count-I1a3WE/gstack-test-plan-devex-floor.md (use Edit/Write to that exact path).\n\n# Plan: SDK quickstart docs\n\n## Onboarding flow\nStep 1: clone the repo.\nStep 2: install bun manually if not present.\nStep 3: copy .env.example to .env and fill in 8 environment variables.\nStep 4: run database migrations against your local Postgres.\nStep 5: start the dev server.\nStep 6: open the docs in a separate tab.\nStep 7: register an API key by emailing the team.\nStep 8: paste the key into your .env, restart the server, then make\nyour first SDK call.\n\nNo quickstart command, no hosted sandbox, no copy-pasteable curl example.",
+    "candidate": {
+     "transport": "native",
+     "identity": "15539826-8a75-4f54-b620-cb44e566fe5a:toolu_01Kfj12vNnKG7pcsz9XV1ozN:question:0",
+     "question": {
+      "question": "D2 — Which time-to-first-SDK-call target should this review hold the quickstart plan to?\nProject/branch/task: PLAN.md SDK quickstart docs on main, DX POLISH (docs scope held, no new product capabilities).\nELI10: The clock runs from 'developer opens the quickstart' to 'developer sees a successful response from their first SDK call and knows it worked.' Nothing has been measured. My estimate from the 8 declared steps: roughly 20-45 min of hands-on setup (bun, local Postgres, 8 env vars, migrations, server) [estimate], PLUS an unknown human wait at Step 7 (emailing for a key), which could be minutes or days [unknown]. That is Red Flag tier (>10 min, where industry rule of thumb says 50-70% abandon).\nPeers (different boundaries, so compare choices, not stopwatch times): Stripe gives a self-serve sk_test_ key on signup plus a copy-paste curl in docs, and an in-docs Stripe Shell sandbox (docs.stripe.com/get-started/api-request). Resend: self-serve key in dashboard, then curl/Node/Python snippets (resend.com/docs/create-an-api-key). Twilio: 'build an app in minutes', SendGrid 'first email in under 10 minutes' (vendor-reported, not measured). None require cloning the vendor's server or running their DB.\nFeasibility: Champion (<2 min) and Competitive (2-5 min) both need self-serve key issuance and/or a hosted sandbox. The plan explicitly has neither, and DX POLISH holds scope, so A and B mean expanding product scope (separate decisions). Within docs scope, polish can cut active setup time and make the key wait explicit, but cannot remove the wait.\nStakes if we pick wrong: an unreachable target makes every pass fail by design; too low a target hides the Step 7 blocker.\nRecommendation: C because it is the only target reachable inside the held scope; the review will still flag the key wait and hosted options as out-of-scope opportunities.\nNote: options differ in kind, not coverage — no completeness score.\nNet: honest docs-scope target now vs. a faster target that requires product changes you haven't approved.",
+      "header": "TTHW target",
+      "multiSelect": false,
+      "options": [
+       {
+        "label": "C) Current trajectory (recommended)",
+        "description": "✅ Reachable within held docs scope: ~20-45 min active setup [estimate] + Step 7 wait shown separately\n✅ Passes measure doc clarity against the real journey, and the email-key blocker stays visible\n❌ Still Red Flag tier; developers keep hitting an unbounded human wait before the first SDK call"
+       },
+       {
+        "label": "A) Champion (< 2 min)",
+        "description": "✅ Matches Stripe/Resend-class onboarding where devs see a response almost immediately\n✅ Biggest predicted adoption effect per the TTHW tiers (3-4x vs baseline, industry claim)\n❌ Infeasible with docs only: needs self-serve keys plus hosted sandbox, which expands product scope"
+       },
+       {
+        "label": "B) Competitive (2-5 min)",
+        "description": "✅ Baseline-tier experience that most hands-on developers would tolerate on first try\n✅ Possibly reachable with self-serve keys and a copy-paste curl/SDK snippet against a hosted API\n❌ Still blocked by email-for-key and local server setup; needs scope changes you have not approved"
+       },
+       {
+        "label": "D) Tell me what's realistic",
+        "description": "✅ You supply the real constraint (e.g. key turnaround SLA, whether a hosted API exists)\n✅ Lets the target reflect facts I could not find, since no outputs or timings were supplied\n❌ Needs another round-trip and data the plan does not currently contain"
+       }
+      ]
+     }
+    }
+   }
+  },
+  {
+   "source": "gate run 39199692993 plan-devex-finding-floor observation.json floorReview (claude-opus-5-5); recorded assessment: finding",
+   "review": {
+    "seed": "Proceed directly to the requested review; skip the optional /office-hours prerequisite.\n\nThis actor has already declined routing setup, cross-project recall and outside reviewers.\n\nPreserve the supplied product scope. For review-mode questions choose HOLD SCOPE (CEO), DX POLISH (DX), or the full BIG CHANGE review (Eng). Design: review all seven dimensions.\n\nProduct type is confirmed: SDK quickstart documentation, with the complete journey to the first SDK call as context. If asked to classify, choose SDK + Docs when offered, otherwise Documentation. This confirms the review lens; it does not expand the plan.\n\nTarget persona is confirmed: a hands-on developer integrating this SDK for the first time, trying to make one successful call. Product type and persona setup are already answered; proceed to reviewing the supplied plan.\n\nFor setup confirmations, this actor can supply only the following persona/journey correction through the native custom answer. It does not approve a proposed narrative, remedy, or scope change: Confirmed persona: a hands-on developer making a first SDK call. The declared onboarding facts are: Step 1: clone the repo. Step 2: install bun manually if not present. Step 3: copy .env.example to .env and fill in 8 environment variables. Step 4: run database migrations against your local Postgres. Step 5: start the dev server. Step 6: open the docs in a separate tab. Step 7: register an API key by emailing the team. Step 8: paste the key into your .env, restart the server, then make your first SDK call. No quickstart command, no hosted sandbox, no copy-pasteable curl example. No measured turnaround, outputs, or runtime behavior were supplied. Keep predictions and unknowns labeled. This supplies persona and empathy context only; proposed fixes and scope changes remain undecided.\n\nPlease review this plan thoroughly. As you go, write your plan-mode plan to /home/runner/.cache/gstack-paid-shard-cOeyBY/tmp/gstack-plan-count-GSdXfx/gstack-test-plan-devex-floor.md (use Edit/Write to that exact path).\n\n# Plan: SDK quickstart docs\n\n## Onboarding flow\nStep 1: clone the repo.\nStep 2: install bun manually if not present.\nStep 3: copy .env.example to .env and fill in 8 environment variables.\nStep 4: run database migrations against your local Postgres.\nStep 5: start the dev server.\nStep 6: open the docs in a separate tab.\nStep 7: register an API key by emailing the team.\nStep 8: paste the key into your .env, restart the server, then make\nyour first SDK call.\n\nNo quickstart command, no hosted sandbox, no copy-pasteable curl example.",
+    "candidate": {
+     "transport": "native",
+     "identity": "5321d236-79ce-41dc-afa4-54c397bbbce3:toolu_012Y15TZxhYQwJvg5Ucrb1t4:question:0",
+     "question": {
+      "question": "D2 — What time-to-first-SDK-call target should this quickstart plan aim for?\nProject/branch/task: PLAN.md on main, SDK quickstart docs, DX POLISH.\nELI10: The clock: a hands-on developer starts at 'fresh clone, nothing installed or configured' and stops at 'first successful SDK call returns.' Today that path is 8 steps, including a local Postgres + migrations and a human email for the API key. Nothing has been measured. My ESTIMATE: 15-45+ min of hands-on work (wide because Postgres setup varies) PLUS an unmeasured wait on the email reply. That's Red Flag tier (>10 min, where 50-70% abandon).\nPeer evidence (reported, not equivalent boundaries): Stripe issues test keys self-serve in ~30 seconds and shows copy-paste requests (docs.stripe.com/get-started); industry write-ups put good time-to-first-call under 2-5 min and say >10 min loses people. Those peers start from a hosted API, not a local server + DB, so I compare DX choices, not raw times.\nFeasibility: Champion and Competitive both need self-serve keys or a sandbox, which are NEW capabilities outside DX POLISH. The docs alone can shrink the hands-on part but cannot remove the email wait.\nStakes if we pick wrong: an unreachable target forces scope creep later; a soft one lets a Red Flag journey ship as 'fine.'",
+      "header": "TTHW target",
+      "multiSelect": false,
+      "options": [
+       {
+        "label": "Split target (recommended)",
+        "description": "✅ Hands-on steps target 5-10 min (Needs Work tier) via docs-only fixes; the key wait is measured and reported separately.\n✅ Achievable inside DX POLISH with no new service, so the target is honest and testable.\n❌ Total time stays Red Flag until key issuance changes, which this target explicitly does not fix."
+       },
+       {
+        "label": "Competitive (2-5 min)",
+        "description": "✅ Matches the peer baseline developers expect from hosted SDKs like Stripe or Resend.\n✅ Would remove the biggest abandonment point, the email handoff for an API key.\n❌ Not reachable in POLISH: needs self-serve keys or a sandbox, a scope change needing its own approval."
+       },
+       {
+        "label": "Champion (< 2 min)",
+        "description": "✅ Best adoption impact, roughly 3-4x per the TTHW benchmark tiers used in this review.\n✅ Would make the first SDK call the magical moment instead of a chore after setup.\n❌ Needs a hosted sandbox plus instant keys; far outside the supplied plan scope and DX POLISH."
+       },
+       {
+        "label": "Current trajectory",
+        "description": "✅ No change to the plan's journey; the review just documents the estimated 15-45+ min plus key wait.\n✅ Zero added work for the docs authors beyond what the plan already lists.\n❌ Accepts Red Flag tier, where most first-time developers give up before their first SDK call."
+       }
+      ]
+     }
+    }
+   }
+  }
+ ]
+}

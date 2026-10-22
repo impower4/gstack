@@ -1,12 +1,12 @@
 /**
  * Shared helpers for E2E test files.
  *
- * Extracted from the monolithic skill-e2e.test.ts to support splitting
- * tests across multiple files by category.
+ * Extracted from the (since-deleted) pre-split monolith to support
+ * splitting tests across multiple skill-e2e-*.test.ts files by category.
  */
 
 import '../../lib/conductor-env-shim';
-import { describe, test, beforeAll, afterAll, expect } from 'bun:test';
+import { describe, test, afterAll, expect } from 'bun:test';
 import type { SkillTestResult } from './session-runner';
 import { EvalCollector, judgePassed } from './eval-store';
 import type { EvalTestEntry } from './eval-store';
@@ -14,7 +14,9 @@ import { judgeRecommendation, type RecommendationScore } from './llm-judge';
 import { selectTests, detectBaseBranch, getChangedFiles, E2E_TOUCHFILES, E2E_TIERS, GLOBAL_TOUCHFILES } from './touchfiles';
 import { WorktreeManager } from '../../lib/worktree';
 import type { HarvestResult } from '../../lib/worktree';
-import { spawnSync } from 'child_process';
+import { preflightAnthropicApi } from './anthropic-preflight';
+import { isHermeticEnabled } from './hermetic-env';
+import { hostSkipReason, resolveEvalHost } from './e2e-hosts';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
@@ -32,32 +34,94 @@ export const evalsEnabled = !!process.env.EVALS;
 // --- Diff-based test selection ---
 // When EVALS_ALL is not set, only run tests whose touchfiles were modified.
 // Set EVALS_ALL=1 to force all tests. Set EVALS_BASE to override base branch.
-export let selectedTests: string[] | null = null; // null = run all
 
-if (evalsEnabled && !process.env.EVALS_ALL) {
+/**
+ * Compute the diff-based selection for a touchfiles table. Returns null for
+ * "run all" (EVALS off, EVALS_ALL=1, or no diff vs the base branch — e.g. on
+ * main). Shared by this module (E2E_TOUCHFILES) and skill-llm-eval.test.ts
+ * (LLM_JUDGE_TOUCHFILES) so the selection logic exists exactly once.
+ */
+export function computeDiffSelection(
+  touchfiles: Record<string, string[]>,
+  label: string,
+): string[] | null {
+  if (!evalsEnabled || process.env.EVALS_ALL) return null;
   const baseBranch = process.env.EVALS_BASE
     || detectBaseBranch(ROOT)
     || 'main';
   const changedFiles = getChangedFiles(baseBranch, ROOT);
+  // If changedFiles is empty (e.g., on main branch), run all
+  if (changedFiles.length === 0) return null;
 
-  if (changedFiles.length > 0) {
-    const selection = selectTests(changedFiles, E2E_TOUCHFILES, GLOBAL_TOUCHFILES);
-    selectedTests = selection.selected;
-    process.stderr.write(`\nE2E selection (${selection.reason}): ${selection.selected.length}/${Object.keys(E2E_TOUCHFILES).length} tests\n`);
-    if (selection.skipped.length > 0) {
-      process.stderr.write(`  Skipped: ${selection.skipped.join(', ')}\n`);
-    }
-    process.stderr.write('\n');
+  const selection = selectTests(changedFiles, touchfiles, GLOBAL_TOUCHFILES);
+  process.stderr.write(`\n${label} selection (${selection.reason}): ${selection.selected.length}/${Object.keys(touchfiles).length} tests\n`);
+  if (selection.skipped.length > 0) {
+    process.stderr.write(`  Skipped: ${selection.skipped.join(', ')}\n`);
   }
-  // If changedFiles is empty (e.g., on main branch), selectedTests stays null → run all
+  process.stderr.write('\n');
+  return selection.selected;
 }
+
+/**
+ * Parse the sharded paid runner's precomputed selection (EVALS_SELECTION_JSON,
+ * written by serializePaidDiffSelection in scripts/test-paid-shards.ts).
+ * Returns { selected: null } for run-all. THROWS on any parse/shape failure —
+ * resolveModuleSelection turns that into a fail-open local recompute.
+ */
+export function parseEvalsSelectionJson(raw: string): { selected: string[] | null; reason: string } {
+  const parsed: unknown = JSON.parse(raw);
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('not an object');
+  const { selected, reason } = parsed as { selected?: unknown; reason?: unknown };
+  if (selected !== null
+    && !(Array.isArray(selected) && selected.every((s) => typeof s === 'string'))) {
+    throw new Error('selected must be null or string[]');
+  }
+  return {
+    selected: selected as string[] | null,
+    reason: typeof reason === 'string' ? reason : 'parent selection',
+  };
+}
+
+/**
+ * Resolve the module-load E2E selection: prefer the parent shard runner's
+ * EVALS_SELECTION_JSON — skipping this module's own git walk and, when
+ * touchfiles-data.ts is in the diff, the per-child bun subprocess that
+ * evaluates the old data file (test-selection.ts map-diff path, one per
+ * shard). On ANY parse/shape failure, fall back to computing locally
+ * (fail-open preserved) with one stderr warning.
+ */
+export function resolveModuleSelection(
+  raw: string | undefined,
+  compute: () => string[] | null,
+  stderrWrite: (text: string) => void = (text) => process.stderr.write(text),
+): string[] | null {
+  const strictProfile = process.env.EVALS_PROFILE === 'pr';
+  if (raw) {
+    try {
+      const { selected, reason } = parseEvalsSelectionJson(raw);
+      stderrWrite(`\nE2E selection (parent-propagated: ${reason}): ${selected === null ? 'all' : selected.length} tests\n`);
+      return selected;
+    } catch (err) {
+      if (strictProfile) throw new Error(`PR profile requires a valid persisted selection: ${err instanceof Error ? err.message : String(err)}`);
+      stderrWrite(`WARNING: malformed EVALS_SELECTION_JSON (${err instanceof Error ? err.message : String(err)}) — falling back to local selection\n`);
+    }
+  }
+  if (strictProfile) throw new Error('PR profile requires persisted case selection from scripts/test-paid-shards.ts');
+  return compute();
+}
+
+export let selectedTests: string[] | null = resolveModuleSelection(
+  evalsEnabled ? process.env.EVALS_SELECTION_JSON : undefined,
+  () => computeDiffSelection(E2E_TOUCHFILES, 'E2E'),
+); // null = run all
 
 // EVALS_TIER: filter tests by tier after diff-based selection.
 // 'gate' = gate tests only (CI default — blocks merge)
 // 'periodic' = periodic tests only (weekly cron / manual)
+// 'marathon' = full end-to-end flows only (non-blocking marathon lane)
 // not set = run all selected tests (local dev default, backward compat)
 if (evalsEnabled && process.env.EVALS_TIER) {
-  const tier = process.env.EVALS_TIER as 'gate' | 'periodic';
+  const tier = process.env.EVALS_TIER as 'gate' | 'periodic' | 'marathon';
   const tierTests = Object.entries(E2E_TIERS)
     .filter(([, t]) => t === tier)
     .map(([name]) => name);
@@ -70,11 +134,27 @@ if (evalsEnabled && process.env.EVALS_TIER) {
   process.stderr.write(`EVALS_TIER=${tier}: ${selectedTests.length} tests\n\n`);
 }
 
+// EVALS_HOST=codex: Claude-only cases are skipped with their reason, never run
+// (and never failed); the report deselects them (test/helpers/e2e-hosts.ts).
+if (evalsEnabled && resolveEvalHost() !== 'claude') {
+  const host = resolveEvalHost();
+  const candidates = selectedTests ?? Object.keys(E2E_TIERS);
+  const skipped = candidates.filter(id => hostSkipReason(id, host));
+  selectedTests = candidates.filter(id => !hostSkipReason(id, host));
+  process.stderr.write(`EVALS_HOST=${host}: ${selectedTests.length} tests; ${skipped.length} Claude-only skipped (${skipped.join(', ') || 'none'})\n\n`);
+  (await import('./codex-host-runner')).prepareCodexHostRuntime();
+}
+
 export const describeE2E = evalsEnabled ? describe : describe.skip;
 
-/** Wrap a describe block to skip entirely if none of its tests are selected. */
-export function describeIfSelected(name: string, testNames: string[], fn: () => void) {
-  const anySelected = selectedTests === null || testNames.some(t => selectedTests!.includes(t));
+/**
+ * Wrap a describe block to skip entirely if none of its tests are selected.
+ * `selected` defaults to this module's E2E selection (diff + EVALS_TIER);
+ * pass an explicit selection (e.g. computeDiffSelection over
+ * LLM_JUDGE_TOUCHFILES) to reuse the gating against a different table.
+ */
+export function describeIfSelected(name: string, testNames: string[], fn: () => void, selected: string[] | null = selectedTests) {
+  const anySelected = selected === null || testNames.some(t => selected.includes(t));
   (anySelected ? describeE2E : describe.skip)(name, fn);
 }
 
@@ -162,6 +242,18 @@ export function createEvalCollector(suite: string): EvalCollector | null {
 }
 
 /** DRY helper to record an E2E test result into the eval collector. */
+/** Exit reasons for an API or transport failure (session-runner.ts). */
+const INFRA_EXIT_REASONS = new Set(['error_api', 'timeout_startup', 'error_output_stream']);
+
+/** API/transport error or CLI crash before the first model turn: INFRA, never a
+ *  verdict on the product. Any assistant event or counted turn means the model
+ *  ran, so its refusal, timeout or wrong answer stays an ordinary failure. */
+export function isPreTurnInfraFailure(result: Pick<SkillTestResult, 'exitReason' | 'transcript' | 'costEstimate'>): boolean {
+  return result.costEstimate.turnsUsed === 0
+    && (INFRA_EXIT_REASONS.has(result.exitReason) || /^exit_code_\d+$/.test(result.exitReason))
+    && !result.transcript.some(event => event?.type === 'assistant');
+}
+
 export function recordE2E(
   evalCollector: EvalCollector | null,
   name: string,
@@ -174,14 +266,19 @@ export function recordE2E(
     ? `${result.toolCalls[result.toolCalls.length - 1].tool}(${JSON.stringify(result.toolCalls[result.toolCalls.length - 1].input).slice(0, 60)})`
     : undefined;
 
+  const passed = extra?.passed ?? (result.exitReason === 'success' && result.browseErrors.length === 0);
   evalCollector?.addTest({
     name, suite, tier: 'e2e',
-    passed: result.exitReason === 'success' && result.browseErrors.length === 0,
+    passed,
+    ...(!passed && isPreTurnInfraFailure(result) ? { failure_class: 'infra' as const } : {}),
     duration_ms: result.duration,
     cost_usd: result.costEstimate.estimatedCost,
+    ...(result.costKnown === false ? { cost_known: false } : {}),
+    ...(result.tokenUsage ? { token_usage: result.tokenUsage } : {}),
     transcript: result.transcript,
     output: result.output?.slice(0, 2000),
     turns_used: result.costEstimate.turnsUsed,
+    tokens_used: result.costEstimate.estimatedTokens,
     browse_errors: result.browseErrors,
     exit_reason: result.exitReason,
     timeout_at_turn: result.exitReason === 'timeout' ? result.costEstimate.turnsUsed : undefined,
@@ -216,10 +313,14 @@ export async function assertRecommendationQuality(opts: {
   evalTitle: string;
   result: SkillTestResult;
   passed: boolean;
+  signal?: AbortSignal;
+  /** Let a bounded attempt defer its one terminal record until all assertions settle. */
+  record?: (extra: Pick<EvalTestEntry, 'judge_scores' | 'judge_reasoning'>) => void;
 }): Promise<RecommendationScore> {
-  const recScore = await judgeRecommendation(opts.captured);
-  recordE2E(opts.evalCollector, opts.evalId, opts.evalTitle, opts.result, {
-    passed: opts.passed,
+  opts.signal?.throwIfAborted();
+  const recScore = await judgeRecommendation(opts.captured, opts.signal);
+  opts.signal?.throwIfAborted();
+  const metadata = {
     judge_scores: {
       rec_present: recScore.present ? 1 : 0,
       rec_commits: recScore.commits ? 1 : 0,
@@ -227,7 +328,9 @@ export async function assertRecommendationQuality(opts: {
       rec_substance: recScore.reason_substance,
     },
     judge_reasoning: `${recScore.reasoning} | reason: "${recScore.reason_text}"`,
-  });
+  };
+  if (opts.record) opts.record(metadata);
+  else recordE2E(opts.evalCollector, opts.evalId, opts.evalTitle, opts.result, { passed: opts.passed, ...metadata });
   expect(recScore.present, recScore.reasoning).toBe(true);
   expect(recScore.commits, recScore.reasoning).toBe(true);
   expect(recScore.has_because, recScore.reasoning).toBe(true);
@@ -251,35 +354,44 @@ export async function finalizeEvalCollector(evalCollector: EvalCollector | null)
 
 // Pre-seed preamble state files so E2E tests don't waste turns on lake intro + telemetry prompts.
 // These are one-time interactive prompts that burn 3-7 turns per test if not pre-seeded.
-if (evalsEnabled) {
+// NOTE: since gstack-skill-start honors GSTACK_HOME (EOV7), hermetic children read the
+// temp GSTACK_HOME that hermetic-env.ts seeds (the canonical marker list lives there);
+// this operator-HOME seeding only serves EVALS_HERMETIC=0 debug runs.
+if (evalsEnabled && !isHermeticEnabled()) {
   const gstackDir = path.join(os.homedir(), '.gstack');
   fs.mkdirSync(gstackDir, { recursive: true });
-  for (const f of ['.completeness-intro-seen', '.telemetry-prompted', '.proactive-prompted']) {
+  // Marker list kept at parity with hermetic-env.ts's child-GSTACK_HOME seed
+  // (the canonical set for the emission layer's gates).
+  for (const f of [
+    '.activated',
+    '.completeness-intro-seen',
+    '.telemetry-prompted',
+    '.proactive-prompted',
+    '.first-loop-tip-shown',
+    '.feature-prompted-model-overlay',
+  ]) {
     const p = path.join(gstackDir, f);
     if (!fs.existsSync(p)) fs.writeFileSync(p, '');
   }
 }
 
-// Fail fast if Anthropic API is unreachable — don't burn through tests getting ConnectionRefused
+// Fail fast if Anthropic API is unreachable — don't burn through tests getting
+// ConnectionRefused. The sharded paid runner pings once in the parent and sets
+// EVALS_PREFLIGHT_OK=1 for its children, so per-file module loads skip this
+// (was: ~30 paid pings per full sharded run, one per importing file).
 if (evalsEnabled) {
-  const check = spawnSync('sh', ['-c', 'echo "ping" | claude -p --max-turns 1 --output-format stream-json --verbose --dangerously-skip-permissions'], {
-    stdio: 'pipe', timeout: 30_000,
-  });
-  const output = check.stdout?.toString() || '';
-  if (output.includes('ConnectionRefused') || output.includes('Unable to connect')) {
-    throw new Error('Anthropic API unreachable — aborting E2E suite. Fix connectivity and retry.');
-  }
+  preflightAnthropicApi();
 }
 
 /** Skip an individual test if not selected (for multi-test describe blocks). */
-export function testIfSelected(testName: string, fn: () => Promise<void>, timeout: number) {
-  const shouldRun = selectedTests === null || selectedTests.includes(testName);
+export function testIfSelected(testName: string, fn: () => Promise<void>, timeout: number, selected: string[] | null = selectedTests) {
+  const shouldRun = selected === null || selected.includes(testName);
   (shouldRun ? test : test.skip)(testName, fn, timeout);
 }
 
 /** Concurrent version — runs in parallel with other concurrent tests within the same describe block. */
-export function testConcurrentIfSelected(testName: string, fn: () => Promise<void>, timeout: number) {
-  const shouldRun = selectedTests === null || selectedTests.includes(testName);
+export function testConcurrentIfSelected(testName: string, fn: () => Promise<void>, timeout: number, selected: string[] | null = selectedTests) {
+  const shouldRun = selected === null || selected.includes(testName);
   (shouldRun ? test.concurrent : test.skip)(testName, fn, timeout);
 }
 
@@ -315,24 +427,6 @@ export function harvestAndCleanup(testName: string): HarvestResult | null {
   }
   mgr.cleanup(testName);
   return result;
-}
-
-/**
- * Convenience: describe block with automatic worktree isolation + harvest.
- * Any test file can use this to get real repo context instead of a tmpdir.
- * Note: tests with planted-bug fixtures should NOT use this — they need their fixture repos.
- */
-export function describeWithWorktree(
-  name: string,
-  testNames: string[],
-  fn: (getWorktreePath: () => string) => void,
-) {
-  describeIfSelected(name, testNames, () => {
-    let worktreePath: string;
-    beforeAll(() => { worktreePath = createTestWorktree(name); });
-    afterAll(() => { harvestAndCleanup(name); });
-    fn(() => worktreePath);
-  });
 }
 
 export { judgePassed } from './eval-store';

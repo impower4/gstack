@@ -1,4 +1,5 @@
 import { describe, test, expect, beforeAll, afterAll } from 'bun:test';
+import { JUDGE_MS, CAPTURE_MS } from './helpers/eval-budgets';
 import { runSkillTest } from './helpers/session-runner';
 import {
   ROOT, runId, evalsEnabled,
@@ -39,7 +40,7 @@ describeIfSelected('Learnings E2E', ['learnings-show'], () => {
     // Copy bin scripts needed by /learn
     const binDir = path.join(workDir, 'bin');
     fs.mkdirSync(binDir, { recursive: true });
-    for (const script of ['gstack-learnings-search', 'gstack-learnings-log', 'gstack-slug']) {
+    for (const script of ['gstack-learnings-search', 'gstack-learnings-log', 'gstack-slug', 'gstack-state-root.sh', 'gstack-remote-identity.sh']) {
       fs.copyFileSync(path.join(ROOT, 'bin', script), path.join(binDir, script));
       fs.chmodSync(path.join(binDir, script), 0o755);
     }
@@ -103,7 +104,7 @@ IMPORTANT:
       workingDirectory: workDir,
       maxTurns: 15,
       allowedTools: ['Bash', 'Read', 'Write', 'Edit', 'Grep', 'Glob'],
-      timeout: 120_000,
+      timeout: JUDGE_MS,
       testName: 'learnings-show',
       runId,
     });
@@ -134,5 +135,5 @@ IMPORTANT:
     } else {
       console.warn(`Only ${foundCount}/3 learnings found (N+1: ${mentionsNPlusOne}, cache: ${mentionsCache}, rubocop: ${mentionsRubocop})`);
     }
-  }, 180_000);
+  }, CAPTURE_MS);
 });

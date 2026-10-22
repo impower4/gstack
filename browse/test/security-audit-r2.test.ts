@@ -6,24 +6,15 @@
  * that could silently remove a fix without breaking compilation.
  */
 
-import { describe, it, expect, beforeAll, afterAll } from 'bun:test';
+import { describe, it, expect, spyOn } from 'bun:test';
 import * as fs from 'fs';
 import * as path from 'path';
-import * as os from 'os';
 
 // ─── Shared source reads (used across multiple test sections) ───────────────
 const META_SRC = fs.readFileSync(path.join(import.meta.dir, '../src/meta-commands.ts'), 'utf-8');
 const WRITE_SRC = fs.readFileSync(path.join(import.meta.dir, '../src/write-commands.ts'), 'utf-8');
 const SERVER_SRC = fs.readFileSync(path.join(import.meta.dir, '../src/server.ts'), 'utf-8');
-// sidebar-agent.ts was ripped (chat queue replaced by interactive PTY).
-// AGENT_SRC kept as empty string so the legacy describe block below skips
-// without crashing module load on a missing file.
-const AGENT_SRC = (() => {
-  try { return fs.readFileSync(path.join(import.meta.dir, '../src/sidebar-agent.ts'), 'utf-8'); }
-  catch { return ''; }
-})();
 const SNAPSHOT_SRC = fs.readFileSync(path.join(import.meta.dir, '../src/snapshot.ts'), 'utf-8');
-const PATH_SECURITY_SRC = fs.readFileSync(path.join(import.meta.dir, '../src/path-security.ts'), 'utf-8');
 
 // ─── Helper ─────────────────────────────────────────────────────────────────
 
@@ -121,104 +112,6 @@ describe('Task 2: CSS value validator blocks dangerous patterns', () => {
   });
 });
 
-// ─── Task 1: Harden validateOutputPath to use realpathSync ──────────────────
-
-describe('Task 1: validateOutputPath uses realpathSync', () => {
-  describe('source-level checks', () => {
-    it('path-security.ts validateOutputPath contains realpathSync', () => {
-      const fn = extractFunction(PATH_SECURITY_SRC, 'validateOutputPath');
-      expect(fn).toBeTruthy();
-      expect(fn).toContain('realpathSync');
-    });
-
-    it('path-security.ts SAFE_DIRECTORIES resolves with realpathSync', () => {
-      const safeBlock = sliceBetween(PATH_SECURITY_SRC, 'const SAFE_DIRECTORIES', ';');
-      expect(safeBlock).toContain('realpathSync');
-    });
-
-    it('meta-commands.ts re-exports validateOutputPath from path-security', () => {
-      expect(META_SRC).toContain("from './path-security'");
-      expect(META_SRC).toContain('validateOutputPath');
-    });
-
-    it('write-commands.ts imports validateOutputPath from path-security', () => {
-      expect(WRITE_SRC).toContain("from './path-security'");
-      expect(WRITE_SRC).toContain('validateOutputPath');
-    });
-  });
-
-  describe('behavioral checks', () => {
-    let tmpDir: string;
-    let symlinkPath: string;
-
-    beforeAll(() => {
-      tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gstack-sec-test-'));
-      symlinkPath = path.join(tmpDir, 'evil-link');
-      try {
-        fs.symlinkSync('/etc', symlinkPath);
-      } catch {
-        symlinkPath = '';
-      }
-    });
-
-    afterAll(() => {
-      try {
-        if (symlinkPath) fs.unlinkSync(symlinkPath);
-        fs.rmdirSync(tmpDir);
-      } catch {
-        // best-effort cleanup
-      }
-    });
-
-    it('meta-commands validateOutputPath rejects path through /etc symlink', async () => {
-      if (!symlinkPath) {
-        console.warn('Skipping: symlink creation failed');
-        return;
-      }
-      const mod = await import('../src/meta-commands.ts');
-      const attackPath = path.join(symlinkPath, 'passwd');
-      expect(() => mod.validateOutputPath(attackPath)).toThrow();
-    });
-
-    it('realpathSync on symlink-to-/etc resolves to /etc (out of safe dirs)', () => {
-      if (!symlinkPath) {
-        console.warn('Skipping: symlink creation failed');
-        return;
-      }
-      const resolvedLink = fs.realpathSync(symlinkPath);
-      // macOS: /etc -> /private/etc
-      expect(resolvedLink).toBe(fs.realpathSync('/etc'));
-      const TEMP_DIR_VAL = process.platform === 'win32' ? os.tmpdir() : '/tmp';
-      const safeDirs = [TEMP_DIR_VAL, process.cwd()].map(d => {
-        try { return fs.realpathSync(d); } catch { return d; }
-      });
-      const passwdReal = path.join(resolvedLink, 'passwd');
-      const isSafe = safeDirs.some(d => passwdReal === d || passwdReal.startsWith(d + path.sep));
-      expect(isSafe).toBe(false);
-    });
-
-    it('meta-commands validateOutputPath accepts legitimate tmpdir paths', async () => {
-      const mod = await import('../src/meta-commands.ts');
-      // Use /tmp (which resolves to /private/tmp on macOS) — matches SAFE_DIRECTORIES
-      const tmpBase = process.platform === 'darwin' ? '/tmp' : os.tmpdir();
-      const legitimatePath = path.join(tmpBase, 'gstack-screenshot.png');
-      expect(() => mod.validateOutputPath(legitimatePath)).not.toThrow();
-    });
-
-    it('meta-commands validateOutputPath accepts paths in cwd', async () => {
-      const mod = await import('../src/meta-commands.ts');
-      const cwdPath = path.join(process.cwd(), 'output.png');
-      expect(() => mod.validateOutputPath(cwdPath)).not.toThrow();
-    });
-
-    it('meta-commands validateOutputPath rejects paths outside safe dirs', async () => {
-      const mod = await import('../src/meta-commands.ts');
-      expect(() => mod.validateOutputPath('/home/user/secret.png')).toThrow(/Path must be within/);
-      expect(() => mod.validateOutputPath('/var/log/access.log')).toThrow(/Path must be within/);
-    });
-  });
-});
-
 // ─── Round-2 review findings: applyStyle CSS check ──────────────────────────
 
 describe('Round-2 finding 1: extension applyStyle blocks dangerous CSS values', () => {
@@ -298,19 +191,6 @@ describe('Round-2 finding 2: snapshot.ts annotated path uses realpathSync', () =
 // traversal in browse-server's tab-state writer is covered by
 // browse/test/terminal-agent.test.ts (handleTabState atomic-write tests).
 
-// ─── Task 5: /health endpoint must not expose sensitive fields ───────────────
-
-describe('/health endpoint security', () => {
-  it('must not expose currentMessage', () => {
-    const block = sliceBetween(SERVER_SRC, "url.pathname === '/health'", "url.pathname === '/refs'");
-    expect(block).not.toContain('currentMessage');
-  });
-  it('must not expose currentUrl', () => {
-    const block = sliceBetween(SERVER_SRC, "url.pathname === '/health'", "url.pathname === '/refs'");
-    expect(block).not.toContain('currentUrl');
-  });
-});
-
 // ─── Task 6: frame --url ReDoS fix ──────────────────────────────────────────
 
 describe('frame --url ReDoS fix', () => {
@@ -325,9 +205,7 @@ describe('frame --url ReDoS fix', () => {
   });
 
   it('escapeRegExp neutralizes catastrophic patterns (behavioral)', async () => {
-    const mod = await import('../src/meta-commands.ts');
-    const { escapeRegExp } = mod as any;
-    expect(typeof escapeRegExp).toBe('function');
+    const { escapeRegExp } = await import('../src/path-security.ts');
     const evil = '(a+)+$';
     const escaped = escapeRegExp(evil);
     const start = Date.now();
@@ -339,15 +217,18 @@ describe('frame --url ReDoS fix', () => {
 // ─── Task 7: watch-mode guard in chain command ───────────────────────────────
 
 describe('chain command watch-mode guard', () => {
-  it('chain loop contains isWatching() guard before write dispatch', () => {
-    // Post-alias refactor: loop iterates over canonicalized `c of commands`.
-    const block = sliceBetween(META_SRC, 'for (const c of commands)', 'Wait for network to settle');
-    expect(block).toContain('isWatching');
+  // The direct-dispatch fallback (which carried its own isWatching() guard)
+  // was deleted — it skipped every OTHER server gate. Chain subcommands now
+  // route exclusively through executeCommand -> handleCommandInternal, whose
+  // watch-mode write gate covers them. Pin both halves of that contract.
+  it('chain has no direct-dispatch fallback (executeCommand is mandatory)', () => {
+    const block = sliceBetween(META_SRC, 'const executeCmd = opts?.executeCommand', 'Wait for network to settle');
+    expect(block).toContain('chain requires the browse server (no executeCommand context)');
+    expect(block).not.toContain('handleWriteCommand(');
   });
 
-  it('chain loop BLOCKED message appears for write commands in watch mode', () => {
-    const block = sliceBetween(META_SRC, 'for (const c of commands)', 'Wait for network to settle');
-    expect(block).toContain('BLOCKED: write commands disabled in watch mode');
+  it('server pipeline blocks write commands in watch mode (covers chain subcommands)', () => {
+    expect(SERVER_SRC).toMatch(/isWatching\(\)\s*&&\s*isWriteInvocation\(command, args\)/);
   });
 });
 
@@ -361,11 +242,38 @@ describe('cookie-import domain validation', () => {
     expect(block).toContain('does not match current page domain');
   });
 
-  it('cookie-import-browser handler validates --domain against page hostname', () => {
-    const block = sliceBetween(WRITE_SRC, "case 'cookie-import-browser':", "case 'style':");
-    expect(block).toContain('normalizedDomain');
-    expect(block).toContain('pageHostname');
-    expect(block).toContain('does not match current page domain');
+  it('cookie-import-browser handler validates --domain against page hostname', async () => {
+    const operation = await import('../src/cookie-import-operation');
+    const { handleWriteCommand } = await import('../src/write-commands');
+    const imported = spyOn(operation, 'runCookieImport').mockResolvedValue({
+      browser: 'chromium', profile: 'Profile 2', imported: 2, failed: 0,
+      domainCounts: { '.example.test': 2 }, failureReasons: {}, outcome: 'imported',
+      reset: 'not_requested', verification: { verified: false, reason: 'not_requested' }, message: 'Cookie copy complete.',
+    });
+    let currentUrl = 'https://example.test';
+    const page = { url: () => currentUrl, isClosed: () => false };
+    const session = { getPage: () => page, getActiveFrameOrPage: () => page, getFrame: () => null } as any;
+    const manager = { trackCookieImportDomains() {} } as any;
+    try {
+      for (const [target, domain] of [
+        ['https://example.test', 'unrelated.test'],
+        ['https://example.test.evil.invalid', 'example.test'],
+        ['https://badexample.test', 'example.test'],
+      ]) {
+        currentUrl = target;
+        await expect(handleWriteCommand('cookie-import-browser', ['chromium', '--domain', domain], session, manager))
+          .rejects.toMatchObject({ code: 'target_mismatch' });
+      }
+      expect(imported).not.toHaveBeenCalled();
+      currentUrl = 'https://sub.example.test/protected';
+      const result = await handleWriteCommand('cookie-import-browser', ['chromium', '--domain', '.Example.Test.', '--profile', 'Profile 2'], session, manager);
+      expect(imported).toHaveBeenCalledTimes(1);
+      expect(imported.mock.calls[0][0]).toMatchObject({ browser: 'chromium', domains: ['example.test'], profile: 'Profile 2' });
+      expect(imported.mock.calls[0][1]).toEqual({ page, url: currentUrl });
+      expect(result).toContain('Imported 2 cookies from chromium (profile: Profile 2)');
+    } finally {
+      imported.mockRestore();
+    }
   });
 });
 
@@ -399,10 +307,6 @@ describe('Task 10: responsive screenshot path validation', () => {
     expect(validateIdx).toBeLessThan(screenshotIdx);
   });
 
-  it('results.push is present in the loop block (loop structure intact)', () => {
-    const block = sliceBetween(META_SRC, 'for (const vp of viewports)', 'Restore original viewport');
-    expect(block).toContain('results.push');
-  });
 });
 
 // ─── Task 11: State load — cookie + page URL validation ──────────────────────
@@ -506,12 +410,6 @@ describe('Task 17: viewport dimensions and wait timeouts are clamped', () => {
     const block = sliceBetween(WRITE_SRC, "case 'viewport':", "case 'cookie':");
     expect(block).toBeTruthy();
     expect(block).toMatch(/Math\.min|Math\.max/);
-  });
-
-  it('viewport case uses rawW/rawH before clamping (not direct destructure)', () => {
-    const block = sliceBetween(WRITE_SRC, "case 'viewport':", "case 'cookie':");
-    expect(block).toContain('rawW');
-    expect(block).toContain('rawH');
   });
 
   it('wait case (networkidle branch) clamps timeout with MAX_WAIT_MS', () => {

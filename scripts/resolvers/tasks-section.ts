@@ -4,7 +4,9 @@
  *   {{TASKS_SECTION_EMIT:<phase>}}     — per-skill task emission + JSONL write
  *   {{TASKS_SECTION_AGGREGATE}}        — autoplan aggregation across all phases
  *
- * Schema for the JSONL artifact lives in scripts/task-emission-schema.ts.
+ * JSONL artifact fields: phase, run_id, branch, commit, id, priority,
+ * component, files, effort_human, effort_cc, title, source_finding
+ * (consumed by /autoplan's aggregator).
  */
 
 import type { TemplateContext, ResolverFn } from './types';
@@ -16,13 +18,19 @@ export const generateTasksSectionEmit: ResolverFn = (_ctx: TemplateContext, args
   if (!phase || !VALID_PHASES.has(phase)) {
     throw new Error(`TASKS_SECTION_EMIT requires one of ${[...VALID_PHASES].join(', ')} — got ${phase}`);
   }
+  const ceo = _ctx.skillName === 'plan-ceo-review';
+  const conditionalWrites = ceo || _ctx.skillName === 'plan-eng-review';
+  const storagePolicy = ceo ? 'Step 0 storage policy' : 'Review record and write policy';
 
   return `## Implementation Tasks
 
-Before closing this review, synthesize the findings above into a flat list of
-build-actionable tasks. Each task derives from a specific finding — no padding.
-Emit the markdown section AND write a JSONL artifact that \`/autoplan\` can
-aggregate across phases.
+${ceo ? `Turn findings into tasks within the approved review depth. Implementation-ready
+tasks describe the build. Strategy-only tasks name the next research, design or
+verification action and its owner; they do not choose implementation contracts.
+List known files only. For unknown files, write "to be determined" and use an
+empty JSONL files array. Each task needs a concrete verification step.` : `Before closing this review, synthesize the findings above into a flat list of
+build-actionable tasks. Each task derives from a specific finding — no padding.`}
+${conditionalWrites ? `Always emit the markdown section. Write its JSONL artifact for \`/autoplan\` only when the ${storagePolicy} permits it; otherwise label the complete task output not persisted and do not claim an aggregation artifact exists.` : 'Emit the markdown section AND write a JSONL artifact that `/autoplan` can\naggregate across phases.'}
 
 ### Markdown section (always emit)
 
@@ -42,21 +50,23 @@ Rules:
 - P1 blocks ship; P2 should land same branch; P3 is a follow-up TODO.
 - If a finding produced no actionable task, do not invent one.
 - If a section had zero findings, emit \`_No new tasks from <section>._\`
-- Effort uses the AI-compression table from CLAUDE.md.
+- Show human-team and CC+gstack effort estimates. Default task-type ratios (human ÷ CC time): scaffolding ~100x, tests ~50x, features ~30x, bug fix with regression ~20x, architecture ~5x, research ~3x. Adjust to the actual work and state the assumption.
 
-### JSONL artifact (always write, even if zero tasks)
+### JSONL artifact (${conditionalWrites ? 'write when permitted, including zero tasks' : 'always write, even if zero tasks'})
 
 \`/autoplan\` reads this file to aggregate across phases. Build each line with
 \`jq -nc\` so titles and source findings containing quotes, newlines, or
 backslashes serialize cleanly — never use hand-rolled \`echo\` / \`printf\`.
 
 \`\`\`bash
-eval "$(~/.claude/skills/gstack/bin/gstack-slug 2>/dev/null)"
-TASKS_DIR="\${HOME}/.gstack/projects/\${SLUG:-unknown}"
+GSTACK_STATE_ROOT=$(~/.claude/skills/gstack/bin/gstack-paths --get GSTACK_STATE_ROOT); : "\${GSTACK_STATE_ROOT:?gstack-paths failed; reinstall with ./setup or /gstack-upgrade}"
+SLUG=$(~/.claude/skills/gstack/bin/gstack-slug --get SLUG 2>/dev/null)
+TASKS_DIR="$GSTACK_STATE_ROOT/projects/\${SLUG:-unknown}"
 mkdir -p "$TASKS_DIR"
 TASKS_FILE="$TASKS_DIR/tasks-${phase}-$(date +%Y%m%d-%H%M%S).jsonl"
 COMMIT=$(git rev-parse HEAD 2>/dev/null || echo unknown)
-BRANCH=$(git branch --show-current 2>/dev/null || echo unknown)
+# The task record keeps the raw git branch; artifact filenames keep gstack-slug's sanitized BRANCH.
+GIT_BRANCH=$(git branch --show-current 2>/dev/null || echo unknown)
 RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$"
 
 # Repeat ONE jq invocation per task identified during this review.
@@ -67,7 +77,7 @@ RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$"
 jq -nc \\
   --arg phase '${phase}' \\
   --arg run_id "$RUN_ID" \\
-  --arg branch "$BRANCH" \\
+  --arg branch "$GIT_BRANCH" \\
   --arg commit "$COMMIT" \\
   --arg id "$TASK_ID" \\
   --arg priority "$PRIORITY" \\
@@ -84,7 +94,7 @@ jq -nc \\
 If \`jq\` is not installed, fall back to skipping the JSONL write and warn
 the user to install jq for autoplan aggregation. Never hand-roll JSONL.
 
-If zero tasks were identified in this review, still touch the JSONL file
+${conditionalWrites ? 'When writes are permitted and zero tasks were identified, touch the JSONL file' : 'If zero tasks were identified in this review, still touch the JSONL file'}
 (\`: > "$TASKS_FILE"\`) so the aggregator sees that the phase produced output
 this run (an empty file means "ran, no findings" — distinct from "didn't run").
 `;
@@ -97,49 +107,45 @@ Before rendering the Final Approval Gate output block below, aggregate the
 per-phase task lists each review skill wrote.
 
 \`\`\`bash
-eval "$(~/.claude/skills/gstack/bin/gstack-slug 2>/dev/null)"
-TASKS_DIR="\${HOME}/.gstack/projects/\${SLUG:-unknown}"
+GSTACK_STATE_ROOT=$(~/.claude/skills/gstack/bin/gstack-paths --get GSTACK_STATE_ROOT); : "\${GSTACK_STATE_ROOT:?gstack-paths failed; reinstall with ./setup or /gstack-upgrade}"
+BRANCH=$(~/.claude/skills/gstack/bin/gstack-slug --get BRANCH 2>/dev/null)
+SLUG=$(~/.claude/skills/gstack/bin/gstack-slug --get SLUG 2>/dev/null)
+TASKS_DIR="$GSTACK_STATE_ROOT/projects/\${SLUG:-unknown}"
 BRANCH=$(git branch --show-current 2>/dev/null || echo unknown)
 # Commit window: last 5 commits on this branch. Drops stale standalone reviews.
 COMMITS_RECENT=$(git log --format=%H -n 5 2>/dev/null | tr '\\n' '|' | sed 's/|$//')
 
 AGGREGATED_TASKS=""
 if command -v jq >/dev/null 2>&1; then
-  # Collect entries from all 4 phases, scoped to current branch + commit window.
-  # For each phase, keep only the latest run_id. Within the surviving set,
-  # dedupe by (component, sorted(files), title) — exact match only.
-  # Sort by priority (P1 > P2 > P3) then by phase order.
+  # All 4 phases, scoped to this branch + commit window; latest run_id per
+  # phase; exact dedupe by (component, sorted(files), title); P1 > P2 > P3, then phase order.
   ALL_JSONL=$(mktemp -t autoplan-tasks.XXXXXXXX)
   for phase in ceo-review design-review eng-review devex-review; do
-    # Use find instead of glob expansion — zsh nomatch errors otherwise when
-    # a phase produced no JSONL files. Sorting by name keeps the order stable.
+    # find, not a glob: zsh nomatch errors when a phase wrote no JSONL. Sorted for stable order.
     while IFS= read -r f; do
       [ -f "$f" ] || continue
-      # Filter to current branch + recent commits, then keep records for the
-      # latest run_id only. (Single phase may have multiple files if the user
-      # re-ran the review; aggregator takes the newest.)
+      # .commit is bound BEFORE the pipe: a pipe rebinds jq's context, so a bare
+      # .commit after it indexes the array, every line errors, and the aggregate is empty.
       jq -c --arg branch "$BRANCH" --arg commits "$COMMITS_RECENT" \\
-        'select(.branch == $branch and ($commits | split("|") | index(.commit) != null))' \\
+        '.commit as $c | select(.branch == $branch and ($commits | split("|") | index($c) != null))' \\
         "$f" 2>/dev/null >> "$ALL_JSONL" || true
     done < <(find "$TASKS_DIR" -maxdepth 1 -name "tasks-$phase-*.jsonl" 2>/dev/null | sort)
-    # Reduce to latest run_id per phase
+    # Latest run_id per phase
     if [ -s "$ALL_JSONL" ]; then
       jq -sc --arg phase "$phase" \\
         '[.[] | select(.phase == $phase)] | (max_by(.run_id) // null) as $latest_run | if $latest_run then map(select(.run_id == $latest_run.run_id)) else [] end | .[]' \\
         "$ALL_JSONL" > "$ALL_JSONL.phase" 2>/dev/null || true
-      # Replace with reduced version for this phase, accumulating others
       jq -c --arg phase "$phase" 'select(.phase != $phase)' "$ALL_JSONL" > "$ALL_JSONL.other" 2>/dev/null || true
       cat "$ALL_JSONL.other" "$ALL_JSONL.phase" > "$ALL_JSONL"
       rm -f "$ALL_JSONL.phase" "$ALL_JSONL.other"
     fi
   done
 
-  # Exact-match dedup by (component, sorted(files), title). Non-matches kept
-  # separately with a possible-duplicate marker injected by the renderer.
+  # Exact-match dedupe; non-matches stay separate (the renderer marks possible duplicates).
   AGGREGATED_TASKS=$(jq -s \\
     'group_by([.component, (.files | sort), .title])
      | map(
-         # Take the highest-priority entry per group; tie-break by phase order
+         # Highest priority per group; tie-break by phase order
          sort_by({P1:0,P2:1,P3:2}[.priority] // 99, {"ceo-review":0,"design-review":1,"eng-review":2,"devex-review":3}[.phase] // 99) | .[0]
        )
      | sort_by({P1:0,P2:1,P3:2}[.priority] // 99, {"ceo-review":0,"design-review":1,"eng-review":2,"devex-review":3}[.phase] // 99)
@@ -152,11 +158,10 @@ else
 fi
 \`\`\`
 
-Inside the Final Approval Gate output template below, render the aggregated
-markdown in the \`### Implementation Tasks (aggregated across phases)\` section.
-Substitute the contents of \`$AGGREGATED_TASKS\` (the bash variable set above)
-before printing the message to the user. This is NOT a template placeholder
-— the agent does the substitution at runtime, not gen-skill-docs at build time.
+In the Final Approval Gate output template below, render the aggregated markdown
+in the \`### Implementation Tasks (aggregated across phases)\` section: substitute
+\`$AGGREGATED_TASKS\` (the bash variable above) at runtime before printing the
+message; it is not a gen-skill-docs placeholder.
 
 If \`$AGGREGATED_TASKS\` is empty (no JSONL files found — none of the review
 skills ran in this session), render:

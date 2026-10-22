@@ -24,6 +24,16 @@
 #                         the brain admin to run on the brain host
 #
 # All steps are idempotent. Re-running after partial completion is safe.
+# Heredoc delivery guard. bash 5.2+ writes a heredoc body <=64KiB through a
+# pipe in the forked child before exec, with no reader on the other end. On
+# macOS under pipe-KVA pressure a fresh pipe gets a 512-byte buffer, so any
+# body >=512B blocks write() forever and the script hangs at startup with no
+# output. Compat level 50 restores the tempfile path. These scripts are
+# bash-3.2-clean, so the compat level costs them nothing. Not exported: the
+# guard is per-script, and it survives `bash script.sh` call sites that
+# bypass the shebang.
+BASH_COMPAT=50
+
 set -euo pipefail
 
 if [ -z "${HOME:-}" ]; then
@@ -34,7 +44,9 @@ fi
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
-GSTACK_HOME="${HOME}/.gstack"
+_gstack_migration_dir="${BASH_SOURCE[0]//\\//}"; _gstack_migration_dir="${_gstack_migration_dir%/*}"
+. "${_gstack_migration_dir}/../../bin/gstack-state-root.sh" 2>/dev/null || { echo "$0: cannot resolve the gstack state root: ${_gstack_migration_dir}/../../bin/gstack-state-root.sh is missing. fix: reinstall with ./setup or /gstack-upgrade (docs/state-root.md)" >&2; exit 1; }
+gstack_state_root_select; GSTACK_HOME="$_gstack_sr_root"
 SKILLS_DIR="${HOME}/.claude/skills"
 BIN_DIR="${SKILLS_DIR}/gstack/bin"
 CONFIG_BIN="${BIN_DIR}/gstack-config"
@@ -44,6 +56,13 @@ MIGRATION_DIR="${GSTACK_HOME}/.migrations"
 JOURNAL="${MIGRATION_DIR}/v1.27.0.0.journal"
 DONE="${MIGRATION_DIR}/v1.27.0.0.done"
 SKIPPED="${MIGRATION_DIR}/v1.27.0.0.skipped-by-user"
+
+# Real, copy-pasteable re-run command for every remediation message below.
+# There is no runner re-ask: the upgrade runners' version windows never
+# re-select an already-passed migration, so the only honest remediation is
+# a direct invocation of this script ($0-derived so it survives any cwd).
+SELF_PATH="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
+RERUN_CMD="GSTACK_MIGRATE_ASSUME_YES=1 bash ${SELF_PATH}"
 
 USER_NAME="${USER:-$(whoami 2>/dev/null || echo unknown)}"
 OLD_REPO_NAME="gstack-brain-${USER_NAME}"
@@ -61,8 +80,8 @@ mkdir -p "$MIGRATION_DIR"
 # Already done? exit silently.
 [ -f "$DONE" ] && exit 0
 
-# User opted out previously? exit silently. (Re-invoke via
-# `/setup-gbrain --rerun-migration` removes this marker.)
+# User opted out previously? exit silently. (To re-run after an opt-out:
+# rm the skipped-by-user marker, then invoke this script directly.)
 [ -f "$SKIPPED" ] && exit 0
 
 journal_done() {
@@ -76,6 +95,34 @@ mark_done() {
   echo "$step" >> "$JOURNAL"
 }
 
+# The GitHub owner of the brain repo, from the recorded remote URL
+# (https://github.com/<owner>/<repo> or git@github.com:<owner>/<repo>), else
+# the authenticated gh user. `gh repo rename --repo` and `gh repo edit` need
+# the "[HOST/]OWNER/REPO" form; a bare name always fails (#1437).
+repo_owner() {
+  local url="" owner=""
+  for f in "$OLD_REMOTE_TXT" "$NEW_REMOTE_TXT"; do
+    [ -f "$f" ] && url=$(head -1 "$f" 2>/dev/null) && break
+  done
+  owner=$(printf '%s\n' "$url" | sed -n 's#^.*github\.com[:/]\([^/]*\)/.*$#\1#p')
+  [ -z "$owner" ] && owner=$(gh api user --jq .login 2>/dev/null || true)
+  printf '%s' "$owner"
+}
+
+# Point ~/.gstack-artifacts-remote.txt at the renamed repo. Only called once
+# the rename is confirmed: rewriting it earlier pointed the artifacts remote
+# at a repository that did not exist (#1437).
+rewrite_remote_to_new() {
+  [ -f "$NEW_REMOTE_TXT" ] || return 0
+  local url new
+  url=$(head -1 "$NEW_REMOTE_TXT" 2>/dev/null)
+  new=$(echo "$url" | sed "s|/${OLD_REPO_NAME}|/${NEW_REPO_NAME}|; s|:${OLD_REPO_NAME}|:${NEW_REPO_NAME}|")
+  [ "$new" = "$url" ] && return 0
+  echo "$new" > "$NEW_REMOTE_TXT"
+  chmod 600 "$NEW_REMOTE_TXT"
+  echo "    remote URL rewritten: $url → $new" >&2
+}
+
 # ---------------------------------------------------------------------------
 # Detect environment + ask once if there's anything to migrate
 # ---------------------------------------------------------------------------
@@ -86,6 +133,9 @@ mark_done() {
 HAS_LEGACY_STATE=0
 [ -f "$OLD_REMOTE_TXT" ] && HAS_LEGACY_STATE=1
 [ -d "$GSTACK_HOME/.git" ] && HAS_LEGACY_STATE=1
+# A journal means an earlier run left a step pending (step 2 already moved the
+# remote file), so the retry must run instead of declaring nothing to do.
+[ -f "$JOURNAL" ] && HAS_LEGACY_STATE=1
 
 # If nothing to migrate, finalize silently.
 if [ "$HAS_LEGACY_STATE" = "0" ]; then
@@ -119,19 +169,33 @@ EOF
     read -r REPLY || REPLY=""
     case "$REPLY" in
       n|N|no|No|NO)
-        echo "  Skipping migration. Re-run via /setup-gbrain --rerun-migration." >&2
+        echo "  Skipping migration. To re-run later:" >&2
+        echo "    rm ${SKIPPED} && ${RERUN_CMD}" >&2
         touch "$SKIPPED"
         exit 0
         ;;
       skip|skip-for-now|s)
-        echo "  Skipping for now. Will ask again next upgrade." >&2
-        # Don't write SKIPPED — leave both old + new state untouched, ask again next time.
+        echo "  Skipping for now. Re-run manually with: ${RERUN_CMD}" >&2
+        # Don't write SKIPPED — leave both old + new state untouched. The
+        # upgrade runner will NOT re-select this migration, so re-running is
+        # manual via the command above.
         exit 0
         ;;
     esac
   else
-    # Non-interactive (CI, scripted upgrade): proceed automatically.
-    echo "  (non-interactive: proceeding automatically)" >&2
+    # Non-interactive (CI, Claude Code Bash tool, scripted upgrade). Step 1
+    # renames a REMOTE repo — consent-shaped, and blanket auto-proceed once
+    # left an install half-migrated when that step failed mid-run (#1383).
+    # Skip for now by default (asked again next upgrade); explicit opt-in
+    # proceeds unattended.
+    if [ "${GSTACK_MIGRATE_ASSUME_YES:-0}" = "1" ]; then
+      echo "  (non-interactive: proceeding — GSTACK_MIGRATE_ASSUME_YES=1)" >&2
+    else
+      echo "  Non-interactive session: skipping for now." >&2
+      echo "  Re-run manually with: ${RERUN_CMD}" >&2
+      echo "  To run interactively:  bash ${SELF_PATH}" >&2
+      exit 0
+    fi
   fi
 fi
 
@@ -184,19 +248,27 @@ if ! journal_done "gh_repo_renamed"; then
   case "$HOST" in
     github)
       if command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
+        GH_OWNER=$(repo_owner)
+        OLD_QUALIFIED="${GH_OWNER:+$GH_OWNER/}${OLD_REPO_NAME}"
+        NEW_QUALIFIED="${GH_OWNER:+$GH_OWNER/}${NEW_REPO_NAME}"
         # Idempotent: if new name already exists, treat as success.
-        if gh repo view "$NEW_REPO_NAME" >/dev/null 2>&1; then
+        if gh repo view "$NEW_QUALIFIED" >/dev/null 2>&1; then
           echo "    repo already named $NEW_REPO_NAME on GitHub — no-op" >&2
           mark_done "gh_repo_renamed"
+          mark_done "gh_repo_rename_verified"
+          rewrite_remote_to_new
         else
-          if gh repo rename "$NEW_REPO_NAME" --repo "$OLD_REPO_NAME" --yes 2>/dev/null \
-              || gh repo edit "$OLD_REPO_NAME" --name "$NEW_REPO_NAME" 2>/dev/null; then
-            echo "    renamed on GitHub" >&2
+          RENAME_ERR=""
+          if RENAME_ERR=$(gh repo rename "$NEW_REPO_NAME" --repo "$OLD_QUALIFIED" --yes 2>&1) \
+              || RENAME_ERR=$(gh repo edit "$OLD_QUALIFIED" --name "$NEW_REPO_NAME" 2>&1); then
+            echo "    renamed $OLD_QUALIFIED → $NEW_REPO_NAME on GitHub" >&2
             mark_done "gh_repo_renamed"
+            mark_done "gh_repo_rename_verified"
+            rewrite_remote_to_new
           else
-            echo "    WARNING: gh rename failed (repo may not exist or permission denied)" >&2
-            echo "    skipping step 1; subsequent steps still run" >&2
-            mark_done "gh_repo_renamed"
+            echo "    WARNING: gh rename failed for $OLD_QUALIFIED: ${RENAME_ERR:-no output}" >&2
+            echo "    step 1 stays PENDING and will retry on re-run; later steps still run (#1383)" >&2
+            echo "    manual: gh repo rename $NEW_REPO_NAME --repo $OLD_QUALIFIED --yes" >&2
           fi
         fi
       else
@@ -234,14 +306,18 @@ fi
 if ! journal_done "remote_txt_renamed"; then
   echo "  [v1.27.0.0] step 2: rename ~/.gstack-brain-remote.txt → ~/.gstack-artifacts-remote.txt" >&2
   if [ -f "$OLD_REMOTE_TXT" ] && [ ! -f "$NEW_REMOTE_TXT" ]; then
-    # Update the URL inside if the rename happened on the host: replace
-    # gstack-brain-$USER with gstack-artifacts-$USER in the URL.
+    # Move the file; rewrite the URL inside only when step 1 confirmed the
+    # repository was renamed. Otherwise the old URL is the one that exists.
     OLD_URL=$(head -1 "$OLD_REMOTE_TXT" 2>/dev/null)
-    NEW_URL=$(echo "$OLD_URL" | sed "s|/${OLD_REPO_NAME}|/${NEW_REPO_NAME}|; s|:${OLD_REPO_NAME}|:${NEW_REPO_NAME}|")
-    echo "$NEW_URL" > "$NEW_REMOTE_TXT"
+    echo "$OLD_URL" > "$NEW_REMOTE_TXT"
     chmod 600 "$NEW_REMOTE_TXT"
     rm -f "$OLD_REMOTE_TXT"
-    echo "    moved + URL rewritten: $OLD_URL → $NEW_URL" >&2
+    if journal_done "gh_repo_rename_verified"; then
+      echo "    moved remote file" >&2
+      rewrite_remote_to_new
+    else
+      echo "    moved remote file; kept $OLD_URL because the repository was not renamed" >&2
+    fi
   elif [ -f "$NEW_REMOTE_TXT" ]; then
     echo "    new file already exists — no-op" >&2
     rm -f "$OLD_REMOTE_TXT" 2>/dev/null || true
@@ -335,8 +411,20 @@ EOF
 fi
 
 # ---------------------------------------------------------------------------
-# Step 6: finalize (touchfile + clear journal)
+# Step 6: finalize (touchfile + clear journal) — only when EVERY step is
+# journaled. A failed step must leave the migration visibly incomplete and
+# retryable, never silently recorded as done (#1383).
 # ---------------------------------------------------------------------------
+INCOMPLETE=""
+for _step in gh_repo_renamed remote_txt_renamed config_key_renamed claude_md_block_rewritten sources_swapped; do
+  journal_done "$_step" || INCOMPLETE="$INCOMPLETE $_step"
+done
+if [ -n "$INCOMPLETE" ]; then
+  echo "  [v1.27.0.0] migration INCOMPLETE — pending step(s):$INCOMPLETE" >&2
+  echo "  Completed steps are journaled and will be skipped on re-run." >&2
+  echo "  Re-run manually with: ${RERUN_CMD}" >&2
+  exit 1
+fi
 touch "$DONE"
 rm -f "$JOURNAL"
 

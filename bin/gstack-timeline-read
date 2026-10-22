@@ -1,25 +1,99 @@
 #!/usr/bin/env bash
 # gstack-timeline-read — read and format project timeline
-# Usage: gstack-timeline-read [--since "7 days ago"] [--limit N] [--branch NAME]
+# Usage: gstack-timeline-read [--since "7 days ago"|7d|YYYY-MM-DD] [--limit N] [--branch NAME]
 #
 # Session timeline: local-only, never sent anywhere.
 # Reads ~/.gstack/projects/$SLUG/timeline.jsonl, filters, formats.
-# Exit 0 silently if no timeline file exists.
+# Exit 0 silently if no timeline file exists or nothing matches. Missing bun
+# exits 127 and a failed read exits non-zero with its stderr (#2790). A missing
+# or non-positive-integer --limit, a missing or unparseable --since, a missing
+# --branch, or an unknown argument exits 2 before any read (#1723); --help
+# prints the usage line and exits 0.
 set -euo pipefail
+USAGE='Usage: gstack-timeline-read [--since "7 days ago"|7d|YYYY-MM-DD] [--limit N] [--branch NAME]'
+SINCE_FORMS='accepted: "<N> minute|hour|day|week|month[s] ago", "<N>h|d|w", or an ISO date YYYY-MM-DD or YYYY-MM-DDTHH:MM:SSZ'
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 eval "$("$SCRIPT_DIR/gstack-slug" 2>/dev/null)"
-GSTACK_HOME="${GSTACK_HOME:-$HOME/.gstack}"
+. "$(dirname "$0")/gstack-state-root.sh" 2>/dev/null || { echo "$0: cannot resolve the gstack state root: $(dirname "$0")/gstack-state-root.sh is missing. fix: reinstall with ./setup or /gstack-upgrade (docs/state-root.md)" >&2; exit 1; }
+gstack_state_root_select
+GSTACK_HOME="$_gstack_sr_root"
 
-SINCE=""
+SINCE_MS=0
 LIMIT=20
 BRANCH=""
 
+missing_value() { # remaining-arg-count next-arg -> why the flag has no usable value, or nothing
+  if [[ $1 -lt 2 ]]; then echo "got no value"
+  elif [[ -z "$2" ]]; then echo "got an empty value"
+  elif [[ "$2" == --* ]]; then echo "got flag '$2'"
+  fi
+  return 0
+}
+
+days_from_civil() { # year month day (UTC) -> days since 1970-01-01
+  local y=$((10#$1)) m=$((10#$2)) d=$((10#$3))
+  [[ $m -le 2 ]] && y=$((y - 1))
+  local era=$((y / 400)) yoe doy mp
+  yoe=$((y - era * 400)); mp=$(((m + 9) % 12)); doy=$(((153 * mp + 2) / 5 + d - 1))
+  echo $((era * 146097 + yoe * 365 + yoe / 4 - yoe / 100 + doy - 719468))
+}
+
+since_cutoff_ms() { # one --since value -> cutoff epoch ms, or nothing when unparseable
+  local now n unit seconds lower
+  now=$(date -u +%s)
+  lower=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
+  if [[ "$lower" =~ ^([1-9][0-9]{0,5})[[:space:]]*(minute|hour|day|week|month)s?[[:space:]]+ago$ ]]; then
+    n=${BASH_REMATCH[1]}; unit=${BASH_REMATCH[2]}
+  elif [[ "$lower" =~ ^([1-9][0-9]{0,5})([hdw])$ ]]; then
+    n=${BASH_REMATCH[1]}
+    case ${BASH_REMATCH[2]} in h) unit=hour ;; d) unit=day ;; w) unit=week ;; esac
+  elif [[ "$1" =~ ^([0-9]{4})-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])(T([01][0-9]|2[0-3]):([0-5][0-9]):([0-5][0-9])Z)?$ ]]; then
+    seconds=$(( $(days_from_civil "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" "${BASH_REMATCH[3]}") * 86400 ))
+    [[ -n "${BASH_REMATCH[4]}" ]] && seconds=$((seconds + 10#${BASH_REMATCH[5]} * 3600 + 10#${BASH_REMATCH[6]} * 60 + 10#${BASH_REMATCH[7]}))
+    echo $((seconds * 1000)); return 0
+  else
+    return 0
+  fi
+  case $unit in minute) seconds=60 ;; hour) seconds=3600 ;; day) seconds=86400 ;; week) seconds=604800 ;; month) seconds=2592000 ;; esac
+  echo $(((now - n * seconds) * 1000))
+}
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --since) SINCE="$2"; shift 2 ;;
-    --limit) LIMIT="$2"; shift 2 ;;
-    --branch) BRANCH="$2"; shift 2 ;;
-    *) shift ;;
+    --help|-h) echo "$USAGE"; exit 0 ;;
+    --since)
+      problem=$(missing_value $# "${2-}")
+      if [[ -n "$problem" ]]; then
+        echo "gstack-timeline-read: --since must be a relative time like \"7 days ago\" ($problem); $SINCE_FORMS" >&2
+        exit 2
+      fi
+      SINCE_MS=$(since_cutoff_ms "$2")
+      if [[ -z "$SINCE_MS" ]]; then
+        echo "gstack-timeline-read: --since must be a relative time like \"7 days ago\" (got '$2'); $SINCE_FORMS" >&2
+        exit 2
+      fi
+      shift 2 ;;
+    --limit)
+      if [[ $# -lt 2 ]]; then
+        echo "gstack-timeline-read: --limit must be a positive integer (got no value); example: --limit 20" >&2
+        exit 2
+      fi
+      if [[ ! "$2" =~ ^[1-9][0-9]*$ ]]; then
+        echo "gstack-timeline-read: --limit must be a positive integer (got '$2'); example: --limit 20" >&2
+        exit 2
+      fi
+      LIMIT="$2"; shift 2 ;;
+    --branch)
+      problem=$(missing_value $# "${2-}")
+      if [[ -n "$problem" ]]; then
+        echo "gstack-timeline-read: --branch must be a branch name ($problem)" >&2
+        exit 2
+      fi
+      BRANCH="$2"; shift 2 ;;
+    *)
+      echo "gstack-timeline-read: unknown argument '$1'" >&2
+      echo "$USAGE" >&2
+      exit 2 ;;
   esac
 done
 
@@ -29,23 +103,16 @@ if [ ! -f "$TIMELINE_FILE" ]; then
   exit 0
 fi
 
-cat "$TIMELINE_FILE" 2>/dev/null | bun -e "
-const lines = (await Bun.stdin.text()).trim().split('\n').filter(Boolean);
-const since = '${SINCE}';
-const branch = '${BRANCH}';
-const limit = ${LIMIT};
-
-let sinceMs = 0;
-if (since) {
-  // Parse relative time like '7 days ago'
-  const match = since.match(/(\d+)\s*(day|hour|minute|week|month)s?\s*ago/i);
-  if (match) {
-    const n = parseInt(match[1]);
-    const unit = match[2].toLowerCase();
-    const ms = { minute: 60000, hour: 3600000, day: 86400000, week: 604800000, month: 2592000000 };
-    sinceMs = Date.now() - n * (ms[unit] || 86400000);
-  }
+command -v bun >/dev/null 2>&1 || {
+  echo "gstack-timeline-read: bun not found on PATH, so the timeline could not be read. Fix: install Bun (https://bun.sh), then re-run ./setup." >&2
+  exit 127
 }
+
+cat "$TIMELINE_FILE" | GSTACK_TIMELINE_SINCE_MS="$SINCE_MS" GSTACK_TIMELINE_BRANCH="$BRANCH" GSTACK_TIMELINE_LIMIT="$LIMIT" bun --no-env-file --config=/dev/null -e "
+const lines = (await Bun.stdin.text()).trim().split('\n').filter(Boolean);
+const branch = process.env.GSTACK_TIMELINE_BRANCH || '';
+const limit = Number(process.env.GSTACK_TIMELINE_LIMIT);
+const sinceMs = Number(process.env.GSTACK_TIMELINE_SINCE_MS);
 
 const entries = [];
 for (const line of lines) {
@@ -91,4 +158,4 @@ for (const e of recent) {
   const outcome = e.outcome ? ' [' + e.outcome + ']' : '';
   console.log('- ' + ts + ' /' + e.skill + ' ' + e.event + outcome + dur + (e.branch ? ' on ' + e.branch : ''));
 }
-" 2>/dev/null || exit 0
+"

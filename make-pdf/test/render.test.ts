@@ -1,13 +1,13 @@
 /**
  * Renderer unit tests — pure-function assertions for render.ts, smartypants.ts,
- * and print-css.ts. No Playwright, no PDF generation.
+ * and print-css.ts. No browser, no PDF generation.
  */
 
 import { describe, expect, test } from "bun:test";
 
 import { render, sanitizeUntrustedHtml } from "../src/render";
 import { smartypants } from "../src/smartypants";
-import { printCss } from "../src/print-css";
+import { printCss, screenCss } from "../src/print-css";
 
 // ─── smartypants ──────────────────────────────────────────────
 
@@ -54,6 +54,34 @@ describe("smartypants", () => {
     const out = smartypants(`<p>Visit https://example.com/it's-page for "details".</p>`);
     expect(out).toContain("https://example.com/it's-page");
     expect(out).toContain("\u201cdetails\u201d");
+  });
+
+  // A URL flush against a following tag (no whitespace between) used to let
+  // URL_RE's \S+ swallow the placeholder standing in for that tag. The
+  // placeholder never restored, so the tag vanished and its styling bled
+  // into the rest of the document. The test above misses this because its
+  // URL is followed by a space.
+  test("does not leak placeholders for a bare autolinked URL", () => {
+    const input = `<p>see <a href="https://ex.com">https://ex.com</a> ok</p>`;
+    const out = smartypants(input);
+    expect(out).not.toContain("SMARTPANTS_PRESERVED");
+    expect(out).toContain("</a>");
+    expect(out).toBe(input);
+  });
+
+  test("does not leak placeholders for a bold URL", () => {
+    const input = `<p>see <strong><a href="https://ex.com">https://ex.com</a></strong> ok</p>`;
+    const out = smartypants(input);
+    expect(out).not.toContain("SMARTPANTS_PRESERVED");
+    expect(out).toContain("</a></strong>");
+    expect(out).toBe(input);
+  });
+
+  test("does not leak placeholders when a URL is followed by punctuation", () => {
+    const input = `<p>see <a href="https://ex.com">https://ex.com</a>, ok</p>`;
+    const out = smartypants(input);
+    expect(out).not.toContain("SMARTPANTS_PRESERVED");
+    expect(out).toContain("</a>");
   });
 
   test("does NOT touch HTML attribute values", () => {
@@ -249,6 +277,48 @@ describe("render (end-to-end)", () => {
     expect(result.printCss).toContain("Hiragino Kaku Gothic");
     expect(result.printCss).toContain("Noto Sans CJK");
   });
+
+  // ─── blank-first-page regression (#1904) ────────────────────────
+  // Any content before the first <h1> used to become a standalone preamble
+  // .chapter. That section takes the `:first-of-type { break-before: auto }`
+  // exception, so the first real chapter inherits `break-before: page` and
+  // starts on page 2 — leaving a blank/near-blank page 1.
+
+  test("a leading <style> preamble does not get its own chapter (no blank page 1)", () => {
+    const result = render({ markdown: `<style>h1{color:#000}</style>\n\n# Hello\n\nBody.\n` });
+    const chapters = result.html.match(/class="chapter"/g) ?? [];
+    // One chapter, not two — the invisible <style> no longer forces a page break.
+    expect(chapters.length).toBe(1);
+    // ...and the style is preserved (folded into the first chapter, not dropped).
+    expect(result.html).toContain("<style>h1{color:#000}</style>");
+    expect(result.html).toMatch(/<section class="chapter"><style>[\s\S]*?<\/style>[\s\S]*?<h1/);
+  });
+
+  test("leading YAML frontmatter is stripped, not rendered as body text", () => {
+    const result = render({
+      markdown: `---\ntitle: My Doc\ntype: memo\ntags: [a, b]\n---\n\n# Hello\n\nBody.\n`,
+    });
+    // Frontmatter keys must not leak into the rendered body.
+    expect(result.html).not.toContain("type: memo");
+    expect(result.html).not.toContain("tags: [a, b]");
+    // No preamble chapter -> single chapter, first H1 on page 1.
+    const chapters = result.html.match(/class="chapter"/g) ?? [];
+    expect(chapters.length).toBe(1);
+    expect(result.meta.title).toBe("Hello");
+  });
+
+  test("a real text preamble still gets its own chapter (unchanged behavior)", () => {
+    const result = render({ markdown: `Intro paragraph.\n\n# Hello\n\nBody.\n` });
+    const chapters = result.html.match(/class="chapter"/g) ?? [];
+    expect(chapters.length).toBe(2);
+  });
+
+  test("a `---` thematic break that is not frontmatter is left intact", () => {
+    // Opening with visible text means the later `---` is a real <hr>, not frontmatter.
+    const result = render({ markdown: `# Hello\n\nBefore.\n\n---\n\nAfter.\n` });
+    expect(result.html).toContain("<hr>");
+    expect(result.html).toContain("After.");
+  });
 });
 
 // ─── print-css ──────────────────────────────────────────────
@@ -262,6 +332,13 @@ describe("printCss", () => {
   test("respects custom margins flag", () => {
     const css = printCss({ margins: "72pt" });
     expect(css).toContain("margin: 72pt");
+  });
+
+  test("per-side margins reach the CSS @page rule (preferCSSPageSize parity)", () => {
+    // Under a landscape promotion Chromium honors the CSS margins, not the
+    // CDP per-side options — render() must compose them into the shorthand.
+    const r = render({ markdown: "# T", marginLeft: "0.5in", marginRight: "0.5in" });
+    expect(r.printCss).toContain("margin: 1in 0.5in 1in 0.5in");
   });
 
   test("emits letter page size by default", () => {
@@ -327,6 +404,33 @@ describe("printCss", () => {
     expect(css).toMatch(/@bottom-center\s*\{\s*content:\s*counter\(page\)/);
   });
 
+  // Zero image truncation, ever: the cap must be a GLOBAL img rule. Markdown
+  // images render as <p><img> (no figure), so a figure-scoped cap alone lets
+  // wide screenshots run off the page edge — the exact regression this pins.
+  test("emits a global img max-width cap (zero truncation invariant)", () => {
+    const css = printCss();
+    expect(css).toMatch(/(^|\n)img\s*\{\s*max-width:\s*100%;\s*height:\s*auto;\s*\}/);
+  });
+
+  test("typography floor: body 12pt, poster cover, readable TOC", () => {
+    const css = printCss({ cover: true, toc: true });
+    expect(css).toContain("font-size: 12pt"); // body
+    expect(css).toMatch(/\.cover h1\.cover-title\s*\{[^}]*font-size:\s*56pt/);
+    expect(css).toMatch(/\.cover \.cover-meta\s*\{[^}]*font-size:\s*13pt/);
+    expect(css).toMatch(/\.toc li\s*\{[^}]*font-size:\s*12pt/);
+  });
+
+  test("page-wide carries the named page and NO height/flex centering", () => {
+    const css = printCss();
+    expect(css).toMatch(/\.page-wide\s*\{[^}]*page:\s*wide/);
+    // Centering is computed by image-policy as an inline margin-top. CSS
+    // flex/min-height centering fragments into phantom empty landscape pages
+    // in Chromium — this pins the regression (landscape-gate: 5 pages for 3
+    // promotions, bisected to min-height at any value).
+    expect(css).not.toMatch(/\.page-wide\s*\{[^}]*min-height/);
+    expect(css).not.toMatch(/\.page-wide\s*\{[^}]*flex/);
+  });
+
   test("font stacks include Liberation Sans adjacent to Helvetica", () => {
     const css = printCss({ confidential: true });
     // Body stack
@@ -342,6 +446,46 @@ describe("printCss", () => {
     // Count: body (1) + running header (1) + page numbers (1) + confidential (1) = 4
     const occurrences = (css.match(/"Liberation Sans"/g) ?? []).length;
     expect(occurrences).toBeGreaterThanOrEqual(4);
+  });
+
+  // ─── emoji fallback (fix/make-pdf-emoji-tofu) ────────────────
+  // Body + @top-center running header get the color-emoji families so
+  // Chromium has a glyph source for emoji code points instead of tofu (▯).
+  // The @bottom-* boxes hold counters / "CONFIDENTIAL" only — no emoji.
+
+  test("body stack includes all three emoji families before sans-serif", () => {
+    const css = printCss();
+    expect(css).toContain(`"Apple Color Emoji"`);
+    expect(css).toContain(`"Segoe UI Emoji"`);
+    expect(css).toContain(`"Noto Color Emoji"`);
+    // Emoji families must precede the generic family so per-character fallback
+    // reaches them before terminating at sans-serif.
+    expect(css).toMatch(/"Noto Color Emoji",\s*sans-serif/);
+  });
+
+  test("@top-center running header includes emoji families", () => {
+    const css = printCss({ runningHeader: "Q3 Report 🚀" });
+    const topCenter = css.match(/@top-center\s*\{[^}]*\}/)?.[0] ?? "";
+    expect(topCenter).toContain(`"Apple Color Emoji"`);
+    expect(topCenter).toContain(`"Noto Color Emoji"`);
+  });
+
+  test("@bottom-center and @bottom-right do NOT include emoji families", () => {
+    const css = printCss({ confidential: true });
+    const bottomCenter = css.match(/@bottom-center\s*\{[^}]*\}/)?.[0] ?? "";
+    const bottomRight = css.match(/@bottom-right\s*\{[^}]*\}/)?.[0] ?? "";
+    expect(bottomCenter).not.toContain("Emoji");
+    expect(bottomRight).not.toContain("Emoji");
+    // ...but they still share the sans stack via the SANS_STACK constant.
+    expect(bottomCenter).toContain(`"Liberation Sans"`);
+    expect(bottomRight).toContain(`"Liberation Sans"`);
+  });
+
+  test("emoji families appear in exactly the two emoji-bearing stacks", () => {
+    const css = printCss({ runningHeader: "Title", confidential: true });
+    // body (1) + @top-center (1) = 2 occurrences of the emoji group.
+    const occurrences = (css.match(/"Apple Color Emoji"/g) ?? []).length;
+    expect(occurrences).toBe(2);
   });
 });
 
@@ -445,5 +589,15 @@ describe("render() — no double HTML entity escaping", () => {
       // Never contains a double-encoded entity.
       expect(titleMatch[1]).not.toMatch(/&amp;(amp|lt|gt|quot|#\d+);/);
     }
+  });
+});
+
+describe("screenCss", () => {
+  test("screenCss is media-scoped and readable-width", () => {
+    const css = screenCss();
+    expect(css).toContain("@media screen");
+    // 42em at 12pt ≈ 70-75 chars/line — the readable ceiling (design review).
+    expect(css).toContain("max-width: 42em");
+    expect(css).toContain(".watermark { display: none; }");
   });
 });

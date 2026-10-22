@@ -1,0 +1,84 @@
+{
+  "source": "Local paid proof run 2026-09-30 (mode routing, HOLD SCOPE case, Claude Code 2.1.251): the model bundled the Learnings setup question after the mode question in one native call. The harness selected HOLD SCOPE on the mode tab, then never answered the Learnings tab, so Submit was unreachable and the case ran out its posture budget.",
+  "screen": "Planning: /tmp/gstack-hermetic-fixture/with-skills/.claude/plans/swirling-mixing-spindle.md\n────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────\n←  ☒ Review mode  ☐ Learnings  ✔ Submit  →\n\n│ D3 — One-time gstack setup: search learnings across your other projects on this machine?\n│ Project/branch/task: gstack-plan-count on main; gstack config, not the plan.\n│ ELI10: gstack stores small lessons per project (\"this repo's tests need X\"). It can also look at lessons from your\n│ other local projects when reviewing this one. Everything stays on this machine. Right now zero learnings are stored,\n│ so this only affects future sessions.\n│ Stakes if we pick wrong: Cross-project on with client codebases could mix contexts; off means each project learns\n│ alone.\n│ Recommendation: Enable because it is local-only and you appear to be a solo operator on this machine.\n│ Note: options differ in kind, not coverage — no completeness score.\n│ Pros / cons:\n│ A) Enable cross-project learnings (recommended)\n│   ✅ Patterns learned in one repo (tooling quirks, review habits) carry into the next\n│   ✅ Local only; nothing leaves the machine; toggle back off with one command\n│   ❌ Not ideal if you review multiple client codebases that must stay isolated\n│ B) Keep learnings project-scoped\n│   ✅ Hard isolation between projects on this machine\n│   ✅ Zero risk of a lesson from repo A being misapplied to repo B\n│   ❌ Every project starts cold; the same tooling lesson gets relearned per repo\n│ Net: Compounding across repos vs. strict isolation.\n\n❯ 1. Enable cross-project (recommended)\n     ✅ Lessons carry between your local repos. ✅ Local only, reversible with one command. ❌ Less ideal if client\n     codebases must stay isolated.\n  2. Project-scoped only\n     ✅ Hard isolation between projects. ✅ No misapplied lessons across repos. ❌ Every project starts cold.\n  3. Type something.\n────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────\n  4. Chat about this\n\nEnter to select · Tab/Arrow keys to navigate · Esc to cancel\n\n\n\n\n\n",
+  "transcript": {
+    "status": "ready",
+    "calls": [
+      {
+        "sessionId": "bca7f78c-bf20-4ba2-ac64-c20ef681e342",
+        "toolUseId": "toolu_01Cyhcx3LZpvA5aqV239wmhs",
+        "questions": [
+          {
+            "question": "gstack works best when your project's CLAUDE.md includes skill routing rules. Add them?\n\nD1 — Add gstack skill routing rules to CLAUDE.md?\nProject/branch/task: gstack-plan-count on main, starting /plan-ceo-review of PLAN.md (saved project views).\nELI10: gstack has many skills (/investigate, /ship, /qa...). A short routing section in CLAUDE.md tells Claude which skill to reach for when you describe a task in plain words, so you don't have to remember slash names. This is a one-time setup, separate from the plan review.\nStakes if we pick wrong: Without it, skills only fire when you type them explicitly; with it, a few lines get appended to CLAUDE.md and committed.\nRecommendation: A because routing is cheap and makes the rest of gstack discoverable.\nNote: options differ in kind, not coverage — no completeness score.\nPros / cons:\nA) Add routing rules (recommended)\n  ✅ Plain-language requests like \"find this bug\" auto-route to the right skill\n  ✅ One-time append and commit; nothing else in the repo changes\n  ❌ Adds ~20 lines to CLAUDE.md; commit happens after plan mode ends since edits are frozen now\nB) No thanks, invoke manually\n  ✅ CLAUDE.md stays exactly as-is for this fixture repo\n  ✅ Re-enable any time with one config command\n  ❌ Skills stay invisible unless you type the slash name\nNet: Discoverability vs. an untouched CLAUDE.md.",
+            "header": "Routing",
+            "multiSelect": false,
+            "options": [
+              {
+                "label": "Add routing rules (recommended)",
+                "description": "✅ Plain-language requests auto-route to the matching gstack skill. ✅ One-time append and commit. ❌ Adds ~20 lines to CLAUDE.md; the write waits until plan mode ends."
+              },
+              {
+                "label": "No thanks, invoke manually",
+                "description": "✅ CLAUDE.md stays untouched. ✅ Re-enable later with one config command. ❌ Skills only fire when typed explicitly."
+              }
+            ]
+          }
+        ],
+        "answered": true,
+        "failed": false,
+        "answers": {
+          "gstack works best when your project's CLAUDE.md includes skill routing rules. Add them?\n\nD1 — Add gstack skill routing rules to CLAUDE.md?\nProject/branch/task: gstack-plan-count on main, starting /plan-ceo-review of PLAN.md (saved project views).\nELI10: gstack has many skills (/investigate, /ship, /qa...). A short routing section in CLAUDE.md tells Claude which skill to reach for when you describe a task in plain words, so you don't have to remember slash names. This is a one-time setup, separate from the plan review.\nStakes if we pick wrong: Without it, skills only fire when you type them explicitly; with it, a few lines get appended to CLAUDE.md and committed.\nRecommendation: A because routing is cheap and makes the rest of gstack discoverable.\nNote: options differ in kind, not coverage — no completeness score.\nPros / cons:\nA) Add routing rules (recommended)\n  ✅ Plain-language requests like \"find this bug\" auto-route to the right skill\n  ✅ One-time append and commit; nothing else in the repo changes\n  ❌ Adds ~20 lines to CLAUDE.md; commit happens after plan mode ends since edits are frozen now\nB) No thanks, invoke manually\n  ✅ CLAUDE.md stays exactly as-is for this fixture repo\n  ✅ Re-enable any time with one config command\n  ❌ Skills stay invisible unless you type the slash name\nNet: Discoverability vs. an untouched CLAUDE.md.": "Add routing rules (recommended)"
+        },
+        "unansweredQuestionIndices": [],
+        "answeredAt": "2026-09-30T11:51:49.397Z"
+      },
+      {
+        "sessionId": "bca7f78c-bf20-4ba2-ac64-c20ef681e342",
+        "toolUseId": "toolu_01SzGzrL9JDP3jbR3t8unp3R",
+        "questions": [
+          {
+            "question": "D2 — Which review mode for the saved project views plan?\nProject/branch/task: gstack-plan-count on main, reviewing PLAN.md (saved views: table + CRUD + picker).\nELI10: The mode sets my posture for the rest of the review. Expansion means I pitch bigger versions of the feature. Selective means I harden what you wrote and offer add-ons one at a time for you to accept or reject. Hold means I only stress-test what is there. Reduction means I look for what to cut. The plan is an added capability on an existing task list, about ~12 changed files (estimate; the app code is not in this repo).\nStakes if we pick wrong: Too big a mode and you get pitched a views platform you did not ask for; too small and the schema ships without a visibility column, which turns team-shared views into a migration plus permission rework in six months.\nRecommendation: SELECTIVE EXPANSION because the plan's premise (\"team members repeatedly recreate filters\") likely covers shared filters too, and a one-column decision now is much cheaper than a migration later, but that is your call per item, not a blanket expansion.\nNote: options differ in kind, not coverage — no completeness score.\nPros / cons:\nA) SELECTIVE EXPANSION (recommended)\n  ✅ Hardens the current scope first (HOLD checks run in full), then offers each add-on separately\n  ✅ Surfaces the visibility-column and filter-versioning forks while they are still one-column decisions\n  ❌ A few more questions than HOLD; each add-on is its own accept/defer/skip\nB) HOLD SCOPE\n  ✅ Fastest path: maximum rigor on exactly the four approach bullets you wrote\n  ✅ No scope debate; every finding is about failure paths, tests, observability\n  ❌ Leaves the shared-views fork unexamined; you may pay for it as a migration later\nC) SCOPE EXPANSION\n  ✅ Aims at the 12-month ideal: shared views, defaults, dirty indicators, shareable links\n  ✅ Best if the pilot goal is to make views the primary way people navigate tasks\n  ❌ ~12 files becomes 20+; the two-week pilot metric gets muddied by feature count\nD) SCOPE REDUCTION\n  ✅ Strips to the minimum that proves reuse in the pilot (e.g. create + list + apply only)\n  ✅ Smallest diff, fastest to ship\n  ❌ Update/delete are cheap and their absence makes the pilot data worse (stale views nobody can remove)\nNet: How much of the 12-month ideal you want to decide now versus after the pilot.",
+            "header": "Review mode",
+            "multiSelect": false,
+            "options": [
+              {
+                "label": "SELECTIVE EXPANSION (recommended)",
+                "description": "✅ Hardens current scope first, then offers each add-on separately for accept/defer/skip. ✅ Surfaces the visibility-column and filter-versioning forks while cheap. ❌ A few more questions than HOLD."
+              },
+              {
+                "label": "HOLD SCOPE",
+                "description": "✅ Maximum rigor on exactly the four approach bullets; fastest. ✅ Findings focus on failure paths, tests, observability. ❌ Shared-views fork stays unexamined; possible migration later."
+              },
+              {
+                "label": "SCOPE EXPANSION",
+                "description": "✅ Aims at the 12-month ideal: shared views, defaults, dirty indicator, shareable links. ✅ Best if views become the primary navigation. ❌ ~12 files becomes 20+; pilot metric gets muddied."
+              },
+              {
+                "label": "SCOPE REDUCTION",
+                "description": "✅ Minimum that proves reuse: create + list + apply. ✅ Smallest diff. ❌ Dropping update/delete leaves stale views nobody can remove, hurting pilot data."
+              }
+            ]
+          },
+          {
+            "question": "D3 — One-time gstack setup: search learnings across your other projects on this machine?\nProject/branch/task: gstack-plan-count on main; gstack config, not the plan.\nELI10: gstack stores small lessons per project (\"this repo's tests need X\"). It can also look at lessons from your other local projects when reviewing this one. Everything stays on this machine. Right now zero learnings are stored, so this only affects future sessions.\nStakes if we pick wrong: Cross-project on with client codebases could mix contexts; off means each project learns alone.\nRecommendation: Enable because it is local-only and you appear to be a solo operator on this machine.\nNote: options differ in kind, not coverage — no completeness score.\nPros / cons:\nA) Enable cross-project learnings (recommended)\n  ✅ Patterns learned in one repo (tooling quirks, review habits) carry into the next\n  ✅ Local only; nothing leaves the machine; toggle back off with one command\n  ❌ Not ideal if you review multiple client codebases that must stay isolated\nB) Keep learnings project-scoped\n  ✅ Hard isolation between projects on this machine\n  ✅ Zero risk of a lesson from repo A being misapplied to repo B\n  ❌ Every project starts cold; the same tooling lesson gets relearned per repo\nNet: Compounding across repos vs. strict isolation.",
+            "header": "Learnings",
+            "multiSelect": false,
+            "options": [
+              {
+                "label": "Enable cross-project (recommended)",
+                "description": "✅ Lessons carry between your local repos. ✅ Local only, reversible with one command. ❌ Less ideal if client codebases must stay isolated."
+              },
+              {
+                "label": "Project-scoped only",
+                "description": "✅ Hard isolation between projects. ✅ No misapplied lessons across repos. ❌ Every project starts cold."
+              }
+            ]
+          }
+        ],
+        "answered": false,
+        "failed": false
+      }
+    ],
+    "assistantMessages": []
+  }
+}

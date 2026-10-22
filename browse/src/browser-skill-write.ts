@@ -18,11 +18,11 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
-import * as os from 'os';
 import { mkdirSecure } from './file-permissions';
 import { isPathWithin } from './platform';
 import type { TierPaths } from './browser-skills';
 import { defaultTierPaths } from './browser-skills';
+import { resolveStateRoot } from '../../lib/state-root';
 
 // ─── Naming validation ──────────────────────────────────────────
 
@@ -71,7 +71,7 @@ export function stageSkill(opts: StageSkillOptions): string {
   }
 
   const spawnId = opts.spawnId ?? generateSpawnId();
-  const tmpRoot = opts.tmpRoot ?? path.join(os.homedir(), '.gstack', '.tmp');
+  const tmpRoot = opts.tmpRoot ?? path.join(resolveStateRoot(), '.tmp');
   const wrapperDir = path.join(tmpRoot, `skillify-${spawnId}`);
   const stagedDir = path.join(wrapperDir, opts.name);
 

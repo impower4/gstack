@@ -1,5 +1,5 @@
 import { describe, test, expect } from 'bun:test';
-import { spawnSync } from 'child_process';
+import { runBashScript } from './helpers/bash-script';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
@@ -55,6 +55,18 @@ describe('setup: _link_or_copy invariant (D7)', () => {
     const fnBody = SETUP_SRC.slice(fnStart, fnEnd);
     expect(fnBody).toContain('_print_windows_copy_note_once');
   });
+
+  test('SessionStart HOOK_CMD is prefixed with bash on Windows (D7-session-hook)', () => {
+    const hookStart = SETUP_SRC.indexOf('# 10. Team mode: register/unregister SessionStart hook');
+    const hookEnd = SETUP_SRC.indexOf('\nif [ "$TEAM_MODE" -eq 1 ]', hookStart);
+    const hookSection = SETUP_SRC.slice(hookStart, hookEnd);
+    expect(hookSection).toContain('IS_WINDOWS');
+    // v1.67.2 phantom-hooks fix: the command comes from the CANONICAL install
+    // via _hook_command_path (never $SOURCE_GSTACK_DIR — ephemeral trees were
+    // baked into settings.json), but the Windows bash prefix survives.
+    expect(hookSection).toContain('HOOK_CMD="bash $SESSION_UPDATE_CMD"');
+    expect(hookSection).toContain('_hook_command_path bin/gstack-session-update');
+  });
 });
 
 // Behavior matrix uses Unix `ln -snf` semantics in the IS_WINDOWS=0 cells.
@@ -83,10 +95,7 @@ describe.skipIf(process.platform === 'win32')('setup: _link_or_copy helper — b
       const helper = extractHelper();
       // IS_WINDOWS must exist as a shell-readable var before sourcing.
       const script = `IS_WINDOWS=${isWindows}\n${helper}\n_link_or_copy "${src}" "${dst}"\n`;
-      const result = spawnSync('bash', ['-c', script], {
-        encoding: 'utf-8',
-        timeout: 5000,
-      });
+      const result = runBashScript(script, { timeout: 5000 });
       const lst = fs.lstatSync(dst, { throwIfNoEntry: false });
       return {
         ok: result.status === 0,

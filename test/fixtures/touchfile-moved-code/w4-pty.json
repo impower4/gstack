@@ -1,0 +1,93 @@
+{
+  "workstream": "W4 PTY harness split",
+  "recordedAt": "96764e80",
+  "sources": {
+    "test/helpers/claude-pty-runner.ts": {
+      "e2e": [
+        "auq-format-gate",
+        "auto-decide-preserved",
+        "carve-section-loading-browse",
+        "carve-section-loading-codex",
+        "carve-section-loading-design-consultation",
+        "carve-section-loading-design-html",
+        "carve-section-loading-design-shotgun",
+        "carve-section-loading-document-release",
+        "carve-section-loading-land-and-deploy",
+        "carve-section-loading-plan-design-review",
+        "carve-section-loading-plan-devex-review",
+        "carve-section-loading-plan-eng-review",
+        "carve-section-loading-qa",
+        "carve-section-loading-retro",
+        "carve-section-loading-review",
+        "carve-section-loading-setup-gbrain",
+        "carve-section-loading-spec",
+        "office-hours-auto-mode",
+        "office-hours-section-loading",
+        "plan-ceo-finding-floor",
+        "plan-ceo-mode-routing",
+        "plan-ceo-review-plan-mode",
+        "plan-ceo-section-loading",
+        "plan-ceo-split-overflow",
+        "plan-design-finding-floor",
+        "plan-design-review-plan-mode",
+        "plan-design-with-ui-scope",
+        "plan-devex-finding-floor",
+        "plan-devex-review-plan-mode",
+        "plan-eng-finding-floor",
+        "plan-eng-multi-finding-batching",
+        "plan-eng-review-plan-mode",
+        "plan-mode-no-op",
+        "ship-section-loading"
+      ],
+      "llmJudge": []
+    },
+    "test/helpers/pty-screen.ts": {
+      "e2e": [
+        "auq-format-gate",
+        "auto-decide-preserved",
+        "carve-section-loading-browse",
+        "carve-section-loading-codex",
+        "carve-section-loading-design-consultation",
+        "carve-section-loading-design-html",
+        "carve-section-loading-design-shotgun",
+        "carve-section-loading-document-release",
+        "carve-section-loading-land-and-deploy",
+        "carve-section-loading-plan-design-review",
+        "carve-section-loading-plan-devex-review",
+        "carve-section-loading-plan-eng-review",
+        "carve-section-loading-qa",
+        "carve-section-loading-retro",
+        "carve-section-loading-review",
+        "carve-section-loading-setup-gbrain",
+        "carve-section-loading-spec",
+        "office-hours-auto-mode",
+        "office-hours-section-loading",
+        "plan-ceo-finding-floor",
+        "plan-ceo-mode-routing",
+        "plan-ceo-review-plan-mode",
+        "plan-ceo-section-loading",
+        "plan-ceo-split-overflow",
+        "plan-design-finding-floor",
+        "plan-design-review-plan-mode",
+        "plan-design-with-ui-scope",
+        "plan-devex-finding-floor",
+        "plan-devex-review-plan-mode",
+        "plan-eng-finding-floor",
+        "plan-eng-multi-finding-batching",
+        "plan-eng-review-plan-mode",
+        "plan-mode-no-op",
+        "ship-section-loading"
+      ],
+      "llmJudge": []
+    }
+  },
+  "modules": {
+    "test/helpers/pty/": [
+      "test/helpers/claude-pty-runner.ts"
+    ],
+    "test/helpers/pty/screen.ts": [
+      "test/helpers/claude-pty-runner.ts",
+      "test/helpers/pty-screen.ts"
+    ]
+  }
+}

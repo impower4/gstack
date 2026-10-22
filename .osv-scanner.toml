@@ -1,0 +1,31 @@
+# OSV-Scanner configuration.
+# Direct/transitive dependency versions are pinned to their fixed releases via
+# the `overrides` block in package.json; this file only records advisories we
+# have assessed as not-reachable or not-fixable without disproportionate risk.
+#
+# LOADING CONTRACT: OSV-Scanner only auto-discovers configs named
+# osv-scanner.toml (no leading dot) and applies them per-directory — a root
+# config never covers lib/diagram-render/bun.lock. The workflow therefore
+# passes an explicit global `--config=.osv-scanner.toml`; the wiring test
+# (test/osv-config-wiring.test.ts) pins that flag to this filename so the
+# suppression file can never silently go inert again (it was inert from
+# v1.65.0.0 to v1.78.0.0).
+#
+# Every entry carries `ignoreUntil` — suppressions expire and must be
+# re-justified; the re-scan on expiry either finds a fix landed upstream or
+# forces a fresh decision. Tracking issues are filed at ship time and named in
+# each reason.
+
+[[IgnoredVulns]]
+id = "GHSA-238p-pmpm-9mq7"
+# katex 0.16.47 in lib/diagram-render (mermaid's math renderer). The advisory
+# needs prototype pollution to already exist in the page; the render page is
+# offline, loads only gstack's own bundle and the user's diagram source. Low
+# severity (2.1). The fix is katex 0.18.2, outside mermaid 11's ^0.16.47 range.
+# Mermaid 12 accepts ^0.18, but @excalidraw/mermaid-to-excalidraw 2.2.2 (the
+# latest) requires mermaid ^11.12.1, and katex 0.18 renames KaTeX's CSS
+# classes, so forcing it means a bundle requalification, not a lockfile bump.
+# Upgrade trigger: a mermaid 11.x release that allows katex 0.18
+# (https://github.com/mermaid-js/mermaid/issues/8388), then rebuild the bundle.
+reason = "Fix (katex 0.18.2) is outside mermaid 11's ^0.16 range; waiting on mermaid-js/mermaid#8388. Needs pre-existing prototype pollution in an offline single-bundle page; low severity."
+ignoreUntil = 2027-01-31T00:00:00Z

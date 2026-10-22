@@ -1,0 +1,181 @@
+{
+  "source": "autoplan run run-20261014225954 (next-wave plan review, 2026-10-14): ceo gate_rev 1 findings (*.findings.r1.jsonl) and dx gate_rev 2 findings (*.findings.jsonl), copied verbatim",
+  "pairs": [
+    {
+      "name": "ceo r1 outside-1 vs native-11",
+      "expect": "negative",
+      "why": "same file, lines 3 apart; different problems and remedies (project-aware Bun launching vs a single verdict owner plus a fresh-machine job); reconciled confirmed on file:line alone at 1.91.101.0",
+      "outside": [
+        {
+          "id": "run-20261014225954-ceo-outside-1",
+          "phase": "ceo",
+          "voice": "outside",
+          "severity": "High",
+          "title": "A fixed home-wide Bun link cannot preserve per-project runtime ownership",
+          "file": "bin/gstack-capy-install",
+          "line": 197,
+          "resolution": "Replace A2's mutable fixed-version global link with project-aware launching; bind install verdicts to the calling project and resolved runtime, reconcile pregate's separate resolver, and exercise alternating exact-pin projects plus unrelated Bun commands.",
+          "user_challenge": true,
+          "changes": "direction"
+        }
+      ],
+      "native": [
+        {
+          "id": "run-20261014225954-ceo-native-11",
+          "phase": "ceo",
+          "voice": "native",
+          "severity": "Medium",
+          "title": "Fourth install-honesty wave in about two weeks: add a single verdict owner and a pre-merge fresh-machine acceptance job instead of a post-ship manual rerun",
+          "file": "bin/gstack-capy-install",
+          "line": 200,
+          "resolution": "Route install, upgrade, repair and session-start through one final step: gstack-capy-install --check from ORIG_PWD, printing only its trailer. Make the GBRA-60 reproduction (image Bun on PATH, verified Bun off PATH, project pinned to 1.4.3, fresh shells) an automated job on a fresh Capy or Ubicloud machine that gates Lane A's merge."
+        }
+      ]
+    },
+    {
+      "name": "dx r2 outside-2 vs native-1",
+      "expect": "positive",
+      "why": "both find that the revised trailer grammar breaks the existing fail head and leaves the pins exit unspecified",
+      "outside": [
+        {
+          "id": "run-20261014225954-dx-outside-2",
+          "phase": "dx",
+          "voice": "outside",
+          "severity": "Medium",
+          "title": "The revised failure trailer has conflicting shapes and an unspecified pins exit code",
+          "file": "bin/gstack-doctor-check.sh",
+          "line": 459,
+          "resolution": "Define one backward-compatible status grammar with failed-component information, specify A7's numeric pins-readiness exit and partial-upgrade state, and synchronize text/JSON/verdict/docs with success and multi-failure note-composition tests."
+        }
+      ],
+      "native": [
+        {
+          "id": "run-20261014225954-dx-native-1",
+          "phase": "dx",
+          "voice": "native",
+          "severity": "High",
+          "title": "A9's trailer grammar would replace the existing 'gstack: fail <components>' head that the Capy skill (and its lagging Drive copies) dispatch repairs on",
+          "file": "bin/gstack-doctor-check.sh",
+          "line": 460,
+          "resolution": "Scope the grammar to `gstack: ok <rev> for=<skill>[ (<notes>)]`. Keep failures as `gstack: fail <component>[,<component>] \u2014 <detail>; fix: <cmd> (<CODE>; <url>#<anchor>)`, with notes appended in the same fixed order. Add a test that runs the current capy/skill/gstack/SKILL.md dispatch examples (fail revision, fail runtime,pins, fail pins) against the new output."
+        }
+      ]
+    },
+    {
+      "name": "dx r2 native-2 vs outside-4",
+      "expect": "positive",
+      "why": "same problem by meaning: a recommendation edit after the owner saw the gate changes what the reply resolves to; different files and titles",
+      "outside": [
+        {
+          "id": "run-20261014225954-dx-outside-4",
+          "phase": "dx",
+          "voice": "outside",
+          "severity": "High",
+          "title": "Recommendation edits can change a displayed gate's defaults without invalidating its reply",
+          "file": "lib/autoplan-gate.ts",
+          "line": 154,
+          "resolution": "Version semantic recommendation changes, reject old replies, and refresh plan-approval summaries, decisions and artifact hashes; return the new gate identity and test concurrent/repeated edits, answered/carried choices and restore."
+        }
+      ],
+      "native": [
+        {
+          "id": "run-20261014225954-dx-native-2",
+          "phase": "dx",
+          "voice": "native",
+          "severity": "High",
+          "title": "The new recommend verb can change what rec resolves to after the owner has seen the gate",
+          "file": "lib/gate-list.ts",
+          "line": 112,
+          "resolution": "Hash the rendered recommendations into the relay (for example rec_hash in the render's resolution line). Make answer reject a rec whose hash no longer matches (re-render and re-relay). Make recommend refuse after a render has been relayed unless it bumps to a fresh render. Test recommend-after-relay, then rec."
+        }
+      ]
+    },
+    {
+      "name": "constructed same title, opposite remedies",
+      "expect": "negative",
+      "source": "constructed (integration review, 2026-10-15): the same title associates two findings whose remedies are opposite",
+      "outside": [
+        {
+          "phase": "eng",
+          "severity": "High",
+          "title": "Persist retry attempts in their own table",
+          "file": "lib/worker.ts",
+          "id": "r-eng-outside-9",
+          "voice": "outside",
+          "line": 40,
+          "resolution": "keep attempts in the existing jobs column; do not add a table"
+        }
+      ],
+      "native": [
+        {
+          "phase": "eng",
+          "severity": "High",
+          "title": "Persist retry attempts in their own table",
+          "file": "lib/worker.ts",
+          "id": "r-eng-native-9",
+          "voice": "native",
+          "line": 90,
+          "resolution": "move attempts into a new retry_attempts table"
+        }
+      ]
+    },
+    {
+      "name": "constructed same title, different remedies",
+      "expect": "negative",
+      "source": "constructed: the same title with two different, non-opposite remedies is associated, not confirmed",
+      "outside": [
+        {
+          "phase": "eng",
+          "severity": "High",
+          "title": "Persist retry attempts in their own table",
+          "file": "lib/worker.ts",
+          "id": "r-eng-outside-10",
+          "voice": "outside",
+          "line": 40,
+          "resolution": "index the attempts by tenant"
+        }
+      ],
+      "native": [
+        {
+          "phase": "eng",
+          "severity": "High",
+          "title": "Persist retry attempts in their own table",
+          "file": "lib/worker.ts",
+          "id": "r-eng-native-10",
+          "voice": "native",
+          "line": 90,
+          "resolution": "partition the attempts table by month"
+        }
+      ]
+    },
+    {
+      "name": "constructed same title, same remedy",
+      "expect": "positive",
+      "source": "constructed: the same title and the same remedy (case and punctuation aside) confirm",
+      "outside": [
+        {
+          "phase": "eng",
+          "severity": "High",
+          "title": "Persist retry attempts in their own table",
+          "file": "lib/worker.ts",
+          "id": "r-eng-outside-11",
+          "voice": "outside",
+          "line": 40,
+          "resolution": "Move attempts into a new retry_attempts table."
+        }
+      ],
+      "native": [
+        {
+          "phase": "eng",
+          "severity": "High",
+          "title": "Persist retry attempts in their own table",
+          "file": "lib/worker.ts",
+          "id": "r-eng-native-11",
+          "voice": "native",
+          "line": 90,
+          "resolution": "move attempts into a new retry_attempts table"
+        }
+      ]
+    }
+  ]
+}

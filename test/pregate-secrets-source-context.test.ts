@@ -1,0 +1,80 @@
+/**
+ * pregate `secrets` scans each file's added lines with that file's type (#3211)
+ * and never reads an empty or rewritten diff as clean: a `+++` content line
+ * inside a hunk is scanned, and diff.external / textconv drivers are ignored.
+ */
+import { afterEach, describe, expect, test } from 'bun:test';
+import { spawnSync } from 'child_process';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
+import { parseAddedLines } from '../lib/pregate/checks/secrets';
+
+const PREGATE = path.resolve(import.meta.dir, '..', 'bin', 'gstack-pregate');
+const AWS = 'AKIA' + 'ZQ3XN7P2LM4RT8WV';
+const roots: string[] = [];
+afterEach(() => { for (const r of roots.splice(0)) fs.rmSync(r, { recursive: true, force: true }); });
+
+function repo(files: Record<string, string>) {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'pregate-secrets-')));
+  roots.push(root);
+  const dir = path.join(root, 'work');
+  const env = { ...process.env, HOME: root, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' };
+  const git = (...args: string[]) => {
+    const r = spawnSync('git', args, { cwd: dir, encoding: 'utf8', env, timeout: 30_000 });
+    if (r.status !== 0) throw new Error(`git ${args.join(' ')}: ${r.stderr}`);
+  };
+  fs.mkdirSync(dir);
+  git('init', '-q', '-b', 'main');
+  git('config', 'user.email', 'fixture@example.test');
+  git('config', 'user.name', 'Fixture');
+  fs.writeFileSync(path.join(dir, 'README'), 'base\n');
+  git('add', '.');
+  git('commit', '-qm', 'base');
+  git('init', '-q', '--bare', path.join(root, 'remote.git'));
+  git('remote', 'add', 'origin', path.join(root, 'remote.git'));
+  git('push', '-q', 'origin', 'main');
+  git('fetch', '-q', 'origin');
+  git('checkout', '-qb', 'feat');
+  for (const [rel, text] of Object.entries(files)) fs.writeFileSync(path.join(dir, rel), text);
+  git('add', '.');
+  git('commit', '-qm', 'feat');
+  const secrets = () => {
+    const r = spawnSync(PREGATE, ['--base', 'main', '--only', 'secrets', '--json'], { cwd: dir, encoding: 'utf8', env, timeout: 120_000 });
+    const check = JSON.parse(r.stdout).checks.find((c: { id: string }) => c.id === 'secrets');
+    return { status: check.status as string, detail: check.detail as string, lines: (check.lines ?? []) as string[] };
+  };
+  return { dir, git, secrets };
+}
+
+describe('pregate secrets: source context and diff integrity', () => {
+  test('parseAddedLines groups by file and keeps a "+++" content line inside a hunk', () => {
+    const diff = ['diff --git a/a.ts b/a.ts', '--- a/a.ts', '+++ b/a.ts', '@@ -0,0 +1,2 @@', '+one', '+++two', 'diff --git a/b.env b/b.env', '--- /dev/null', '+++ b/b.env', '@@ -0,0 +1 @@', '+three'].join('\n');
+    expect([...parseAddedLines(diff)]).toEqual([['a.ts', ['one', '++two']], ['b.env', ['three']]]);
+  });
+
+  test('a TS object property that reads a credential at runtime is code, not a secret (#3211)', () => {
+    const f = repo({ 'app.ts': 'const cfg = {\n  token: credentials.token,\n  apiKey: settings.apiKey,\n};\n' });
+    expect(f.secrets().status).toBe('pass');
+  });
+
+  test('the same assignment in a .env file still fails, naming the file', () => {
+    const f = repo({ 'deploy.env': 'API_TOKEN=8Fk2pQ9vXz4wL7mN3rT6yB1cD5eG0hJ\n' });
+    const r = f.secrets();
+    expect(r.status).toBe('fail');
+    expect(r.lines.join('\n')).toContain('deploy.env, added line 1');
+  });
+
+  test('an added line whose text starts with "++" is scanned', () => {
+    const f = repo({ 'notes.txt': `++aws_access_key_id = ${AWS}\n` });
+    expect(f.secrets().status).toBe('fail');
+  });
+
+  test('a diff.external driver that prints nothing does not make the branch clean', () => {
+    const f = repo({ 'notes.txt': `aws_access_key_id = ${AWS}\n` });
+    const driver = path.join(path.dirname(f.dir), 'empty-diff.sh');
+    fs.writeFileSync(driver, '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+    f.git('config', 'diff.external', driver);
+    expect(f.secrets().status).toBe('fail');
+  });
+});

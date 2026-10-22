@@ -1,0 +1,17 @@
+{
+  "_comment": "Final coverage-audit outputs graded on the closing JSON summary. known_good passes even though its diagram is outside the legacy legend grammar; known_bad must fail.",
+  "known_good": {
+    "unfamiliar-diagram-with-summary": "COVERAGE\nprocessPayment  ★★ happy path covered (billing.test.ts:3)\nrefundPayment   — no test at all\n\nSummary: 1 of 2 functions tested.\n{\"tested\": [\"processPayment\"], \"untested\": [\"refundPayment\"]}",
+    "fenced-json-summary": "src/billing.ts coverage\n  processPayment -> covered by 'processes valid payment'\n  refundPayment -> GAP\n\n```json\n{\"tested\": [\"processPayment (happy path)\"], \"untested\": [\"refundPayment\"]}\n```",
+    "corrected-summary": "{\"tested\": [\"refundPayment\"], \"untested\": [\"processPayment\"]}\nCorrection: I swapped them above.\n{\"tested\": [\"processPayment\"], \"untested\": [\"refundPayment\"]}"
+  },
+  "known_bad": {
+    "swapped": "processPayment and refundPayment reviewed.\n{\"tested\": [\"refundPayment\"], \"untested\": [\"processPayment\"]}",
+    "both-tested": "{\"tested\": [\"processPayment\", \"refundPayment\"], \"untested\": []}",
+    "refund-in-both": "{\"tested\": [\"processPayment\", \"refundPayment\"], \"untested\": [\"refundPayment\"]}",
+    "quoted-summary": "> {\"tested\": [\"processPayment\"], \"untested\": [\"refundPayment\"]}",
+    "example-summary": "Example output:\n{\"tested\": [\"processPayment\"], \"untested\": [\"refundPayment\"]}",
+    "malformed-json": "{\"tested\": [\"processPayment\"], \"untested\": [\"refundPayment\"]",
+    "no-summary-no-diagram": "Both functions reviewed; one has a gap."
+  }
+}

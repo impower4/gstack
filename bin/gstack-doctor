@@ -1,0 +1,623 @@
+#!/usr/bin/env bash
+# gstack-doctor — readiness report without starting a skill.
+#
+# Usage:
+#   gstack-doctor          print one row per check; spends nothing
+#   gstack-doctor --live   also run the paid Codex model probe (one short call)
+#   gstack-doctor --check [--for <skill> | --require <id,id>] [--project <path>]
+#                 [--revision <ref>] [--min-revision <v>|unknown] [--json] [--live]
+#                          one PASS | FAIL | SKIP row per component, then one
+#                          trailer: `gstack: ok <revision> for=<what>` (exit 0)
+#                          or `gstack: fail <id,id>` (exit 1). --for names the
+#                          workflow to certify; --require names components; the
+#                          default is every host installed from this checkout.
+#                          Rows and ids: bin/gstack-doctor-components.sh.
+#
+# Rows: install root, rescue refs, state root, bun, hooks, windows bash (on
+# Windows only), codex, codex probe, artifacts sync, browse bundle, binaries,
+# cso, claude code, session journal, guard log, CLAUDE.md. Each row is
+# `ok`, `warn`, `not configured` or `fail`; a row that is not ok carries a fix
+# line, and every gstack helper in a fix line is an absolute path under this
+# install root. Exit 1 when any row is `fail`, 2 on a usage error, else 0.
+#
+# Read-only. Each row reuses the owner's check instead of new probe logic: the
+# install registry rows behind `./setup --status`, bin/gstack-bun-version.sh,
+# bin/gstack-hook-check, bin/gstack-codex-probe's subcommands (the paid
+# `probe-model` only with --live; otherwise the cached result and its age),
+# the status file bin/gstack-brain-sync writes, setup's browse build
+# outputs, setup's launch probe (bin/gstack-launch-probe.sh, which runs each
+# compiled binary's side-effect-free --version) and the CSO build-result record. The sync row prints only a clamped status code and counts, never
+# the status message or file paths: the message can quote a matched secret.
+# Bash 3.2 plus POSIX tools; it still reports when bun or python3 is missing.
+#
+# Windows is detected from OSTYPE (msys, cygwin). Tests inject it instead:
+# GSTACK_DOCTOR_PLATFORM=windows|posix overrides the detection, and
+# GSTACK_DOCTOR_BASH_PROBE=<json file> hands bin/gstack-windows-bash.ts the
+# bash discovery inputs (its --probe).
+
+# Heredoc delivery guard, as in bin/gstack-brain-sync: compat level 50 keeps
+# heredoc bodies on the tempfile path, so a small pipe buffer cannot hang them.
+BASH_COMPAT=50
+
+set -u
+
+usage() {
+  sed -n '3,13p' "$0" | sed 's/^# \{0,1\}//'
+}
+
+LIVE=0 CHECK=0 CHECK_JSON=0 CHECK_FOR="" CHECK_REQUIRE="" CHECK_PROJECT="" CHECK_REVISION="" CHECK_MIN_REVISION=""
+_need_value() { [ -n "${2:-}" ] || { echo "gstack-doctor: $1 needs a value" >&2; usage >&2; exit 2; }; }
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --live) LIVE=1 ;;
+    --check) CHECK=1 ;;
+    --json) CHECK=1; CHECK_JSON=1 ;;
+    --for) _need_value "$1" "${2:-}"; CHECK=1; CHECK_FOR="$2"; shift ;;
+    --for=*) CHECK=1; CHECK_FOR="${1#--for=}" ;;
+    --require) _need_value "$1" "${2:-}"; CHECK=1; CHECK_REQUIRE="$2"; shift ;;
+    --require=*) CHECK=1; CHECK_REQUIRE="${1#--require=}" ;;
+    --project) _need_value "$1" "${2:-}"; CHECK=1; CHECK_PROJECT="$2"; shift ;;
+    --project=*) CHECK=1; CHECK_PROJECT="${1#--project=}" ;;
+    --revision) _need_value "$1" "${2:-}"; CHECK=1; CHECK_REVISION="$2"; shift ;;
+    --revision=*) CHECK=1; CHECK_REVISION="${1#--revision=}" ;;
+    --min-revision) _need_value "$1" "${2:-}"; CHECK=1; CHECK_MIN_REVISION="$2"; shift ;;
+    --min-revision=*) CHECK=1; CHECK_MIN_REVISION="${1#--min-revision=}" ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "gstack-doctor: unknown argument '$1'" >&2; usage >&2; exit 2 ;;
+  esac
+  shift
+done
+
+ROOT="$(cd "$(dirname "$0")/.." && pwd)" || { echo "gstack-doctor: cannot resolve the install root" >&2; exit 1; }
+ROOT_REAL="$(cd "$ROOT" && pwd -P)"
+BIN="$ROOT/bin"
+SRC="$ROOT_REAL"
+DOCS="https://github.com/garrytan/gstack/blob/main/docs/troubleshooting.md"
+DOCS_STATE_ROOT="https://github.com/garrytan/gstack/blob/main/docs/state-root.md"
+CODEX_FEATURES="outside reviews in /review, /ship, /autoplan and /codex"
+N_OK=0 N_WARN=0 N_NC=0 N_FAIL=0
+
+row() {
+  printf '%-15s %-15s %s\n' "$1" "$2" "$3"
+  [ -n "${4:-}" ] && printf '%32sfix: %s\n' '' "$4"
+  case "$1" in
+    ok) N_OK=$((N_OK + 1)) ;;
+    warn) N_WARN=$((N_WARN + 1)) ;;
+    'not configured') N_NC=$((N_NC + 1)) ;;
+    *) N_FAIL=$((N_FAIL + 1)) ;;
+  esac
+}
+
+# sq TEXT — TEXT single-quoted for bash.
+sq() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }
+
+# clamp CHARSET MAX — stdin's first line reduced to CHARSET, at most MAX chars.
+clamp() { head -1 | tr -cd "$1" | cut -c1-"$2"; }
+
+# epoch_of VALUE — epoch seconds for an epoch or an ISO-8601 UTC time; "" otherwise.
+epoch_of() {
+  local v
+  v=$(printf '%s' "$1" | tr -cd '0-9TZ:.+-')
+  case "$v" in
+    '') return 0 ;;
+    *[!0-9]*) date -u -d "$v" +%s 2>/dev/null || date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "$v" +%s 2>/dev/null || true ;;
+    *) printf '%s' "$v" ;;
+  esac
+}
+
+# json_field KEY JSON — a top-level string or number value from one-line JSON.
+# A key quoted inside a string value is escaped (\"key\"), so it never matches.
+json_field() {
+  local v
+  v=$(printf '%s' "$2" | sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\"\([^\"\\\\]*\)\".*/\1/p")
+  [ -n "$v" ] || v=$(printf '%s' "$2" | sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p")
+  printf '%s' "$v"
+}
+
+# check_state_root — durability comes from the GSTACK_EPHEMERAL=1 marker the
+# host sets (docs/state-root.md), never from a path heuristic.
+check_state_root() {
+  local durable=yes
+  [ "${GSTACK_EPHEMERAL:-}" = 1 ] && durable=no
+  if [ ! -d "$STATE_ROOT" ]; then
+    row warn "state root" "$STATE_ROOT durable=$durable (selected by $_gstack_sr_var) does not exist yet" "cd $SRC && ./setup, or run any gstack skill"
+  elif [ "$durable" = no ]; then
+    row warn "state root" "$STATE_ROOT durable=no (selected by $_gstack_sr_var; GSTACK_EPHEMERAL=1: learnings and logs vanish with this machine)" "set GSTACK_STATE_ROOT to a directory that outlives this machine ($DOCS_STATE_ROOT#ephemeral-machines)"
+  else
+    row ok "state root" "$STATE_ROOT durable=yes (selected by $_gstack_sr_var)"
+  fi
+}
+
+check_install() {
+  local rows host scope src dest reg cur result note real installed="" bad="" badnote="" other="" total=0
+  if ! . "$BIN/gstack-install-registry.sh" 2>/dev/null; then
+    row fail "install root" "$BIN/gstack-install-registry.sh is missing" "reinstall gstack from a fresh checkout of https://github.com/garrytan/gstack, then run its ./setup"
+    return
+  fi
+  rows="$(_gstack_status_rows)"
+  while IFS='	' read -r host scope src dest reg cur result note; do
+    [ -n "$host" ] || continue
+    total=$((total + 1))
+    real="$(cd "$src" 2>/dev/null && pwd -P)"
+    if [ "$real" != "$ROOT_REAL" ] && [ "$(cd "$dest/gstack" 2>/dev/null && pwd -P)" != "$ROOT_REAL" ]; then
+      [ -n "$other" ] || other="$src"
+      continue
+    fi
+    [ -n "$real" ] && SRC="$real"
+    case "$result" in
+      current) installed="${installed:+$installed, }$host $scope current ($cur)" ;;
+      *) bad="${bad:+$bad, }$host $scope $result"; [ -n "$badnote" ] || badnote="$note" ;;
+    esac
+  done <<ROWS
+$rows
+ROWS
+  if [ -n "$bad" ]; then
+    row warn "install root" "$ROOT: $bad${installed:+; $installed}" "${badnote:-cd $SRC && ./setup}"
+  elif [ -n "$installed" ]; then
+    row ok "install root" "$ROOT: $installed"
+  elif [ "$total" -eq 0 ]; then
+    row fail "install root" "$ROOT: no gstack install is registered" "cd $SRC && ./setup"
+  else
+    row warn "install root" "$ROOT is not the source of any of the $total registered install(s); this doctor checks this checkout" "cd $SRC && ./setup, or run $other/bin/gstack-doctor"
+  fi
+}
+
+check_bun() {
+  local found where
+  if ! . "$BIN/gstack-bun-version.sh" 2>/dev/null; then
+    row fail bun "$BIN/gstack-bun-version.sh is missing" "reinstall gstack from a fresh checkout of https://github.com/garrytan/gstack"
+    return
+  fi
+  if ! where=$(command -v bun 2>/dev/null); then
+    row fail bun "not found on PATH; gstack's skills, hooks and builds need it" "install Bun $GSTACK_BUN_TESTED (https://bun.sh), then cd $SRC && ./setup"
+    return
+  fi
+  found=$(bun --version </dev/null 2>/dev/null | clamp 'A-Za-z0-9.+-' 40)
+  case "$(gstack_bun_status "$found")" in
+    ok) row ok bun "$found at $where (floor $GSTACK_BUN_FLOOR, tested $GSTACK_BUN_TESTED)" ;;
+    untested) row warn bun "$found at $where is below the tested $GSTACK_BUN_TESTED" "bun upgrade ($DOCS#bun-too-old)" ;;
+    too-old) row fail bun "$found at $where is below the security floor $GSTACK_BUN_FLOOR" "bun upgrade, then cd $SRC && ./setup ($DOCS#bun-too-old)" ;;
+    *) row warn bun "could not read the version of $where" "bun upgrade ($DOCS#bun-too-old)" ;;
+  esac
+}
+
+check_hooks() {
+  local out rc checked missing first
+  out=$("$BIN/gstack-hook-check" "$SRC" </dev/null 2>&1)
+  rc=$?
+  checked=$(printf '%s\n' "$out" | grep -c '^ok ')
+  missing=$(printf '%s\n' "$out" | grep -c '^missing ')
+  case "$rc" in
+    0) if [ "$missing" -gt 0 ]; then row ok hooks "$checked hook(s) parse; $missing not installed"; else row ok hooks "$checked hook(s) parse"; fi ;;
+    1) first=$(printf '%s\n' "$out" | grep '^fail ' | head -1 | cut -c6-300)
+       row fail hooks "$first" "repair the file (git -C $SRC status shows half-applied edits), then cd $SRC && ./setup ($DOCS#setup-hook-does-not-parse)" ;;
+    3) row warn hooks "TypeScript hook entries not checked: bun not found" "install Bun (see the bun row), then rerun $BIN/gstack-doctor" ;;
+    *) row fail hooks "the hook check could not run (exit $rc)" "cd $SRC && ./setup" ;;
+  esac
+}
+
+# check_codex — CODEX_MODE from the free checks; sets CODEX_READY=1 when the
+# probe row should follow.
+check_codex() {
+  local reviews probe="$BIN/gstack-codex-probe" sel rc model src
+  CODEX_READY=0
+  reviews=$("$BIN/gstack-config" get codex_reviews 2>/dev/null || echo enabled)
+  if [ "$reviews" = disabled ]; then
+    row "not configured" codex "codex_reviews disabled; $CODEX_FEATURES skip Codex" "$BIN/gstack-config set codex_reviews enabled"
+    return
+  fi
+  if ! command -v codex >/dev/null 2>&1; then
+    row "not configured" codex "Codex CLI not installed; $CODEX_FEATURES have no Codex coverage" "npm install -g @openai/codex, then codex login"
+    return
+  fi
+  sel=$("$probe" select-model exec </dev/null 2>&1)
+  rc=$?
+  model=$(printf '%s\n' "$sel" | sed -n 's/^CODEX_SEL: //p' | clamp 'A-Za-z0-9._:/-' 80)
+  if [ "$rc" -ne 0 ] || [ -z "$model" ]; then
+    [ "$rc" -ne 0 ] && rc="exited $rc" || rc="printed no CODEX_SEL line"
+    row fail codex "CODEX_MODE helper_unavailable: select-model $rc (the probe could not locate its scripts, or the requested model id is invalid)" "run $probe select-model exec to see the cause; reinstall with cd $SRC && ./setup"
+    return
+  fi
+  src=$(printf '%s\n' "$sel" | sed -n 's/^CODEX_MODEL: .*source: \(.*\))$/\1/p' | clamp 'A-Za-z0-9 ._:/=-' 80)
+  gstack_codex_version
+  if ! "$probe" check-auth </dev/null >/dev/null 2>&1; then
+    row warn codex "CODEX_MODE not_authed; model $model (source: ${src:-unknown})" "codex login, or export CODEX_API_KEY"
+    return
+  fi
+  if ! "$probe" check-sandbox </dev/null >/dev/null 2>&1; then
+    row warn codex "CODEX_MODE sandbox_unavailable; no paid call runs" "run $probe check-sandbox for the reason and fix"
+    return
+  fi
+  if "$probe" check-version </dev/null 2>&1 | grep -q '^WARN'; then
+    row warn codex "${_gcx_version:-version unknown} has a known problem; model $model (source: ${src:-unknown})" "run $probe check-version for the fix"
+  else
+    row ok codex "${_gcx_version:-version unknown}; self-locate ok; model $model (source: ${src:-unknown})"
+  fi
+  CODEX_READY=1
+}
+
+check_codex_probe() {
+  local out rc state probe="$BIN/gstack-codex-probe" model_fix="set GSTACK_CODEX_MODEL=<supported-model> or model in config.toml, then $BIN/gstack-doctor --live"
+  if [ "$LIVE" -eq 1 ]; then
+    out=$("$probe" probe-model exec </dev/null 2>&1)
+    rc=$?
+    state=$(printf '%s\n' "$out" | sed -n 's/^CODEX_PROBE_STATE: //p' | clamp 'a-z_' 40)
+    case "$rc" in
+      0) case "$state" in
+           inconclusive|rate_limited) row warn "codex probe" "live probe: CODEX_MODE unverified ($state)" "rerun $BIN/gstack-doctor --live later" ;;
+           *) row ok "codex probe" "live probe: ok" ;;
+         esac ;;
+      1) row warn "codex probe" "live probe: model_unusable; $CODEX_FEATURES skip Codex" "$model_fix" ;;
+      2) row fail "codex probe" "live probe: broken_install (the Codex CLI cannot execute)" "npm install -g @openai/codex" ;;
+      4) row warn "codex probe" "live probe: quota_exhausted (the account's Codex usage limit)" "wait for the reset time Codex names: $probe probe-model exec" ;;
+      *) row warn "codex probe" "live probe: exit $rc${state:+ ($state)}" "rerun $BIN/gstack-doctor --live" ;;
+    esac
+    return
+  fi
+  gstack_codex_cache_read "$STATE_ROOT"
+  local age
+  age=$(gstack_codex_age_text "$_gcx_age")
+  case "$_gcx_probe" in
+    '') row warn "codex probe" "not probed; Codex readiness is unverified until a skill or --live runs it" "$BIN/gstack-doctor --live (one short paid Codex call)" ;;
+    MODEL_OK) row ok "codex probe" "cached MODEL_OK, $age (not re-run; --live probes now)" ;;
+    MODEL_UNUSABLE) row warn "codex probe" "cached MODEL_UNUSABLE, $age; $CODEX_FEATURES skip Codex" "$model_fix" ;;
+    MODEL_QUOTA_EXHAUSTED) row warn "codex probe" "cached MODEL_QUOTA_EXHAUSTED, $age (the account's Codex usage limit)" "wait for the reset, then $BIN/gstack-doctor --live" ;;
+    *) row warn "codex probe" "cached entry unrecognized, $age" "$BIN/gstack-doctor --live" ;;
+  esac
+}
+
+check_sync() {
+  local mode file json status held drainable drain push queue=0 now f detail case_names fix="$BIN/gstack-brain-sync --status"
+  mode=$("$BIN/gstack-config" get artifacts_sync_mode 2>/dev/null || echo off)
+  if [ ! -d "$STATE_ROOT/.git" ]; then
+    row "not configured" "artifacts sync" "off; cross-machine artifacts sync is unavailable" "$BIN/gstack-artifacts-init"
+    return
+  fi
+  if [ "$mode" = off ]; then
+    row "not configured" "artifacts sync" "artifacts_sync_mode off; cross-machine artifacts sync is unavailable" "$BIN/gstack-config set artifacts_sync_mode artifacts-only"
+    return
+  fi
+  for f in "$STATE_ROOT/.brain-queue.d"/*.json; do [ -f "$f" ] && queue=$((queue + 1)); done
+  for f in "$STATE_ROOT/.brain-queue.jsonl" "$STATE_ROOT/.brain-queue.jsonl.migrating"; do
+    [ -f "$f" ] && queue=$((queue + $(wc -l < "$f" | tr -d ' ')))
+  done
+  file="$STATE_ROOT/.brain-sync-status.json"
+  if [ ! -f "$file" ]; then
+    if [ "$queue" -gt 0 ]; then row warn "artifacts sync" "no drain recorded while $queue record(s) are queued" "$fix"
+    else row ok "artifacts sync" "mode $mode; no drain yet, queue empty"; fi
+    return
+  fi
+  json=$(head -c 16384 "$file" 2>/dev/null | tr '\n\r' '  ')
+  status=$(json_field status "$json")
+  case "$status" in ok|idle|held|collision|blocked|push_failed|error) ;; *) status=unknown ;; esac
+  held=$(json_field held_count "$json" | tr -cd '0-9')
+  case_names=$(json_field case_names "$json" | tr -cd 'A-Za-z0-9._?,-' | head -c 300)
+  drainable=$(json_field drainable "$json" | tr -cd '0-9')
+  drain=$(epoch_of "$(json_field last_drain_at "$json")")
+  push=$(epoch_of "$(json_field last_push_at "$json")")
+  [ -n "$push" ] || push=$(epoch_of "$(head -1 "$STATE_ROOT/.brain-last-push" 2>/dev/null)")
+  now=$(date +%s)
+  case "$status" in
+    held) row warn "artifacts sync" "status held${held:+ ($held file(s) held by the secret scanner)}" "$fix"; return ;;
+    blocked) row warn "artifacts sync" "status blocked (a re-scan still flags staged content)" "$fix"; return ;;
+    push_failed|error|unknown) row warn "artifacts sync" "status $status" "$fix"; return ;;
+  esac
+  if [ -n "$case_names" ]; then
+    row warn "artifacts sync" "status $status; artifact paths differ only by letter case ($case_names), see docs/troubleshooting.md#artifact-case-collision" "$fix"
+    return
+  fi
+  if [ "${drainable:-0}" -gt 0 ] && { [ -z "$push" ] || [ $((now - push)) -gt 86400 ]; }; then
+    row warn "artifacts sync" "status $status; no push for 24h while $drainable record(s) wait" "$fix"
+  elif [ "$queue" -gt 0 ] && [ -n "$drain" ] && [ $((now - drain)) -gt 86400 ]; then
+    row warn "artifacts sync" "status $status; no drain for 24h while $queue record(s) are queued" "$fix"
+  else
+    detail="status $status (mode $mode; queue $queue)"
+    row ok "artifacts sync" "$detail"
+  fi
+}
+
+# launch_fix — the fix line for a binary the OS refuses to start.
+launch_fix() {
+  if [ -n "$EXE" ]; then
+    echo "Windows Smart App Control (or another application-control policy) blocks unsigned local builds (#2595): run gstack inside WSL or turn Smart App Control off, then cd $SRC && ./setup ($DOCS#windows-smart-app-control)"
+  else
+    echo "the OS refused to execute it (permissions or a noexec mount under $ROOT); fix that, then cd $SRC && ./setup"
+  fi
+}
+
+check_browse() {
+  local missing="" f
+  if [ ! -x "$ROOT/browse/dist/browse$EXE" ]; then
+    row warn "browse bundle" "not built; the gstack browser fallback for /browse, /qa, /qa-only, /design-review, /make-pdf, /pair-agent is unavailable (the Aside browser is unaffected)" "cd $SRC && ./setup"
+    return
+  fi
+  gstack_launch_probe "$ROOT/browse/dist/browse$EXE"
+  case "$_glp_state" in
+    blocked) row warn "browse bundle" "built, but blocked at launch (${_glp_detail:-no output}); the gstack browser fallback is unavailable (the Aside browser is unaffected)" "$(launch_fix)"; return ;;
+    broken) row warn "browse bundle" "built, but browse --version failed (${_glp_detail})" "cd $SRC && bun run build"; return ;;
+  esac
+  for f in server-node.mjs .build-complete; do [ -e "$ROOT/browse/dist/$f" ] || missing="${missing:+$missing, }$f"; done
+  if [ -n "$missing" ]; then
+    row warn "browse bundle" "incomplete build (missing browse/dist: $missing)" "cd $SRC && ./setup"
+  else
+    row ok "browse bundle" "browse/dist built"
+  fi
+}
+
+# check_binaries — the other compiled binaries, by launch state (browse has its own row).
+check_binaries() {
+  local rel detail blocked="" broken="" missing="" skills="" n=0
+  for rel in browse/dist/find-browse design/dist/design make-pdf/dist/pdf bin/gstack-global-discover; do
+    gstack_launch_probe "$ROOT/$rel$EXE"
+    detail="${rel##*/}"
+    case "$_glp_state" in
+      native) n=$((n + 1)) ;;
+      blocked) blocked="${blocked:+$blocked, }$detail (${_glp_detail:-no output})"; skills="${skills:+$skills, }$(gstack_launch_probe_skills "$rel")" ;;
+      broken) broken="${broken:+$broken, }$detail (${_glp_detail})" ;;
+      missing) missing="${missing:+$missing, }$detail" ;;
+    esac
+  done
+  if [ -n "$blocked" ]; then
+    row warn binaries "blocked at launch: $blocked; unavailable: $skills" "$(launch_fix)"
+  elif [ -n "$broken" ]; then
+    row warn binaries "launched but failed: $broken" "cd $SRC && bun run build"
+  elif [ -n "$missing" ]; then
+    row warn binaries "not built: $missing" "cd $SRC && ./setup"
+  else
+    row ok binaries "find-browse, design, pdf, gstack-global-discover launch ($n of 4)"
+  fi
+}
+
+# check_cso — from the build-result record setup and scripts/build-cso.sh write.
+check_cso() {
+  local file="$SRC/bin/.gstack-cso-build-result" result stage reason installed diag usable=0
+  [ -x "$SRC/bin/gstack-cso-launcher$EXE" ] && [ -x "$SRC/bin/gstack-cso-core$EXE" ] && usable=1
+  cso_field() { sed -n "s/^$1=//p" "$file" 2>/dev/null | head -1 | clamp ' -~' 200; }
+  result=$(cso_field result) stage=$(cso_field stage) reason=$(cso_field reason) installed=$(cso_field installed) diag=$(cso_field diagnostic)
+  case "$result" in
+    ok) if [ "$usable" -eq 1 ]; then row ok cso "native helper $installed"
+        else row warn cso "the last build succeeded but the native helper is missing; /cso reports not assessed" "cd $SRC && ./setup"; fi ;;
+    failed)
+      if [ "$usable" -eq 1 ] && [ -n "$installed" ]; then
+        row warn cso "$stage step failed ($reason) for $(cso_field revision); previous CSO kept: $installed" "cd $SRC && bun run build:cso && ./setup (log: ${diag:-none}; $DOCS#cso-build-or-publish-failed)"
+      else
+        row warn cso "unavailable: the $stage step failed ($reason); /cso reports not assessed" "cd $SRC && bun run build:cso && ./setup (log: ${diag:-none}; $DOCS#cso-build-or-publish-failed)"
+      fi ;;
+    *) if [ "$usable" -eq 1 ]; then row ok cso "native helper built (no build record yet)"
+       else row "not configured" cso "native helper not built; /cso reports not assessed" "cd $SRC && ./setup (it names any missing build prerequisite)"; fi ;;
+  esac
+}
+
+check_claude() {
+  local override cmd raw ver rc a
+  local args=()
+  override="${GSTACK_CLAUDE_BIN:-${CLAUDE_BIN:-}}"
+  override="${override#\"}"; override="${override%\"}"
+  if [ -n "$override" ]; then
+    case "$override" in /*|[A-Za-z]:*) cmd="$override" ;; *) cmd=$(command -v "$override" 2>/dev/null) ;; esac
+    raw="${GSTACK_CLAUDE_BIN_ARGS:-${CLAUDE_BIN_ARGS:-}}"
+    case "$raw" in
+      '') ;;
+      '['*) raw="${raw#[}"; raw="${raw%]}"
+            while IFS= read -r a; do
+              a=$(printf '%s' "$a" | sed 's/^[[:space:]]*"\{0,1\}//; s/"\{0,1\}[[:space:]]*$//')
+              [ -n "$a" ] && args+=("$a")
+            done <<ARGS
+$(printf '%s' "$raw" | tr ',' '\n')
+ARGS
+            ;;
+      *) raw="${raw#\"}"; args+=("${raw%\"}") ;;
+    esac
+  else
+    cmd=$(command -v claude 2>/dev/null)
+  fi
+  if [ -z "${cmd:-}" ]; then
+    row "not configured" "claude code" "Claude Code CLI not found; the Claude Code host and Claude outside reviews are unavailable" "install Claude Code (https://code.claude.com), or set GSTACK_CLAUDE_BIN"
+    return
+  fi
+  ver=$("$cmd" ${args[@]+"${args[@]}"} --version </dev/null 2>/dev/null)
+  rc=$?
+  ver=$(printf '%s\n' "$ver" | clamp 'A-Za-z0-9 ._()+-' 60)
+  if [ "$rc" -ne 0 ]; then
+    row warn "claude code" "$cmd --version failed (exit $rc)" "reinstall Claude Code (https://code.claude.com)"
+  else
+    row ok "claude code" "${ver:-version unknown} at $cmd"
+  fi
+}
+
+check_journal() {
+  local cwd dir f size largest=0 count=0
+  case "${OSTYPE:-}" in msys*|cygwin*) cwd=$(pwd -W 2>/dev/null || pwd -P) ;; *) cwd=$(pwd -P) ;; esac
+  dir="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects/$(printf '%s' "$cwd" | sed 's/[^A-Za-z0-9]/-/g')"
+  for f in "$dir"/*.jsonl; do
+    [ -f "$f" ] || continue
+    count=$((count + 1))
+    size=$(wc -c < "$f" | tr -d ' ')
+    [ "$size" -gt "$largest" ] && largest="$size"
+  done
+  if [ "$count" -eq 0 ]; then
+    row ok "session journal" "no session journals for this project"
+    return
+  fi
+  row ok "session journal" "largest of $count: $(awk -v b="$largest" 'BEGIN { if (b >= 1048576) printf "%.1f MiB", b / 1048576; else if (b >= 1024) printf "%.1f KiB", b / 1024; else printf "%d B", b }')"
+}
+
+check_guard_log() {
+  local log="$STATE_ROOT/analytics/autoplan-guard.jsonl" summary
+  if [ ! -f "$log" ]; then
+    row ok "guard log" "no guard decisions logged"
+    return
+  fi
+  summary=$(awk '
+    !/^\{/ || !match($0, /"schema"[[:space:]]*:[[:space:]]*1[,}[:space:]]/) { next }
+    match($0, /"decision"[[:space:]]*:[[:space:]]*"(allow|deny)"/) {
+      n++; if (substr($0, RSTART, RLENGTH) ~ /deny/) d++
+    }
+    match($0, /"reason_code"[[:space:]]*:[[:space:]]*"[a-z0-9_]+"/) {
+      c = substr($0, RSTART, RLENGTH); sub(/^[^:]*:[[:space:]]*"/, "", c); sub(/"$/, "", c)
+      codes[k++ % 5] = c
+    }
+    END {
+      out = (n + 0) " decisions (" (d + 0) " denied)"
+      if (k > 0) {
+        out = out "; last codes:"; sep = " "
+        for (i = (k > 5 ? k - 5 : 0); i < k; i++) { out = out sep codes[i % 5]; sep = ", " }
+      }
+      print out
+    }' "$log" 2>/dev/null)
+  row ok "guard log" "${summary:-0 decisions (0 denied)}"
+}
+
+# check_rescue_refs — the refs/gstack/rescue/* commits bin/gstack-ff-update
+# leaves when local edits conflicted with an update, newest first, each with
+# its date and the inspect and delete commands its banner prints. No row for
+# an install that is not a git checkout.
+check_rescue_refs() {
+  local refs ref date q n=0 shown=0 label
+  git -C "$SRC" rev-parse --git-dir >/dev/null 2>&1 || return 0
+  refs=$(GIT_OPTIONAL_LOCKS=0 git -C "$SRC" for-each-ref --sort=-committerdate --format='%(refname) %(committerdate:short)' refs/gstack/rescue/ 2>/dev/null)
+  q=$(sq "$SRC")
+  if [ -z "$refs" ]; then
+    row ok "rescue refs" "none in $SRC"
+    return
+  fi
+  n=$(printf '%s\n' "$refs" | wc -l | tr -d ' ')
+  row warn "rescue refs" "$n in $SRC: local edits an update set aside instead of leaving conflict markers" "inspect each, export what you want to keep (git -C $q diff '<ref>^' '<ref>' > ~/gstack-local-edits.patch, then git apply -3 it in a scratch checkout), then delete it ($DOCS#auto-update-rescued-edits)"
+  while read -r ref date; do
+    shown=$((shown + 1))
+    if [ "$shown" -gt 10 ]; then
+      printf '%32s%s more: git -C %s for-each-ref refs/gstack/rescue/\n' '' "$((n - 10))" "$q"
+      break
+    fi
+    label=""
+    git -C "$SRC" cat-file commit "$ref" 2>/dev/null | grep -q '^Needs manual resolution' && label=", needs manual resolution"
+    printf '%32s%s (%s%s)\n' '' "$ref" "$date" "$label"
+    printf '%32s  inspect: git -C %s diff %s %s\n' '' "$q" "'$ref^'" "'$ref'"
+    printf '%32s  delete:  git -C %s update-ref -d %s\n' '' "$q" "'$ref'"
+  done <<REFS
+$refs
+REFS
+}
+
+# check_windows_bash — the Git Bash gstack's TypeScript hands its bash scripts
+# to on Windows, and what chose it (lib/script-invocation.ts, through
+# bin/gstack-windows-bash.ts run by the bun on PATH).
+check_windows_bash() {
+  local out rc bash source warning refused
+  if [ ! -f "$BIN/gstack-windows-bash.ts" ]; then
+    row warn "windows bash" "not checked: $BIN/gstack-windows-bash.ts is missing" "cd $SRC && ./setup"
+    return
+  fi
+  if ! command -v bun >/dev/null 2>&1; then
+    row warn "windows bash" "not checked: bun not found" "install Bun (see the bun row), then rerun $BIN/gstack-doctor"
+    return
+  fi
+  out=$(bun --no-env-file --config=/dev/null "$BIN/gstack-windows-bash.ts" ${GSTACK_DOCTOR_BASH_PROBE:+--probe "$GSTACK_DOCTOR_BASH_PROBE"} </dev/null 2>&1)
+  rc=$?
+  out=$(printf '%s\n' "$out" | tr -d '\000-\010\013-\037')
+  bash=$(printf '%s\n' "$out" | sed -n 's/^WINDOWS_BASH: //p' | head -1)
+  source=$(printf '%s\n' "$out" | sed -n 's/^WINDOWS_BASH_SOURCE: //p' | head -1)
+  warning=$(printf '%s\n' "$out" | sed -n 's/^WINDOWS_BASH_WARNING: //p' | head -1)
+  refused=$(printf '%s\n' "$out" | sed -n 's/^WINDOWS_BASH_REFUSED: //p' | head -1)
+  if [ -n "$refused" ]; then
+    row fail "windows bash" "$refused" "set GSTACK_GIT_BASH to Git Bash's bash.exe for good (PowerShell user variable or the env block of ~/.claude/settings.json), then restart Claude Code ($DOCS#bash-unavailable)"
+  elif [ -z "$bash" ]; then
+    row warn "windows bash" "not checked: gstack-windows-bash exited $rc ($(printf '%s\n' "$out" | grep -v '^[[:space:]]*$' | head -1 | cut -c1-200))" "cd $SRC && ./setup"
+  elif [ -n "$warning" ]; then
+    row warn "windows bash" "$bash (chosen by $source); $warning" "unset GSTACK_BASH, or set it to the same path"
+  else
+    row ok "windows bash" "$bash (chosen by $source)"
+  fi
+}
+
+# check_claude_md — a gstack section in ~/.claude/CLAUDE.md or this project's
+# CLAUDE.md that enumerates skills (#3169): Claude Code lists the installed
+# skills itself, and a pasted list goes stale with each release. A section is
+# a heading whose title starts with "gstack", up to the next heading of its
+# level or higher; it enumerates when it has an "Available skills" line or
+# names 8 or more distinct /skill tokens (paths are not tokens).
+check_claude_md() {
+  local user project file f n checked="" listed="" seen=""
+  user="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/CLAUDE.md"
+  project="$(git rev-parse --show-toplevel 2>/dev/null || pwd -P)/CLAUDE.md"
+  for file in "$user" "$project"; do
+    [ -f "$file" ] || continue
+    f=$(cd "$(dirname "$file")" 2>/dev/null && pwd -P)/CLAUDE.md
+    case "|$seen|" in *"|$f|"*) continue ;; esac
+    seen="$seen|$f"
+    checked="${checked:+$checked, }$file"
+    n=$(awk '
+      /^#+[ \t]/ {
+        level = match($0, /[^#]/) - 1
+        title = tolower(substr($0, level + 1)); sub(/^[ \t]+/, "", title)
+        if (in_block && level <= block_level) in_block = 0
+        if (!in_block && title ~ /^gstack([^a-z0-9-]|$)/) { in_block = 1; block_level = level; next }
+      }
+      !in_block { next }
+      tolower($0) ~ /available skills/ { available = 1 }
+      {
+        s = " " $0
+        while (match(s, /[ \t,(`*[]\/[a-z][a-z0-9-]*/)) {
+          tok = substr(s, RSTART + 2, RLENGTH - 2); nxt = substr(s, RSTART + RLENGTH, 1)
+          s = substr(s, RSTART + RLENGTH)
+          if (nxt == "/" || tok in seen) continue
+          seen[tok] = 1; count++
+        }
+      }
+      END { if (available || count >= 8) print count + 0 }' "$file" 2>/dev/null)
+    [ -n "$n" ] && listed="${listed:+$listed; }$file lists $n skills"
+  done
+  if [ -z "$checked" ]; then
+    row ok "CLAUDE.md" "none at $user or $project"
+  elif [ -z "$listed" ]; then
+    row ok "CLAUDE.md" "no gstack section lists skills ($checked)"
+  else
+    row warn "CLAUDE.md" "the gstack section in $listed; Claude Code lists installed skills itself, and a pasted list goes stale with each release" "replace that section with this short block ($DOCS#claude-md-skill-list):"
+    printf '%34s%s\n' '' '## gstack' '' 'Use /browse from gstack for all web browsing. Never use mcp__claude-in-chrome__* tools.'
+  fi
+}
+
+if ! . "$BIN/gstack-state-root.sh" 2>/dev/null; then
+  row fail "state root" "$BIN/gstack-state-root.sh is missing" "reinstall gstack from a fresh checkout of https://github.com/garrytan/gstack, then run its ./setup"
+  exit 1
+fi
+gstack_state_root_select
+STATE_ROOT="$_gstack_sr_root"
+GSTACK_STATE_ROOT="$STATE_ROOT"
+. "$BIN/gstack-codex-status.sh" 2>/dev/null || { echo "gstack-doctor: $BIN/gstack-codex-status.sh is missing; reinstall with cd $SRC && ./setup" >&2; exit 1; }
+
+. "$BIN/gstack-launch-probe.sh" 2>/dev/null || { echo "gstack-doctor: $BIN/gstack-launch-probe.sh is missing; reinstall with cd $SRC && ./setup" >&2; exit 1; }
+EXE=""
+case "${OSTYPE:-}" in msys*|cygwin*|win32*) EXE=".exe" ;; esac
+WINDOWS=0
+case "${GSTACK_DOCTOR_PLATFORM:-}" in
+  windows) WINDOWS=1 ;;
+  posix) ;;
+  *) case "${OSTYPE:-}" in msys*|cygwin*|win32*) WINDOWS=1 ;; esac ;;
+esac
+
+if [ "$CHECK" -eq 1 ]; then
+  . "$BIN/gstack-doctor-check.sh" || { echo "gstack-doctor: $BIN/gstack-doctor-check.sh is missing; reinstall with cd $SRC && ./setup" >&2; exit 1; }
+  gstack_doctor_check
+  exit $?
+fi
+
+echo "gstack doctor $(head -1 "$ROOT/VERSION" 2>/dev/null | clamp '0-9A-Za-z.+-' 40)"
+check_install
+check_rescue_refs
+check_state_root
+check_bun
+check_hooks
+[ "$WINDOWS" -eq 1 ] && check_windows_bash
+check_codex
+[ "$CODEX_READY" -eq 1 ] && check_codex_probe
+check_sync
+check_browse
+check_binaries
+check_cso
+check_claude
+check_journal
+check_guard_log
+check_claude_md
+echo "$N_OK ok, $N_WARN warn, $N_NC not configured, $N_FAIL fail"
+[ "$N_FAIL" -eq 0 ]

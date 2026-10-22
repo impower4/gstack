@@ -36,6 +36,7 @@ function runDev(...args: string[]): { stdout: string; stderr: string; status: nu
     env: { ...process.env, GSTACK_HOME: tmpHome },
     encoding: 'utf-8',
     cwd: ROOT,
+    timeout: 30_000,
   });
   return {
     stdout: res.stdout ?? '',
@@ -49,6 +50,7 @@ function logQuestion(payload: Record<string, unknown>): number {
     env: { ...process.env, GSTACK_HOME: tmpHome },
     encoding: 'utf-8',
     cwd: ROOT,
+    timeout: 30_000,
   });
   return res.status ?? -1;
 }
@@ -437,5 +439,370 @@ describe('gstack-developer-profile errors', () => {
     const r = runDev('--not-a-real-subcommand');
     expect(r.status).not.toBe(0);
     expect(r.stderr).toContain('unknown subcommand');
+  });
+});
+
+// -----------------------------------------------------------------------
+// --log-session — the #1671 fix: writer that matches the reader.
+// -----------------------------------------------------------------------
+
+describe('gstack-developer-profile --log-session (#1671 fix)', () => {
+  test('regression: read-write-read sequence on fresh $HOME promotes to welcome_back', () => {
+    // First --read creates an empty stub (this is the bug-shape on current main).
+    const r1 = runDev('--read');
+    expect(r1.stdout).toContain('SESSION_COUNT: 0');
+    expect(r1.stdout).toContain('TIER: introduction');
+
+    // Office-hours writes a session via the new subcommand.
+    const r2 = runDev('--log-session', JSON.stringify({
+      date: '2026-05-23T00:00:00Z',
+      mode: 'startup',
+      project_slug: 'test',
+      signal_count: 2,
+      signals: ['s1', 's2'],
+    }));
+    expect(r2.status).toBe(0);
+
+    // Second --read sees the session — this is what was broken.
+    const r3 = runDev('--read');
+    expect(r3.stdout).toContain('SESSION_COUNT: 1');
+    expect(r3.stdout).toContain('TIER: welcome_back');
+    expect(r3.stdout).toContain('LAST_PROJECT: test');
+    expect(r3.stdout).toContain('TOTAL_SIGNAL_COUNT: 2');
+  });
+
+  test('aggregates signals across multiple sessions', () => {
+    runDev('--log-session', JSON.stringify({
+      date: '2026-05-20T00:00:00Z', mode: 'startup', project_slug: 'p', signals: ['a', 'b'],
+    }));
+    runDev('--log-session', JSON.stringify({
+      date: '2026-05-21T00:00:00Z', mode: 'startup', project_slug: 'p', signals: ['a', 'c'],
+    }));
+    const p = readProfile() as { sessions: unknown[]; signals_accumulated: Record<string, number> };
+    expect(p.sessions.length).toBe(2);
+    expect(p.signals_accumulated).toEqual({ a: 2, b: 1, c: 1 });
+  });
+
+  test('aggregates resources_shown and topics as deduped unions', () => {
+    runDev('--log-session', JSON.stringify({
+      date: '2026-05-20T00:00:00Z', mode: 'resources', project_slug: 'p',
+      resources_shown: ['url1', 'url2'], topics: ['ai'],
+    }));
+    runDev('--log-session', JSON.stringify({
+      date: '2026-05-21T00:00:00Z', mode: 'resources', project_slug: 'p',
+      resources_shown: ['url2', 'url3'], topics: ['ai', 'eng'],
+    }));
+    const p = readProfile() as { resources_shown: string[]; topics: string[] };
+    expect(p.resources_shown.sort()).toEqual(['url1', 'url2', 'url3']);
+    expect(p.topics.sort()).toEqual(['ai', 'eng']);
+  });
+
+  test('silently skips invalid JSON input (matches gstack-timeline-log pattern)', () => {
+    const r = runDev('--log-session', 'not-json');
+    expect(r.status).toBe(0); // silent skip, not error
+    const file = path.join(tmpHome, 'developer-profile.json');
+    expect(fs.existsSync(file)).toBe(false); // no stub created either
+  });
+
+  test('silently skips JSON missing required fields', () => {
+    const r = runDev('--log-session', JSON.stringify({ foo: 'bar' }));
+    expect(r.status).toBe(0);
+    const file = path.join(tmpHome, 'developer-profile.json');
+    expect(fs.existsSync(file)).toBe(false);
+  });
+
+  test('injects ts field if missing', () => {
+    runDev('--log-session', JSON.stringify({
+      date: '2026-05-23T00:00:00Z', mode: 'startup', project_slug: 'p',
+    }));
+    const p = readProfile() as { sessions: Array<{ ts: string }> };
+    expect(p.sessions[0].ts).toMatch(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/);
+  });
+
+  test('preserves user-set ts field if provided', () => {
+    runDev('--log-session', JSON.stringify({
+      date: '2026-05-23T00:00:00Z', mode: 'startup', project_slug: 'p',
+      ts: '2026-05-23T12:34:56Z',
+    }));
+    const p = readProfile() as { sessions: Array<{ ts: string }> };
+    expect(p.sessions[0].ts).toBe('2026-05-23T12:34:56Z');
+  });
+
+  test('do_read picks LAST_* from real sessions, not from a trailing mode:resources entry', () => {
+    // The Phase 6 resources auto-append happens AFTER the real session in the
+    // same /office-hours invocation. Without the mode filter, that resources
+    // entry would clobber LAST_PROJECT/LAST_ASSIGNMENT/LAST_DESIGN_TITLE for
+    // the next session.
+    runDev('--log-session', JSON.stringify({
+      date: '2026-05-20T00:00:00Z',
+      mode: 'startup',
+      project_slug: 'realproj',
+      assignment: 'real assignment text',
+      design_doc: 'plans/real.md',
+    }));
+    runDev('--log-session', JSON.stringify({
+      date: '2026-05-20T01:00:00Z',
+      mode: 'resources',
+      project_slug: 'realproj',
+      assignment: '',
+      design_doc: '',
+      resources_shown: ['url1'],
+    }));
+
+    const r = runDev('--read');
+    expect(r.stdout).toContain('LAST_PROJECT: realproj');
+    expect(r.stdout).toContain('LAST_ASSIGNMENT: real assignment text');
+    expect(r.stdout).toContain('LAST_DESIGN_TITLE: plans/real.md');
+    // Resources still aggregate into RESOURCES_SHOWN.
+    expect(r.stdout).toContain('RESOURCES_SHOWN: url1');
+  });
+});
+
+// -----------------------------------------------------------------------
+// SESSION_COUNT / TIER / NUDGE_ELIGIBLE must ignore mode:resources entries.
+//
+// Phase 6 of /office-hours auto-appends one (or more) mode:resources bookkeeping
+// entries every run, to dedupe which founder-resource links the user has seen.
+// Those are not sessions. Counting them inflated SESSION_COUNT (and therefore
+// TIER) and pushed NUDGE_ELIGIBLE over its threshold from bookkeeping alone —
+// e.g. a single real session plus three closings reported as tier `regular`
+// with the builder->founder nudge armed.
+// -----------------------------------------------------------------------
+
+describe('gstack-developer-profile resources entries do not inflate count/tier/nudge', () => {
+  function logStartup(extra: Record<string, unknown> = {}) {
+    return runDev('--log-session', JSON.stringify({
+      date: '2026-05-20T00:00:00Z', mode: 'startup', project_slug: 'p',
+      signal_count: 5, signals: ['a', 'b', 'c', 'd', 'e'], ...extra,
+    }));
+  }
+  function logResources(i: number) {
+    return runDev('--log-session', JSON.stringify({
+      date: '2026-05-20T01:00:00Z', mode: 'resources', project_slug: 'p',
+      resources_shown: [`url${i}`],
+    }));
+  }
+
+  test('SESSION_COUNT counts only real sessions, not resources entries', () => {
+    logStartup();
+    logResources(1);
+    logResources(2);
+    logResources(3);
+    const r = runDev('--read');
+    expect(r.stdout).toContain('SESSION_COUNT: 1');
+    expect(r.stdout).toContain('TIER: welcome_back');
+  });
+
+  test('TIER is not bumped to regular by resources bookkeeping', () => {
+    // 3 real sessions = welcome_back; adding resources entries must not reach the
+    // 4-session `regular` threshold.
+    logStartup();
+    logStartup();
+    logStartup();
+    for (let i = 0; i < 4; i++) logResources(i);
+    const r = runDev('--read');
+    expect(r.stdout).toContain('SESSION_COUNT: 3');
+    expect(r.stdout).toContain('TIER: welcome_back');
+  });
+
+  test('NUDGE_ELIGIBLE stays false when builder-session bar is unmet despite resources noise', () => {
+    // One startup session carrying 5 signals, plus resources entries. builderSessions
+    // (mode === "builder") is 0, so the nudge must not arm regardless of signal count.
+    logStartup();
+    logResources(1);
+    logResources(2);
+    logResources(3);
+    const r = runDev('--read');
+    expect(r.stdout).toContain('NUDGE_ELIGIBLE: false');
+  });
+
+  test('NUDGE_ELIGIBLE arms on 3 real builder sessions with enough signals', () => {
+    runDev('--log-session', JSON.stringify({
+      date: '2026-05-20T00:00:00Z', mode: 'builder', project_slug: 'p', signals: ['a', 'b'],
+    }));
+    runDev('--log-session', JSON.stringify({
+      date: '2026-05-21T00:00:00Z', mode: 'builder', project_slug: 'p', signals: ['c', 'd'],
+    }));
+    runDev('--log-session', JSON.stringify({
+      date: '2026-05-22T00:00:00Z', mode: 'builder', project_slug: 'p', signals: ['e'],
+    }));
+    logResources(1); // bookkeeping must not change the verdict either way
+    const r = runDev('--read');
+    expect(r.stdout).toContain('NUDGE_ELIGIBLE: true');
+  });
+
+  // Boundary cases around the two `>=` gates, so a future >= → > regression
+  // (or a re-loosening of the builder filter) is caught, not just the happy path.
+  function logBuilder(signals: string[], day = 20) {
+    return runDev('--log-session', JSON.stringify({
+      date: `2026-05-${day}T00:00:00Z`, mode: 'builder', project_slug: 'p', signals,
+    }));
+  }
+
+  test('NUDGE_ELIGIBLE stays false at 2 builder sessions (below the 3-session gate)', () => {
+    logBuilder(['a', 'b', 'c'], 20);
+    logBuilder(['d', 'e', 'f'], 21); // 6 signals total — signal gate met, session gate is not
+    logResources(1);
+    const r = runDev('--read');
+    expect(r.stdout).toContain('NUDGE_ELIGIBLE: false');
+  });
+
+  test('NUDGE_ELIGIBLE stays false at 3 builder sessions with too few signals', () => {
+    logBuilder(['a'], 20);
+    logBuilder(['b'], 21);
+    logBuilder(['c', 'd'], 22); // 4 signals total — session gate met, signal gate (>=5) is not
+    const r = runDev('--read');
+    expect(r.stdout).toContain('NUDGE_ELIGIBLE: false');
+  });
+
+  test('TIER reaches regular at 4 real sessions even when resources entries are present', () => {
+    logStartup();
+    logStartup();
+    logStartup();
+    logStartup();
+    for (let i = 0; i < 5; i++) logResources(i);
+    const r = runDev('--read');
+    expect(r.stdout).toContain('SESSION_COUNT: 4');
+    expect(r.stdout).toContain('TIER: regular');
+  });
+
+  test('TIER stays regular at 7 real sessions and crosses to inner_circle at 8 (resources ignored)', () => {
+    // Upper-tier boundary: the >=8 inner_circle gate must key off real sessions
+    // only, so a pile of resources bookkeeping can never tip a regular into the
+    // inner circle, and 8 genuine sessions still reach it.
+    for (let i = 0; i < 7; i++) logStartup();
+    for (let i = 0; i < 6; i++) logResources(i); // 13 raw rows; pre-fix would read inner_circle
+    let r = runDev('--read');
+    expect(r.stdout).toContain('SESSION_COUNT: 7');
+    expect(r.stdout).toContain('TIER: regular');
+
+    logStartup(); // 8th real session
+    r = runDev('--read');
+    expect(r.stdout).toContain('SESSION_COUNT: 8');
+    expect(r.stdout).toContain('TIER: inner_circle');
+  });
+
+  test('CROSS_PROJECT ignores a trailing resources entry on a different project', () => {
+    // The last two REAL sessions are the same project, so CROSS_PROJECT is false.
+    // A trailing resources row carrying a different project_slug must not become
+    // the `last` entry and flip CROSS_PROJECT true off bookkeeping.
+    logStartup({ project_slug: 'samep' });
+    logStartup({ project_slug: 'samep' });
+    runDev('--log-session', JSON.stringify({
+      date: '2026-05-20T02:00:00Z', mode: 'resources', project_slug: 'otherp',
+      resources_shown: ['url1'],
+    }));
+    const r = runDev('--read');
+    expect(r.stdout).toContain('CROSS_PROJECT: false');
+    expect(r.stdout).toContain('LAST_PROJECT: samep');
+  });
+});
+
+
+// -----------------------------------------------------------------------
+// --reconcile: backfill tenure from office-hours timeline history (#2657)
+// -----------------------------------------------------------------------
+
+describe('gstack-developer-profile --reconcile', () => {
+  const completed = (ts: string, extra: Record<string, unknown> = {}) =>
+    JSON.stringify({ skill: 'office-hours', event: 'completed', ts, ...extra });
+
+  function writeTimeline(slug: string, lines: string[]) {
+    const dir = path.join(tmpHome, 'projects', slug);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'timeline.jsonl'), lines.join('\n') + '\n');
+  }
+
+  function logSession(entry: Record<string, unknown>) {
+    expect(runDev('--log-session', JSON.stringify({ mode: 'builder', signal_count: 0, signals: [], ...entry })).status).toBe(0);
+  }
+
+  const readKey = (out: string, key: string) => out.match(new RegExp(`^${key}: (.*)$`, 'm'))?.[1];
+
+  test('backfills one row per office-hours completed run and counts it for tenure', () => {
+    writeTimeline('alpha', [
+      completed('2026-09-01T10:00:00Z'),
+      JSON.stringify({ skill: 'office-hours', event: 'started', ts: '2026-09-02T09:00:00Z' }),
+      completed('2026-09-02T10:00:00Z'),
+      JSON.stringify({ skill: 'review', event: 'completed', ts: '2026-09-03T10:00:00Z' }),
+    ]);
+    writeTimeline('beta', [completed('2026-09-04T10:00:00Z')]);
+    const r = runDev('--reconcile');
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain('RECONCILE: 3 backfilled from 3 office-hours run(s)');
+    const sessions = readProfile().sessions as Array<Record<string, unknown>>;
+    expect(sessions).toHaveLength(3);
+    expect(sessions[2]).toEqual({
+      date: '2026-09-04T10:00:00Z', mode: 'unknown', project_slug: 'beta',
+      signal_count: 0, signals: [], backfilled: true,
+    });
+    const read = runDev('--read').stdout;
+    expect(readKey(read, 'SESSION_COUNT')).toBe('3');
+    expect(readKey(read, 'TIER')).toBe('welcome_back');
+  });
+
+  test('a second run adds nothing and leaves the profile file untouched', () => {
+    writeTimeline('alpha', [completed('2026-09-01T10:00:00Z'), completed('2026-09-05T10:00:00Z')]);
+    expect(runDev('--reconcile').stdout).toContain('RECONCILE: 2 backfilled');
+    const file = path.join(tmpHome, 'developer-profile.json');
+    const before = fs.readFileSync(file, 'utf-8');
+    const old = new Date('2026-01-01T00:00:00Z');
+    fs.utimesSync(file, old, old);
+    expect(runDev('--reconcile').stdout).toContain('RECONCILE: 0 backfilled from 2 office-hours run(s)');
+    expect(fs.readFileSync(file, 'utf-8')).toBe(before);
+    expect(fs.statSync(file).mtimeMs).toBe(old.getTime());
+  });
+
+  test('a logged session minutes before the run across an hour boundary covers it, per project', () => {
+    logSession({ date: '2026-09-01T10:55:00Z', ts: '2026-09-01T10:55:00Z', project_slug: 'alpha' });
+    writeTimeline('alpha', [completed('2026-09-01T11:20:00Z')]);
+    writeTimeline('beta', [completed('2026-09-01T11:20:00Z')]);
+    expect(runDev('--reconcile').stdout).toContain('RECONCILE: 1 backfilled from 2 office-hours run(s)');
+    const backfilled = (readProfile().sessions as Array<Record<string, unknown>>).filter(s => s.backfilled);
+    expect(backfilled.map(s => s.project_slug)).toEqual(['beta']);
+  });
+
+  test('a long session logged hours before completion is not double-counted; garbage durations are not trusted', () => {
+    logSession({ date: '2026-09-01T09:00:00Z', ts: '2026-09-01T09:00:00Z', project_slug: 'alpha' });
+    logSession({ date: '2026-09-02T09:00:00Z', ts: '2026-09-02T09:00:00Z', project_slug: 'alpha' });
+    writeTimeline('alpha', [
+      completed('2026-09-01T12:00:00Z', { duration_s: '11000' }),
+      completed('2026-09-02T19:00:00Z', { duration_s: '40000' }),
+    ]);
+    expect(runDev('--reconcile').stdout).toContain('RECONCILE: 1 backfilled from 2 office-hours run(s)');
+    const backfilled = (readProfile().sessions as Array<Record<string, unknown>>).filter(s => s.backfilled);
+    expect(backfilled.map(s => s.date)).toEqual(['2026-09-02T19:00:00Z']);
+  });
+
+  test('malformed timeline lines are skipped', () => {
+    writeTimeline('alpha', ['{not json', 'null', completed('not-a-date'), completed('2026-09-01T10:00:00Z')]);
+    const r = runDev('--reconcile');
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain('RECONCILE: 1 backfilled from 1 office-hours run(s)');
+  });
+
+  test('backfilled rows never surface as LAST_*, DESIGN_* or CROSS_PROJECT', () => {
+    logSession({
+      date: '2026-09-01T10:00:00Z', ts: '2026-09-01T10:00:00Z', project_slug: 'alpha',
+      assignment: 'Talk to five users', design_doc: 'docs/alpha-design.md',
+    });
+    writeTimeline('beta', [completed('2026-09-03T10:00:00Z'), completed('2026-09-04T10:00:00Z')]);
+    expect(runDev('--reconcile').stdout).toContain('RECONCILE: 2 backfilled');
+    const read = runDev('--read').stdout;
+    expect(readKey(read, 'SESSION_COUNT')).toBe('3');
+    expect(readKey(read, 'LAST_PROJECT')).toBe('alpha');
+    expect(readKey(read, 'LAST_ASSIGNMENT')).toBe('Talk to five users');
+    expect(readKey(read, 'LAST_DESIGN_TITLE')).toBe('docs/alpha-design.md');
+    expect(readKey(read, 'DESIGN_COUNT')).toBe('1');
+    expect(readKey(read, 'CROSS_PROJECT')).toBe('false');
+  });
+
+  test('a backfill-only profile reaches welcome_back with empty LAST_*', () => {
+    writeTimeline('alpha', [completed('2026-09-01T10:00:00Z')]);
+    runDev('--reconcile');
+    const read = runDev('--read').stdout;
+    expect(readKey(read, 'TIER')).toBe('welcome_back');
+    expect(readKey(read, 'LAST_PROJECT')).toBe('');
+    expect(readKey(read, 'LAST_ASSIGNMENT')).toBe('');
   });
 });

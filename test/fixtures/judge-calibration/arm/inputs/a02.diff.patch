@@ -1,0 +1,50 @@
+diff --git a/reports/export.py b/reports/export.py
+index 1cd3d64..e75bed7 100644
+--- a/reports/export.py
++++ b/reports/export.py
+@@ -1,12 +1,29 @@
+ from pathlib import Path
+ 
+ 
++class LineTransform:
++    """A post-processing step applied to every rendered report line."""
++
++    def apply(self, line: str) -> str:
++        raise NotImplementedError
++
++
++class StripTrailingWhitespace(LineTransform):
++    def apply(self, line: str) -> str:
++        return line.rstrip()
++
++
++DEFAULT_TRANSFORMS: list[LineTransform] = [StripTrailingWhitespace()]
++
++
+ def render_rows(rows):
+     for row in rows:
+         yield f"{row['region']:<12} {row['orders']:>8} {row['note']}"
+ 
+ 
+-def export_report(rows, out_path: Path) -> None:
++def export_report(rows, out_path: Path, transforms: list[LineTransform] = DEFAULT_TRANSFORMS) -> None:
+     with out_path.open("w", encoding="utf-8") as fh:
+         for line in render_rows(rows):
++            for transform in transforms:
++                line = transform.apply(line)
+             fh.write(line + "\n")
+diff --git a/tests/test_export.py b/tests/test_export.py
+index 35fee65..2d44f86 100644
+--- a/tests/test_export.py
++++ b/tests/test_export.py
+@@ -5,3 +5,10 @@ def test_writes_one_line_per_row(tmp_path):
+     out = tmp_path / "r.txt"
+     export_report([{"region": "west", "orders": 3, "note": "ok"}], out)
+     assert len(out.read_text().splitlines()) == 1
++
++
++def test_no_trailing_whitespace(tmp_path):
++    out = tmp_path / "r.txt"
++    export_report([{"region": "east", "orders": 12, "note": ""}], out)
++    for line in out.read_text().splitlines():
++        assert line == line.rstrip()

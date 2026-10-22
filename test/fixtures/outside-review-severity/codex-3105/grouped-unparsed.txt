@@ -1,0 +1,8 @@
+Plan review.
+
+## P1/P2 findings
+
+- The guard trusts the payload without a flush check.
+- Rule-id confirmation cannot bind exact bytes.
+
+Verdict: revise

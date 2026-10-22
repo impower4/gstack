@@ -1,0 +1,4 @@
+The plan does not say how the queue drains on shutdown, and the retry path
+can double-send. Both need an answer before implementation.
+
+Verdict: not ready

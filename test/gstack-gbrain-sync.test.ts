@@ -8,7 +8,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync, mkdirSync, chmodSync } from "fs";
+import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync, mkdirSync, chmodSync, symlinkSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { spawnSync } from "child_process";
@@ -60,6 +60,14 @@ describe("gstack-gbrain-sync CLI", () => {
 
     expect(source).not.toContain('command -v gbrain');
     expect(source).toContain("localEngineStatus");
+  });
+
+  it("uses GBrain's config environment when resolving dream sources", () => {
+    const source = readFileSync(SCRIPT, "utf-8");
+
+    expect(source).not.toContain("resolveCodeSourceId(root, process.env)");
+    expect(source).toContain("resolveCodeSourceId(root, gbrainEnv)");
+    expect(source).toContain("readCycleStatus(resolveCodeSourceId(root, gbrainEnv), gbrainEnv)");
   });
 
   it("--dry-run with --code-only reports the code import preview only", () => {
@@ -122,6 +130,149 @@ describe("gstack-gbrain-sync CLI", () => {
     rmSync(home, { recursive: true, force: true });
   });
 
+  it("uses a local .gbrain-source in dry-run without spawning gbrain", () => {
+    const home = makeTestHome();
+    const gstackHome = join(home, ".gstack");
+    const bindir = mkdtempSync(join(tmpdir(), "gstack-pinned-source-bin-"));
+    const repo = mkdtempSync(join(tmpdir(), "gstack-pinned-source-repo-"));
+    const commandLog = join(home, "gbrain-commands.log");
+    mkdirSync(gstackHome, { recursive: true });
+    spawnSync("git", ["init", "--quiet", "-b", "main"], { cwd: repo, timeout: 30_000 });
+    writeFileSync(join(repo, ".gbrain-source"), "client-acme-app\n");
+    writeFileSync(join(bindir, "gbrain"), `#!/bin/sh
+printf '%s\\n' "$*" >> "$GSTACK_TEST_GBRAIN_LOG"
+exit 99
+`);
+    chmodSync(join(bindir, "gbrain"), 0o755);
+
+    const r = spawnSync("bun", [SCRIPT, "--dry-run", "--code-only", "--quiet"], {
+      encoding: "utf-8",
+      timeout: 60000,
+      cwd: repo,
+      env: {
+        ...process.env,
+        HOME: home,
+        GSTACK_HOME: gstackHome,
+        GSTACK_TEST_GBRAIN_LOG: commandLog,
+        PATH: `${bindir}:${process.env.PATH || ""}`,
+      },
+    });
+
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain("gbrain sync --strategy code --source client-acme-app");
+    expect(r.stdout).not.toContain("gbrain sources add");
+    expect(r.stdout).not.toContain("--federated");
+    expect(existsSync(commandLog)).toBe(false);
+    rmSync(repo, { recursive: true, force: true });
+    rmSync(bindir, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  it("keeps a symlink-equivalent pinned source registered as-is", () => {
+    const home = makeTestHome();
+    const gstackHome = join(home, ".gstack");
+    const repo = mkdtempSync(join(tmpdir(), "gstack-pinned-source-repo-"));
+    const linkDir = mkdtempSync(join(tmpdir(), "gstack-pinned-source-link-"));
+    const link = join(linkDir, "repo");
+    const bindir = mkdtempSync(join(tmpdir(), "gstack-pinned-source-bin-"));
+    const commandLog = join(home, "gbrain-commands.log");
+    mkdirSync(gstackHome, { recursive: true });
+    mkdirSync(join(home, ".gbrain"), { recursive: true });
+    writeFileSync(join(home, ".gbrain", "config.json"), JSON.stringify({ engine: "pglite", database_url: "pglite:///test" }));
+    spawnSync("git", ["init", "--quiet", "-b", "main"], { cwd: repo, timeout: 30_000 });
+    writeFileSync(join(repo, ".gbrain-source"), "client-acme-app\n");
+    symlinkSync(repo, link, "dir");
+    writeFileSync(join(bindir, "gbrain"), `#!/bin/sh
+printf '%s\\n' "$*" >> "$GSTACK_TEST_GBRAIN_LOG"
+case "$*" in
+  --version) echo 'gbrain 0.42.0.0' ;;
+  "sources list --json") echo '{"sources":[{"id":"client-acme-app","local_path":"${link}","page_count":1}]}' ;;
+  "sync --strategy code --source client-acme-app --no-pull"|"sources attach client-acme-app") ;;
+  *) echo "unexpected gbrain command: $*" >&2; exit 1 ;;
+esac
+`);
+    chmodSync(join(bindir, "gbrain"), 0o755);
+    // #2685: this case is a real (non-dry-run) --code-only child, so it hits
+    // detectAutopilot's PATH-resolved `pgrep -f "gbrain autopilot"`. A live
+    // host autopilot is a correct #1734 refuse — the test cannot inject
+    // processRunning. Stub pgrep to "no match" so the pin is about the
+    // symlink, not the operator's daemon. Blank GBRAIN_HOME so an inherited
+    // lock under $GBRAIN_HOME/.gbrain cannot refuse before pgrep. Do not add
+    // a production env hatch.
+    writeFileSync(join(bindir, "pgrep"), "#!/bin/sh\nexit 1\n");
+    chmodSync(join(bindir, "pgrep"), 0o755);
+
+    const r = spawnSync("bun", [SCRIPT, "--code-only", "--quiet"], {
+      encoding: "utf-8",
+      timeout: 60000,
+      cwd: link,
+      env: {
+        ...process.env,
+        HOME: home,
+        GSTACK_HOME: gstackHome,
+        GBRAIN_HOME: "",
+        GSTACK_TEST_GBRAIN_LOG: commandLog,
+        PATH: `${bindir}:${process.env.PATH || ""}`,
+      },
+    });
+
+    const commands = readFileSync(commandLog, "utf-8");
+    expect(r.status).toBe(0);
+    expect(commands).toContain("sync --strategy code --source client-acme-app --no-pull");
+    expect(commands).toContain("sources attach client-acme-app");
+    expect(commands).not.toMatch(/^sources (add|remove) /m);
+    rmSync(repo, { recursive: true, force: true });
+    rmSync(linkDir, { recursive: true, force: true });
+    rmSync(bindir, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  it("uses a local pin for a dry-run dream without spawning gbrain", () => {
+    const home = makeTestHome();
+    const gstackHome = join(home, ".gstack");
+    const bindir = mkdtempSync(join(tmpdir(), "gstack-pinned-dream-bin-"));
+    const repo = mkdtempSync(join(tmpdir(), "gstack-pinned-dream-repo-"));
+    mkdirSync(gstackHome, { recursive: true });
+    spawnSync("git", ["init", "--quiet", "-b", "main"], { cwd: repo, timeout: 30_000 });
+    writeFileSync(join(repo, ".gbrain-source"), "client-acme-app\n");
+    writeFileSync(join(bindir, "gbrain"), "#!/bin/sh\nexit 99\n");
+    chmodSync(join(bindir, "gbrain"), 0o755);
+
+    const r = spawnSync("bun", [SCRIPT, "--dry-run", "--dream", "--no-code", "--no-memory", "--no-brain-sync", "--quiet"], {
+      encoding: "utf-8",
+      timeout: 60000,
+      cwd: repo,
+      env: { ...process.env, HOME: home, GSTACK_HOME: gstackHome, PATH: `${bindir}:${process.env.PATH || ""}` },
+    });
+
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain("gbrain dream --source client-acme-app");
+    rmSync(repo, { recursive: true, force: true });
+    rmSync(bindir, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  it("falls back to a derived source when .gbrain-source cannot be read", () => {
+    const home = makeTestHome();
+    const gstackHome = join(home, ".gstack");
+    const repo = mkdtempSync(join(tmpdir(), "gstack-unreadable-pin-repo-"));
+    mkdirSync(gstackHome, { recursive: true });
+    spawnSync("git", ["init", "--quiet", "-b", "main"], { cwd: repo, timeout: 30_000 });
+    mkdirSync(join(repo, ".gbrain-source"));
+
+    const r = spawnSync("bun", [SCRIPT, "--dry-run", "--code-only", "--quiet"], {
+      encoding: "utf-8",
+      timeout: 60000,
+      cwd: repo,
+      env: { ...process.env, HOME: home, GSTACK_HOME: gstackHome },
+    });
+
+    expect(r.status).toBe(0);
+    expect(r.stdout).toMatch(/gbrain sources add gstack-code-/);
+    rmSync(repo, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+  });
+
   it("derived source ids are gbrain-valid (≤32 chars, alnum + interior hyphens, no dots) for any remote", () => {
     // gbrain enforces source ids to be 1-32 lowercase alnum chars with optional interior
     // hyphens. Pre-fix, the slug came from canonicalizeRemote() with only `/` and
@@ -141,8 +292,8 @@ describe("gstack-gbrain-sync CLI", () => {
       const gstackHome = join(home, ".gstack");
       mkdirSync(gstackHome, { recursive: true });
       const repo = mkdtempSync(join(tmpdir(), "gstack-source-id-repo-"));
-      spawnSync("git", ["init", "--quiet", "-b", "main"], { cwd: repo });
-      spawnSync("git", ["remote", "add", "origin", remote], { cwd: repo });
+      spawnSync("git", ["init", "--quiet", "-b", "main"], { cwd: repo, timeout: 30_000 });
+      spawnSync("git", ["remote", "add", "origin", remote], { cwd: repo, timeout: 30_000 });
 
       const r = spawnSync("bun", [SCRIPT, "--dry-run", "--code-only", "--quiet"], {
         encoding: "utf-8",
@@ -171,7 +322,7 @@ describe("gstack-gbrain-sync CLI", () => {
     const gstackHome = join(home, ".gstack");
     mkdirSync(gstackHome, { recursive: true });
     const repo = mkdtempSync(join(tmpdir(), "gstack-no-origin-"));
-    spawnSync("git", ["init", "--quiet", "-b", "main"], { cwd: repo });
+    spawnSync("git", ["init", "--quiet", "-b", "main"], { cwd: repo, timeout: 30_000 });
     // No `git remote add origin` — this is the no-remote case.
 
     const r = spawnSync("bun", [SCRIPT, "--dry-run", "--code-only", "--quiet"], {
@@ -206,7 +357,7 @@ describe("gstack-gbrain-sync CLI", () => {
     const parent = mkdtempSync(join(tmpdir(), "gstack-empty-base-"));
     const repo = join(parent, "___");
     mkdirSync(repo);
-    spawnSync("git", ["init", "--quiet", "-b", "main"], { cwd: repo });
+    spawnSync("git", ["init", "--quiet", "-b", "main"], { cwd: repo, timeout: 30_000 });
     // No `origin` remote — forces the basename-fallback path.
 
     const r = spawnSync("bun", [SCRIPT, "--dry-run", "--code-only", "--quiet"], {
@@ -240,8 +391,8 @@ describe("gstack-gbrain-sync CLI", () => {
     const gstackHome = join(home, ".gstack");
     mkdirSync(gstackHome, { recursive: true });
     const repo = mkdtempSync(join(tmpdir(), "gstack-host-collide-"));
-    spawnSync("git", ["init", "--quiet", "-b", "main"], { cwd: repo });
-    spawnSync("git", ["remote", "add", "origin", "https://github.com/example/multihost.git"], { cwd: repo });
+    spawnSync("git", ["init", "--quiet", "-b", "main"], { cwd: repo, timeout: 30_000 });
+    spawnSync("git", ["remote", "add", "origin", "https://github.com/example/multihost.git"], { cwd: repo, timeout: 30_000 });
 
     // Dry-run still gates the code stage on `command -v gbrain`. Drop a no-op
     // shim on PATH so the stage runs (we only assert the preview line, never
@@ -393,6 +544,36 @@ describe("gstack-gbrain-sync CLI", () => {
     rmSync(home, { recursive: true, force: true });
   });
 
+  // A5 (#2670): a successful git push is not gbrain indexing.
+  for (const [pageCount, ok, expected] of [
+    [0, false, "gbrain source fixture-artifacts has 0 indexed pages. Fix: gbrain sync --source fixture-artifacts"],
+    [7, true, "curated artifacts pushed; gbrain source fixture-artifacts has 7 pages"],
+  ] as const) {
+    it(`brain-sync stage reports the artifacts source's ${pageCount} indexed pages (ok=${ok})`, () => {
+      const home = makeTestHome();
+      const gstackHome = join(home, ".gstack");
+      const fakeBin = join(home, "fake-bin");
+      mkdirSync(gstackHome, { recursive: true });
+      mkdirSync(fakeBin, { recursive: true });
+      writeFileSync(join(fakeBin, "gbrain"), `#!/bin/sh
+case "$*" in
+  "sources list --json") printf '%s\\n' '{"sources":[{"id":"fixture-artifacts","local_path":"${gstackHome}","page_count":${pageCount}}]}' ;;
+  *) exit 1 ;;
+esac
+`);
+      chmodSync(join(fakeBin, "gbrain"), 0o755);
+      const r = runScript(["--incremental", "--no-code", "--no-memory", "--quiet"], {
+        HOME: home, GSTACK_HOME: gstackHome, PATH: `${fakeBin}:${process.env.PATH || ""}`,
+      });
+      const state = JSON.parse(readFileSync(join(gstackHome, ".gbrain-sync-state.json"), "utf-8"));
+      const stage = state.last_stages.find((entry: { name: string }) => entry.name === "brain-sync");
+      expect(stage.summary).toContain(expected);
+      expect(stage.ok).toBe(ok);
+      expect(r.exitCode).toBe(ok ? 0 : 1);
+      rmSync(home, { recursive: true, force: true });
+    });
+  }
+
   it("brain-sync stage resolves the sibling binary, not a HOME-rooted path", () => {
     // Regression for Codex M9: pre-fix the orchestrator looked up
     // ~/.claude/skills/gstack/bin/gstack-brain-sync, which silently no-op'd
@@ -428,8 +609,8 @@ describe("gstack-gbrain-sync CLI", () => {
     const repoA = mkdtempSync(join(tmpdir(), "gstack-worktree-a-"));
     const repoB = mkdtempSync(join(tmpdir(), "gstack-worktree-b-"));
     for (const repo of [repoA, repoB]) {
-      spawnSync("git", ["init", "--quiet", "-b", "main"], { cwd: repo });
-      spawnSync("git", ["remote", "add", "origin", remote], { cwd: repo });
+      spawnSync("git", ["init", "--quiet", "-b", "main"], { cwd: repo, timeout: 30_000 });
+      spawnSync("git", ["remote", "add", "origin", remote], { cwd: repo, timeout: 30_000 });
     }
 
     const idOf = (cwd: string): string => {
@@ -465,8 +646,8 @@ describe("gstack-gbrain-sync CLI", () => {
     const gstackHome = join(home, ".gstack");
     mkdirSync(gstackHome, { recursive: true });
     const repo = mkdtempSync(join(tmpdir(), "gstack-worktree-stable-"));
-    spawnSync("git", ["init", "--quiet", "-b", "main"], { cwd: repo });
-    spawnSync("git", ["remote", "add", "origin", remote], { cwd: repo });
+    spawnSync("git", ["init", "--quiet", "-b", "main"], { cwd: repo, timeout: 30_000 });
+    spawnSync("git", ["remote", "add", "origin", remote], { cwd: repo, timeout: 30_000 });
 
     const idOf = (): string => {
       const r = spawnSync("bun", [SCRIPT, "--dry-run", "--code-only", "--quiet"], {
@@ -494,8 +675,8 @@ describe("gstack-gbrain-sync CLI", () => {
     const gstackHome = join(home, ".gstack");
     mkdirSync(gstackHome, { recursive: true });
     const repo = mkdtempSync(join(tmpdir(), "gstack-legacy-cleanup-"));
-    spawnSync("git", ["init", "--quiet", "-b", "main"], { cwd: repo });
-    spawnSync("git", ["remote", "add", "origin", "https://github.com/garrytan/gstack.git"], { cwd: repo });
+    spawnSync("git", ["init", "--quiet", "-b", "main"], { cwd: repo, timeout: 30_000 });
+    spawnSync("git", ["remote", "add", "origin", "https://github.com/garrytan/gstack.git"], { cwd: repo, timeout: 30_000 });
 
     const r = spawnSync("bun", [SCRIPT, "--dry-run", "--code-only", "--quiet"], {
       encoding: "utf-8",
@@ -530,8 +711,8 @@ describe("gstack-gbrain-sync CLI", () => {
     const gstackHome = join(home, ".gstack");
     mkdirSync(gstackHome, { recursive: true });
     const repo = mkdtempSync(join(tmpdir(), "gstack-attach-preview-"));
-    spawnSync("git", ["init", "--quiet", "-b", "main"], { cwd: repo });
-    spawnSync("git", ["remote", "add", "origin", "https://github.com/garrytan/gstack.git"], { cwd: repo });
+    spawnSync("git", ["init", "--quiet", "-b", "main"], { cwd: repo, timeout: 30_000 });
+    spawnSync("git", ["remote", "add", "origin", "https://github.com/garrytan/gstack.git"], { cwd: repo, timeout: 30_000 });
 
     const r = spawnSync("bun", [SCRIPT, "--dry-run", "--code-only", "--quiet"], {
       encoding: "utf-8",
@@ -586,8 +767,8 @@ describe("derivePathOnlyHashLegacyId", () => {
     // legacy id regardless of $GSTACK_HOSTNAME, because the pre-#1468 hash
     // didn't include hostname.
     const repo = mkdtempSync(join(tmpdir(), "gstack-legacy-id-"));
-    spawnSync("git", ["init", "--quiet", "-b", "main"], { cwd: repo });
-    spawnSync("git", ["remote", "add", "origin", "https://github.com/example/legacy-test.git"], { cwd: repo });
+    spawnSync("git", ["init", "--quiet", "-b", "main"], { cwd: repo, timeout: 30_000 });
+    spawnSync("git", ["remote", "add", "origin", "https://github.com/example/legacy-test.git"], { cwd: repo, timeout: 30_000 });
 
     const cwd = process.cwd();
     try {
@@ -613,8 +794,8 @@ describe("derivePathOnlyHashLegacyId", () => {
     // host-fold id must differ for any non-empty hostname, so the migration
     // can detect + clean up the orphan.
     const repo = mkdtempSync(join(tmpdir(), "gstack-legacy-id-distinct-"));
-    spawnSync("git", ["init", "--quiet", "-b", "main"], { cwd: repo });
-    spawnSync("git", ["remote", "add", "origin", "https://github.com/example/distinct.git"], { cwd: repo });
+    spawnSync("git", ["init", "--quiet", "-b", "main"], { cwd: repo, timeout: 30_000 });
+    spawnSync("git", ["remote", "add", "origin", "https://github.com/example/distinct.git"], { cwd: repo, timeout: 30_000 });
 
     const cwd = process.cwd();
     try {
@@ -749,10 +930,10 @@ describe("constrainSourceId truncation (hyphen-boundary cut)", () => {
     const gstackHome = join(home, ".gstack");
     mkdirSync(gstackHome, { recursive: true });
     const repo = mkdtempSync(join(tmpdir(), "gstack-hyphen-cut-"));
-    spawnSync("git", ["init", "--quiet", "-b", "main"], { cwd: repo });
+    spawnSync("git", ["init", "--quiet", "-b", "main"], { cwd: repo, timeout: 30_000 });
     // Remote chosen to be long enough that constrainSourceId truncates and
     // the boundary lands inside the word `skill`.
-    spawnSync("git", ["remote", "add", "origin", "https://github.com/drummerms-av-sow-wiz/skill-270c0001.git"], { cwd: repo });
+    spawnSync("git", ["remote", "add", "origin", "https://github.com/drummerms-av-sow-wiz/skill-270c0001.git"], { cwd: repo, timeout: 30_000 });
 
     const r = spawnSync("bun", [SCRIPT, "--dry-run", "--code-only", "--quiet"], {
       encoding: "utf-8",
@@ -783,8 +964,8 @@ describe("constrainSourceId truncation (hyphen-boundary cut)", () => {
     const gstackHome = join(home, ".gstack");
     mkdirSync(gstackHome, { recursive: true });
     const repo = mkdtempSync(join(tmpdir(), "gstack-https-period-"));
-    spawnSync("git", ["init", "--quiet", "-b", "main"], { cwd: repo });
-    spawnSync("git", ["remote", "add", "origin", "https://github.com/foo/bar.git"], { cwd: repo });
+    spawnSync("git", ["init", "--quiet", "-b", "main"], { cwd: repo, timeout: 30_000 });
+    spawnSync("git", ["remote", "add", "origin", "https://github.com/foo/bar.git"], { cwd: repo, timeout: 30_000 });
 
     const r = spawnSync("bun", [SCRIPT, "--dry-run", "--code-only", "--quiet"], {
       encoding: "utf-8",
@@ -836,5 +1017,125 @@ describe("sourceLocalPath", () => {
       "sources list --json": { exit: 2, stderr: "db unreachable" },
     });
     expect(sourceLocalPath("any-id", envWithBindir(bindir))).toBeNull();
+  });
+
+  // gbrain v0.20+ wraps the response as `{sources: [...]}`. Older versions
+  // returned a flat array. sourceLocalPath was returning null (or crashing
+  // with `list.find is not a function` upstream) because it only handled
+  // the flat-array shape. Pin both shapes here.
+  it("handles {sources: [...]} wrapped shape (gbrain v0.20+)", () => {
+    makeShim(bindir, {
+      "sources list --json": {
+        stdout: JSON.stringify({
+          sources: [
+            { id: "other-source", local_path: "/x" },
+            { id: "target-id", local_path: "/repo/match" },
+          ],
+        }),
+      },
+    });
+    expect(sourceLocalPath("target-id", envWithBindir(bindir))).toBe("/repo/match");
+  });
+
+  it("returns null when the source is missing in the wrapped shape", () => {
+    makeShim(bindir, {
+      "sources list --json": { stdout: JSON.stringify({ sources: [] }) },
+    });
+    expect(sourceLocalPath("missing-id", envWithBindir(bindir))).toBeNull();
+  });
+});
+
+// #2985: managed gbrain (>= 0.51) refuses `gbrain sync` without --no-pull. The
+// fake mirrors that contract; a real (non-dry-run) code stage must pass it,
+// surface gbrain's last stderr line on failure, and never retry without it.
+describe("code stage --no-pull + stderr tail (#2985)", () => {
+  function runCodeStage(syncBody: string, extraArgs: string[] = []) {
+    const home = makeTestHome();
+    const gstackHome = join(home, ".gstack");
+    const repo = mkdtempSync(join(tmpdir(), "gstack-nopull-repo-"));
+    const bindir = mkdtempSync(join(tmpdir(), "gstack-nopull-bin-"));
+    const commandLog = join(home, "gbrain-commands.log");
+    mkdirSync(gstackHome, { recursive: true });
+    mkdirSync(join(home, ".gbrain"), { recursive: true });
+    writeFileSync(join(home, ".gbrain", "config.json"), JSON.stringify({ engine: "pglite", database_url: "pglite:///test" }));
+    spawnSync("git", ["init", "--quiet", "-b", "main"], { cwd: repo, timeout: 30_000 });
+    writeFileSync(join(repo, ".gbrain-source"), "client-acme-app\n");
+    writeFileSync(join(bindir, "gbrain"), `#!/bin/sh
+printf '%s\\n' "$*" >> "$GSTACK_TEST_GBRAIN_LOG"
+case "$1 $2" in
+  "--version ") echo 'gbrain 0.59.0.0' ;;
+  "sources list") echo '{"sources":[{"id":"client-acme-app","local_path":"${repo}","page_count":1}]}' ;;
+  "sources attach") ;;
+  "sync --strategy")
+${syncBody}
+    ;;
+  *) echo "unexpected gbrain command: $*" >&2; exit 1 ;;
+esac
+`);
+    chmodSync(join(bindir, "gbrain"), 0o755);
+    writeFileSync(join(bindir, "pgrep"), "#!/bin/sh\nexit 1\n");
+    chmodSync(join(bindir, "pgrep"), 0o755);
+    const r = spawnSync("bun", [SCRIPT, "--code-only", ...extraArgs], {
+      encoding: "utf-8",
+      timeout: 60000,
+      cwd: repo,
+      maxBuffer: 16 * 1024 * 1024,
+      env: {
+        ...process.env,
+        HOME: home,
+        GSTACK_HOME: gstackHome,
+        GBRAIN_HOME: "",
+        GSTACK_TEST_GBRAIN_LOG: commandLog,
+        PATH: `${bindir}:${process.env.PATH || ""}`,
+      },
+    });
+    const commands = existsSync(commandLog) ? readFileSync(commandLog, "utf-8") : "";
+    const state = existsSync(join(gstackHome, ".gbrain-sync-state.json"))
+      ? JSON.parse(readFileSync(join(gstackHome, ".gbrain-sync-state.json"), "utf-8"))
+      : null;
+    for (const d of [repo, bindir, home]) rmSync(d, { recursive: true, force: true });
+    return { r, commands, state };
+  }
+
+  const MANAGED_SYNC = `    case "$*" in
+      *--no-pull*) echo "Already up to date." ;;
+      *) echo "Managed sync requires --no-pull; Git pull/rebase needs an explicit drained maintenance window." >&2; exit 1 ;;
+    esac`;
+
+  it.skipIf(process.platform === "win32")("passes --no-pull, so a managed brain's code stage succeeds", () => {
+    const { r, commands, state } = runCodeStage(MANAGED_SYNC);
+    expect(r.status).toBe(0);
+    expect(commands).toContain("sync --strategy code --source client-acme-app --no-pull");
+    const code = state.last_stages.find((s: { name: string }) => s.name === "code");
+    expect(code.ok).toBe(true);
+  });
+
+  it.skipIf(process.platform === "win32")("a gbrain that rejects --no-pull fails the stage with the upgrade floor and is never retried without it", () => {
+    const { r, commands, state } = runCodeStage(`    echo "gbrain sync: unknown flag --no-pull for 'gbrain sync'" >&2; exit 1`);
+    expect(r.status).toBe(1);
+    const code = state.last_stages.find((s: { name: string }) => s.name === "code");
+    expect(code.ok).toBe(false);
+    expect(code.summary).toContain("upgrade gbrain to >= 0.20.0");
+    const syncCalls = commands.split("\n").filter((l) => l.startsWith("sync "));
+    expect(syncCalls).toEqual(["sync --strategy code --source client-acme-app --no-pull"]);
+  });
+
+  it.skipIf(process.platform === "win32")("every walk failure summary carries gbrain's last stderr line", () => {
+    const { r, state } = runCodeStage(`    echo "first line" >&2; echo "Cannot connect to database: refused" >&2; exit 3`);
+    expect(r.status).toBe(1);
+    const code = state.last_stages.find((s: { name: string }) => s.name === "code");
+    expect(code.summary).toBe(
+      "gbrain sync --strategy code --source client-acme-app --no-pull exited 3: Cannot connect to database: refused",
+    );
+    // Not quiet: gbrain's stderr is forwarded live, not only kept as a tail.
+    expect(r.stderr).toContain("first line");
+  });
+
+  it.skipIf(process.platform === "win32")("more than 1 MiB of gbrain stderr neither fails the stage nor is buffered whole", () => {
+    const { r, state } = runCodeStage(`    head -c 2200000 /dev/zero | tr '\\\\0' 'x' >&2; echo >&2; echo "walk done" >&2`, ["--quiet"]);
+    expect(r.status).toBe(0);
+    const code = state.last_stages.find((s: { name: string }) => s.name === "code");
+    expect(code.ok).toBe(true);
+    expect(r.stderr.length).toBeLessThan(64 * 1024);
   });
 });

@@ -1,0 +1,7 @@
+I read the diff and ran the focused tests.
+
+1. P2 — The retry helper logs the attempt count twice. `lib/retry.ts:41`
+2. P1 — The cap is read before the config loads, so it is always 0. `lib/retry.ts:12`
+3. P3 — Rename `n` to `attempt`. `lib/retry.ts:18`
+
+Verdict: not ready (1 P1, 1 P2, 1 P3)

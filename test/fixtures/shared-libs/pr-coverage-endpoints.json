@@ -1,0 +1,14 @@
+{
+  "_comment": "gh/curl endpoint lists for shared-libs-pr-coverage. known_good must pass prCoverageRequestViolations; known_bad must fail it. R = /repos/fixture/shared-libs.",
+  "known_good": {
+    "single-pass": ["/repos/fixture/shared-libs/pulls?state=all&sort=updated&direction=desc&per_page=100&page=1", "/repos/fixture/shared-libs/pulls/7/files?per_page=100&page=1", "/repos/fixture/shared-libs/pulls?state=open&sort=updated&direction=desc&per_page=100&page=1", "/repos/fixture/shared-libs/pulls/42/files?per_page=100&page=1", "/repos/fixture/shared-libs/pulls/42/files?per_page=100&page=2"],
+    "census-truncated-first-view-then-pages-1-3": ["/repos/fixture/shared-libs/pulls?state=open&sort=updated&direction=desc&per_page=100&page=1", "/repos/fixture/shared-libs/pulls/42/files?per_page=100&page=1", "/repos/fixture/shared-libs/pulls/42/files?per_page=100&page=1", "/repos/fixture/shared-libs/pulls/42/files?per_page=100&page=2", "/repos/fixture/shared-libs/pulls/42/files?per_page=100&page=3"],
+    "first-page-reread-twice-within-budget": ["/repos/fixture/shared-libs/pulls?state=open&sort=updated&direction=desc&per_page=100&page=1", "/repos/fixture/shared-libs/pulls/42/files?per_page=100", "/repos/fixture/shared-libs/pulls/42/files?per_page=100&page=1", "/repos/fixture/shared-libs/pulls/42/files?per_page=100&page=1", "/repos/fixture/shared-libs/pulls/42/files?per_page=100&page=2"]
+  },
+  "known_bad": {
+    "first-page-only": ["/repos/fixture/shared-libs/pulls?state=open&sort=updated&direction=desc&per_page=100&page=1", "/repos/fixture/shared-libs/pulls/42/files?per_page=100&page=1"],
+    "never-read-pr-42": ["/repos/fixture/shared-libs/pulls?state=open&sort=updated&direction=desc&per_page=100&page=1"],
+    "page-2-without-page-1": ["/repos/fixture/shared-libs/pulls/42/files?per_page=100&page=2"],
+    "six-metadata-pages": ["/repos/fixture/shared-libs/pulls?state=open&per_page=100&page=1", "/repos/fixture/shared-libs/pulls?state=open&per_page=100&page=2", "/repos/fixture/shared-libs/pulls?state=open&per_page=100&page=3", "/repos/fixture/shared-libs/pulls?state=open&per_page=100&page=4", "/repos/fixture/shared-libs/pulls?state=open&per_page=100&page=5", "/repos/fixture/shared-libs/pulls?state=open&per_page=100&page=6", "/repos/fixture/shared-libs/pulls/42/files?per_page=100&page=1", "/repos/fixture/shared-libs/pulls/42/files?per_page=100&page=2"]
+  }
+}

@@ -6,12 +6,32 @@ import {
   EvalCollector,
   extractToolSummary,
   findPreviousRun,
+  findLatestFinalizedRun,
+  isPartialEval,
+  listEvalJsonFiles,
   compareEvalResults,
+  evalEntryOutcome,
   formatComparison,
   generateCommentary,
   judgePassed,
+  CONTRACT_VIOLATIONS_FILE,
+  ContractViolation,
+  TRIAL_ENV,
+  TRIAL_OUTCOME_SCHEMA,
+  expectContract,
+  failureClassOf,
+  formatTrialOutcomes,
+  panelVerdict,
+  parseTrialOutcomes,
+  sanitizeTrialError,
+  trialContextFromEnv,
+  TRIAL_ERROR_MAX,
 } from './eval-store';
-import type { EvalResult, EvalTestEntry, ComparisonResult } from './eval-store';
+import type { EvalResult, EvalTestEntry, ComparisonResult, PanelTrial, TrialOutcomeRecord } from './eval-store';
+import { EVAL_POLICY } from './periodic-exclude-data';
+import { manualReviewFixture } from './manual-judge-review-fixture';
+// The frozen EVAL_POLICY v1 reader (test/fixtures/trial-record-v1-reader.ts).
+import { trialRecordProblems as trialRecordProblemsV1 } from '../fixtures/trial-record-v1-reader';
 
 let tmpDir: string;
 
@@ -58,9 +78,70 @@ function makeResult(overrides?: Partial<EvalResult>): EvalResult {
   };
 }
 
+/** Capture everything a block writes to stderr (finalize prints there). */
+async function captureStderr(fn: () => Promise<void>): Promise<string> {
+  const original = process.stderr.write.bind(process.stderr);
+  let captured = '';
+  (process.stderr as any).write = (chunk: any) => { captured += String(chunk); return true; };
+  try {
+    await fn();
+  } finally {
+    (process.stderr as any).write = original;
+  }
+  return captured;
+}
+
 // --- EvalCollector tests ---
 
 describe('EvalCollector', () => {
+  test('manual provider refusal stays unscored and executed; malformed claims stay failed', async () => {
+    const manual = manualReviewFixture();
+    const invalidPass = { ...manual, passed: true };
+    const invalidScore = { ...manual, judge_scores: { clarity: 5 } };
+    expect(evalEntryOutcome(manual)).toBe('manual-review');
+    expect(evalEntryOutcome(invalidPass)).toBe('failed');
+    expect(evalEntryOutcome(invalidScore)).toBe('failed');
+    expect(evalEntryOutcome({ ...manual, manual_review: { ...manual.manual_review, approval: { ...manual.manual_review!.approval,
+      prompt_sha256: '0'.repeat(64) } } })).toBe('failed');
+    const collector = new EvalCollector('llm-judge', tmpDir);
+    collector.addTest(makeEntry({ name: 'ordinary', tier: 'llm-judge' }));
+    collector.addTest(manual);
+    collector.addTest(invalidPass);
+    collector.addTest(invalidScore);
+    const partial: EvalResult = JSON.parse(fs.readFileSync(path.join(tmpDir, '_partial-e2e.json'), 'utf8'));
+    expect(partial).toMatchObject({ passed: 1, failed: 2, manual_accepted_tests: 1,
+      executed_tests: 4, reused_tests: 0 });
+    const output = await captureStderr(async () => { await collector.finalize(); });
+    const result: EvalResult = JSON.parse(fs.readFileSync(fs.readdirSync(tmpDir).map(name => path.join(tmpDir, name))
+      .find(name => name.endsWith('.json') && !path.basename(name).startsWith('_'))!, 'utf8'));
+    expect(result).toMatchObject({ passed: 1, failed: 2, manual_accepted_tests: 1, executed_tests: 4 });
+    expect(result.tests[1]).toMatchObject({ passed: false, execution: 'executed', exit_reason: 'provider_refusal' });
+    expect(result.tests[1].judge_scores).toBeUndefined();
+    expect(output).toContain('MANUAL');
+    expect(output).toContain('1 unscored provider refusal');
+    expect(output).toContain(manual.manual_review!.approval.approval_url);
+    expect(result.tests[2].passed).toBe(true);
+    expect(output).toContain(' FAIL ');
+  });
+
+  test('reused passing evidence preserves origin and remains separate from newly executed attempts', async () => {
+    const collector = new EvalCollector('llm-judge', tmpDir);
+    const reused_from = { input_key: 'a'.repeat(64), run_id: '1234/1', revision: 'b'.repeat(40),
+      completed_at: '2026-09-20T12:00:00.000Z' };
+    collector.addTest(makeEntry({ name: 'fresh', tier: 'llm-judge', execution: 'executed', cost_usd: 0.02 }));
+    collector.addTest(makeEntry({ name: 'reused', tier: 'llm-judge', execution: 'reused', cost_usd: 0,
+      duration_ms: 1, reused_from }));
+    const partial = JSON.parse(fs.readFileSync(path.join(tmpDir, '_partial-e2e.json'), 'utf8'));
+    expect(partial.executed_tests).toBe(1); expect(partial.reused_tests).toBe(1);
+    let filename = '';
+    const output = await captureStderr(async () => { filename = await collector.finalize(); });
+    const result: EvalResult = JSON.parse(fs.readFileSync(filename, 'utf8'));
+    expect(result).toMatchObject({ passed: 2, failed: 0, executed_tests: 1, reused_tests: 1, total_cost_usd: 0.02 });
+    expect(result.tests[1]?.reused_from).toEqual(reused_from);
+    expect(result.tests[1]?.execution).toBe('reused');
+    expect(output).toContain('REUSE'); expect(output).toContain('Evidence: 1 executed, 1 reused');
+  });
+
   test('addTest accumulates entries', () => {
     const collector = new EvalCollector('e2e', tmpDir);
     collector.addTest(makeEntry({ name: 'a' }));
@@ -89,7 +170,7 @@ describe('EvalCollector', () => {
     const filepath = await collector.finalize();
 
     const data: EvalResult = JSON.parse(fs.readFileSync(filepath, 'utf-8'));
-    expect(data.schema_version).toBe(1);
+    expect(data.schema_version).toBe(2);
     expect(data.tier).toBe('e2e');
     expect(data.total_tests).toBe(2);
     expect(data.passed).toBe(1);
@@ -98,6 +179,36 @@ describe('EvalCollector', () => {
     expect(data.total_duration_ms).toBe(3000);
     expect(data.timestamp).toBeTruthy();
     expect(data.hostname).toBeTruthy();
+    // CLI version stamping: always a non-empty string ('unknown' when the
+    // claude binary is absent — the field must exist either way so flake
+    // investigations can correlate runs with the TUI they exercised).
+    expect(typeof data.claude_cli_version).toBe('string');
+    expect(data.claude_cli_version!.length).toBeGreaterThan(0);
+  });
+
+  test('a same-name re-record stamps attempts and surfaces flaky_retries', async () => {
+    // bun --retry re-runs the test BODY, so recordE2E fires again under the
+    // same name — the only reliable retry signal (bun's own output hides
+    // retried passes: fail→pass recaps as a clean pass, probed on 1.3.10).
+    const collector = new EvalCollector('e2e', tmpDir);
+    collector.addTest(makeEntry({ name: 'flaky-one', passed: false }));
+    collector.addTest(makeEntry({ name: 'flaky-one', passed: true }));
+    collector.addTest(makeEntry({ name: 'steady', passed: true }));
+    const filepath = await collector.finalize();
+
+    const data: EvalResult = JSON.parse(fs.readFileSync(filepath, 'utf-8'));
+    const attempts = data.tests.filter((t) => t.name === 'flaky-one').map((t) => t.attempt);
+    expect(attempts).toEqual([1, 2]);
+    expect(data.tests.find((t) => t.name === 'steady')?.attempt).toBe(1);
+    expect(data.flaky_retries).toEqual([{ name: 'flaky-one', attempts: 2 }]);
+  });
+
+  test('no retries → no flaky_retries field (absent, not empty)', async () => {
+    const collector = new EvalCollector('e2e', tmpDir);
+    collector.addTest(makeEntry({ name: 'only-once' }));
+    const filepath = await collector.finalize();
+    const data: EvalResult = JSON.parse(fs.readFileSync(filepath, 'utf-8'));
+    expect('flaky_retries' in data).toBe(false);
   });
 
   test('finalize creates directory if missing', async () => {
@@ -119,6 +230,41 @@ describe('EvalCollector', () => {
     expect(fs.readdirSync(tmpDir).filter(f => f.endsWith('.json') && !f.startsWith('_partial'))).toHaveLength(1);
   });
 
+  test('with no completed prior run, says NO BASELINE instead of comparing against its own partial', async () => {
+    // addTest writes the in-progress accumulator into the same dir. If that
+    // counted as a baseline, the run would compare against itself and print a
+    // reassuring all-clear forever.
+    const collector = new EvalCollector('e2e', tmpDir);
+    collector.addTest(makeEntry({ name: 'test-1', passed: true }));
+
+    const output = await captureStderr(async () => { await collector.finalize(); });
+
+    expect(fs.existsSync(path.join(tmpDir, '_partial-e2e.json'))).toBe(true); // the trap exists
+    expect(output).toContain('NO BASELINE');
+    expect(output).not.toContain('vs previous');
+    expect(output).not.toContain('Stable run');
+  });
+
+  test('with a genuine prior run, reports the real delta', async () => {
+    fs.writeFileSync(
+      path.join(tmpDir, '0.3.5-main-e2e-20260312-100000.json'),
+      JSON.stringify(makeResult({
+        timestamp: '2026-03-12T10:00:00Z',
+        tests: [makeEntry({ name: 'test-1', passed: true, turns_used: 5 })],
+      })),
+    );
+
+    const collector = new EvalCollector('e2e', tmpDir);
+    collector.addTest(makeEntry({ name: 'test-1', passed: false, turns_used: 5 }));
+
+    const output = await captureStderr(async () => { await collector.finalize(); });
+
+    expect(output).toContain('vs previous');
+    expect(output).toContain('REGRESSION');
+    expect(output).toContain('1 regressed');
+    expect(output).not.toContain('NO BASELINE');
+  });
+
   test('empty collector writes valid file', async () => {
     const collector = new EvalCollector('llm-judge', tmpDir);
     const filepath = await collector.finalize();
@@ -128,6 +274,59 @@ describe('EvalCollector', () => {
     expect(data.passed).toBe(0);
     expect(data.tests).toHaveLength(0);
     expect(data.tier).toBe('llm-judge');
+  });
+});
+
+// --- GSTACK_EVAL_DIR + shard slug tests ---
+
+describe('EvalCollector eval-dir resolution', () => {
+  const savedEnv = process.env.GSTACK_EVAL_DIR;
+
+  afterEach(() => {
+    if (savedEnv === undefined) delete process.env.GSTACK_EVAL_DIR;
+    else process.env.GSTACK_EVAL_DIR = savedEnv;
+  });
+
+  test('honors GSTACK_EVAL_DIR set after import — no --preload needed', async () => {
+    // The default eval dir must resolve lazily at construction, not at module
+    // load: the sharded runner sets GSTACK_EVAL_DIR in each shard child's env
+    // and shard tests import this module long before any collector exists.
+    const envDir = path.join(tmpDir, 'env-dir');
+    process.env.GSTACK_EVAL_DIR = envDir;
+    const collector = new EvalCollector('e2e');
+    collector.addTest(makeEntry());
+    await captureStderr(async () => { await collector.finalize(); });
+    expect(fs.readdirSync(envDir).filter(f => !f.startsWith('_partial'))).toHaveLength(1);
+  });
+
+  test('explicit constructor arg beats GSTACK_EVAL_DIR', async () => {
+    process.env.GSTACK_EVAL_DIR = path.join(tmpDir, 'env-dir');
+    const explicit = path.join(tmpDir, 'explicit');
+    const collector = new EvalCollector('e2e', explicit);
+    collector.addTest(makeEntry());
+    await captureStderr(async () => { await collector.finalize(); });
+    expect(fs.existsSync(path.join(tmpDir, 'env-dir'))).toBe(false);
+    expect(fs.readdirSync(explicit).length).toBeGreaterThan(0);
+  });
+
+  test('writes the shard slug when the eval dir is a shards/ subdir', async () => {
+    const shardDir = path.join(tmpDir, 'shards', 'skill-e2e-qa');
+    const collector = new EvalCollector('e2e', shardDir);
+    collector.addTest(makeEntry());
+    await captureStderr(async () => { await collector.finalize(); });
+
+    const partial = JSON.parse(fs.readFileSync(path.join(shardDir, '_partial-e2e.json'), 'utf-8'));
+    expect(partial.shard).toBe('skill-e2e-qa');
+    const final = fs.readdirSync(shardDir).find(f => !f.startsWith('_partial'))!;
+    expect(JSON.parse(fs.readFileSync(path.join(shardDir, final), 'utf-8')).shard).toBe('skill-e2e-qa');
+  });
+
+  test('writes no shard slug for a flat eval dir', async () => {
+    const collector = new EvalCollector('e2e', tmpDir);
+    collector.addTest(makeEntry());
+    await captureStderr(async () => { await collector.finalize(); });
+    const final = fs.readdirSync(tmpDir).find(f => f.endsWith('.json') && !f.startsWith('_partial'))!;
+    expect(JSON.parse(fs.readFileSync(path.join(tmpDir, final), 'utf-8')).shard).toBeUndefined();
   });
 });
 
@@ -259,6 +458,34 @@ describe('findPreviousRun', () => {
     expect(result).toBeNull(); // only file is excluded
   });
 
+  test('never returns the in-progress accumulator as a baseline', () => {
+    // The current run's own partial carries the current tier + branch and the
+    // freshest timestamp. If it were a candidate, every run would compare
+    // against itself and report "no regressions" forever.
+    fs.writeFileSync(
+      path.join(tmpDir, '_partial-e2e.json'),
+      JSON.stringify(makeResult({ branch: 'main', timestamp: '2026-03-14T10:00:00Z', _partial: true })),
+    );
+
+    const result = findPreviousRun(tmpDir, 'e2e', 'main', path.join(tmpDir, 'current.json'));
+    expect(result).toBeNull();
+  });
+
+  test('prefers a completed run over a newer in-progress accumulator', () => {
+    fs.writeFileSync(
+      path.join(tmpDir, '0.3.5-main-e2e-20260312-100000.json'),
+      JSON.stringify(makeResult({ branch: 'main', timestamp: '2026-03-12T10:00:00Z' })),
+    );
+    // Newer, same tier + branch, but in-progress — must lose to the older completed run.
+    fs.writeFileSync(
+      path.join(tmpDir, '_partial-e2e.json'),
+      JSON.stringify(makeResult({ branch: 'main', timestamp: '2026-03-14T10:00:00Z', _partial: true })),
+    );
+
+    const result = findPreviousRun(tmpDir, 'e2e', 'main', path.join(tmpDir, 'current.json'));
+    expect(result).toContain('0.3.5-main-e2e');
+  });
+
   test('filters by tier', () => {
     fs.writeFileSync(
       path.join(tmpDir, '0.3.6-main-llm-judge-20260314-100000.json'),
@@ -268,11 +495,187 @@ describe('findPreviousRun', () => {
     const result = findPreviousRun(tmpDir, 'e2e', 'main', 'current.json');
     expect(result).toBeNull(); // only llm-judge file, looking for e2e
   });
+
+  test('a shard run prefers its own shard history over newer other-shard or flat priors', () => {
+    const mine = path.join(tmpDir, 'shards', 'skill-e2e-qa');
+    const other = path.join(tmpDir, 'shards', 'codex-e2e');
+    fs.mkdirSync(mine, { recursive: true });
+    fs.mkdirSync(other, { recursive: true });
+    // Same-shard prior — oldest of the three, must still win.
+    fs.writeFileSync(
+      path.join(mine, '0.3.4-main-e2e-20260311-100000.json'),
+      JSON.stringify(makeResult({ timestamp: '2026-03-11T10:00:00Z' })),
+    );
+    fs.writeFileSync(
+      path.join(other, '0.3.5-main-e2e-20260312-100000.json'),
+      JSON.stringify(makeResult({ timestamp: '2026-03-12T10:00:00Z' })),
+    );
+    fs.writeFileSync(
+      path.join(tmpDir, '0.3.6-main-e2e-20260313-100000.json'),
+      JSON.stringify(makeResult({ timestamp: '2026-03-13T10:00:00Z' })),
+    );
+
+    const result = findPreviousRun(tmpDir, 'e2e', 'main', path.join(mine, 'current.json'));
+    expect(result).toContain(path.join('shards', 'skill-e2e-qa'));
+  });
+
+  test('a flat run prefers flat history over a newer shard prior', () => {
+    const shardDir = path.join(tmpDir, 'shards', 'skill-e2e-qa');
+    fs.mkdirSync(shardDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(shardDir, '0.3.6-main-e2e-20260314-100000.json'),
+      JSON.stringify(makeResult({ timestamp: '2026-03-14T10:00:00Z' })),
+    );
+    fs.writeFileSync(
+      path.join(tmpDir, '0.3.5-main-e2e-20260312-100000.json'),
+      JSON.stringify(makeResult({ timestamp: '2026-03-12T10:00:00Z' })),
+    );
+
+    const result = findPreviousRun(tmpDir, 'e2e', 'main', path.join(tmpDir, 'current.json'));
+    expect(result).toContain('0.3.5-main-e2e');
+  });
+
+  test('falls back to a shard prior when the flat dir has no candidate', () => {
+    const shardDir = path.join(tmpDir, 'shards', 'skill-e2e-qa');
+    fs.mkdirSync(shardDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(shardDir, '0.3.6-main-e2e-20260314-100000.json'),
+      JSON.stringify(makeResult({ timestamp: '2026-03-14T10:00:00Z' })),
+    );
+
+    const result = findPreviousRun(tmpDir, 'e2e', 'main', path.join(tmpDir, 'current.json'));
+    expect(result).toContain(path.join('shards', 'skill-e2e-qa'));
+  });
+});
+
+// --- isPartialEval tests ---
+
+describe('isPartialEval', () => {
+  test('flag set but file renamed — still partial', () => {
+    expect(isPartialEval({ _partial: true }, 'renamed-to-look-final.json')).toBe(true);
+  });
+
+  test('name matches but no flag — still partial', () => {
+    expect(isPartialEval({}, '_partial-e2e.json')).toBe(true);
+    expect(isPartialEval(null, path.join('/some/dir', '_partial-e2e.json'))).toBe(true);
+  });
+
+  test('finalized run is not partial', () => {
+    expect(isPartialEval(makeResult(), '0.3.6-main-e2e-20260314-100000.json')).toBe(false);
+  });
+});
+
+// --- listEvalJsonFiles / findLatestFinalizedRun tests ---
+
+describe('findLatestFinalizedRun', () => {
+  test('listEvalJsonFiles recurses exactly one shards/*/ level', () => {
+    fs.writeFileSync(path.join(tmpDir, 'flat.json'), '{}');
+    const shardDir = path.join(tmpDir, 'shards', 'skill-e2e-qa');
+    fs.mkdirSync(shardDir, { recursive: true });
+    fs.writeFileSync(path.join(shardDir, 'sharded.json'), '{}');
+    // Nested one level deeper than the contract — must NOT be picked up.
+    const tooDeep = path.join(shardDir, 'shards', 'nested');
+    fs.mkdirSync(tooDeep, { recursive: true });
+    fs.writeFileSync(path.join(tooDeep, 'too-deep.json'), '{}');
+    fs.writeFileSync(path.join(tmpDir, 'not-json.txt'), '');
+
+    const files = listEvalJsonFiles(tmpDir).map(f => path.basename(f)).sort();
+    expect(files).toEqual(['flat.json', 'sharded.json']);
+  });
+
+  test('finds the newest finalized run across flat dir and shard subdirs', () => {
+    fs.writeFileSync(
+      path.join(tmpDir, '0.3.5-main-e2e-20260312-100000.json'),
+      JSON.stringify(makeResult({ timestamp: '2026-03-12T10:00:00Z' })),
+    );
+    const shardDir = path.join(tmpDir, 'shards', 'skill-e2e-qa');
+    fs.mkdirSync(shardDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(shardDir, '0.3.6-main-e2e-20260314-100000.json'),
+      JSON.stringify(makeResult({ timestamp: '2026-03-14T10:00:00Z' })),
+    );
+
+    const latest = findLatestFinalizedRun(tmpDir, 'e2e');
+    expect(latest?.filepath).toContain('skill-e2e-qa');
+    expect(latest?.result.timestamp).toBe('2026-03-14T10:00:00Z');
+  });
+
+  test('skips partials by flag and by name, filters by tier', () => {
+    // Newest by timestamp, but partial by flag under a shard dir.
+    const shardDir = path.join(tmpDir, 'shards', 'skill-e2e-qa');
+    fs.mkdirSync(shardDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(shardDir, 'flagged.json'),
+      JSON.stringify(makeResult({ timestamp: '2026-03-16T10:00:00Z', _partial: true })),
+    );
+    // Partial by name only.
+    fs.writeFileSync(
+      path.join(tmpDir, '_partial-e2e.json'),
+      JSON.stringify(makeResult({ timestamp: '2026-03-15T10:00:00Z' })),
+    );
+    // Wrong tier.
+    fs.writeFileSync(
+      path.join(tmpDir, '0.3.6-main-llm-judge-20260317-100000.json'),
+      JSON.stringify(makeResult({ tier: 'llm-judge', timestamp: '2026-03-17T10:00:00Z' })),
+    );
+    // The genuine baseline.
+    fs.writeFileSync(
+      path.join(tmpDir, '0.3.5-main-e2e-20260312-100000.json'),
+      JSON.stringify(makeResult({ timestamp: '2026-03-12T10:00:00Z' })),
+    );
+
+    const latest = findLatestFinalizedRun(tmpDir, 'e2e');
+    expect(latest?.result.timestamp).toBe('2026-03-12T10:00:00Z');
+  });
+
+  test('returns null for missing dir or no finalized runs', () => {
+    expect(findLatestFinalizedRun('/nonexistent/path', 'e2e')).toBeNull();
+    expect(findLatestFinalizedRun(tmpDir, 'e2e')).toBeNull();
+  });
 });
 
 // --- compareEvalResults tests ---
 
 describe('compareEvalResults', () => {
+  test('manual acceptance is neither a score regression nor a recovery', () => {
+    const manual = manualReviewFixture();
+    const prior = makeResult({ tests: [makeEntry({ name: manual.name, passed: true })] });
+    const accepted = makeResult({ tests: [manual], passed: 0, failed: 0, manual_accepted_tests: 1 });
+    const toManual = compareEvalResults(prior, accepted, 'prior.json', 'accepted.json');
+    expect(toManual).toMatchObject({ improved: 0, regressed: 0, manual_reviewed: 1 });
+    expect(toManual.deltas[0]).toMatchObject({ status_change: 'manual-review', before: { passed: true },
+      after: { passed: false, manual_review: true } });
+    expect(formatComparison(toManual)).toContain('PASS  → MANUAL');
+    expect(formatComparison(toManual)).not.toContain('REGRESSION:');
+    const fromManual = compareEvalResults(accepted, prior, 'accepted.json', 'prior.json');
+    expect(fromManual).toMatchObject({ improved: 0, regressed: 0, manual_reviewed: 1 });
+    expect(formatComparison(fromManual)).toContain('MANUAL → PASS');
+    const invalid = makeResult({ tests: [{ ...manual, passed: true }] });
+    expect(compareEvalResults(prior, invalid, 'prior.json', 'invalid.json').regressed).toBe(1);
+  });
+
+  test('manual acceptance followed by a real or malformed failure is a blocking regression', () => {
+    const manual = manualReviewFixture();
+    const accepted = makeResult({ tests: [manual], passed: 0, failed: 0, manual_accepted_tests: 1 });
+    const { manual_review: _receipt, ...ordinary } = manual;
+    for (const after of [
+      { ...ordinary, exit_reason: 'timeout' },
+      { ...manual, passed: true },
+      { ...manual, judge_scores: { clarity: 5 } },
+    ]) {
+      const failed = makeResult({ tests: [after] });
+      const comparison = compareEvalResults(accepted, failed, 'accepted.json', 'failed.json');
+      expect(comparison).toMatchObject({ improved: 0, regressed: 1 });
+      expect(comparison.manual_reviewed).toBeUndefined();
+      expect(comparison.deltas[0]).toMatchObject({ status_change: 'regressed', before: { manual_review: true },
+        after: { passed: false } });
+      const output = formatComparison(comparison);
+      expect(output).toContain('MANUAL → FAIL');
+      expect(output).toContain('REGRESSION:');
+      expect(output).toContain('blocking failure');
+    }
+  });
+
   test('detects improved/regressed/unchanged per test', () => {
     const before = makeResult({
       tests: [
@@ -524,6 +927,29 @@ describe('generateCommentary', () => {
     expect(notes.some(n => n.includes('No regressions'))).toBe(true);
   });
 
+  test('says NO BASELINE instead of "stable" when nothing matched the prior run', () => {
+    // A baseline file existed but shares no test names (renamed/retired suite),
+    // so zero tests were actually compared. Claiming stability here is a lie.
+    const c: ComparisonResult = {
+      before_file: 'a.json', after_file: 'b.json',
+      before_branch: 'main', after_branch: 'main',
+      before_timestamp: '', after_timestamp: '',
+      deltas: [
+        { name: 'a', before: { passed: false, cost_usd: 0 }, after: { passed: true, cost_usd: 0.10 }, status_change: 'unchanged' },
+        { name: 'b', before: { passed: false, cost_usd: 0 }, after: { passed: true, cost_usd: 0.10 }, status_change: 'unchanged' },
+        { name: 'c', before: { passed: false, cost_usd: 0 }, after: { passed: true, cost_usd: 0.10 }, status_change: 'unchanged' },
+      ],
+      total_cost_delta: 0.30, total_duration_delta: 0,
+      improved: 0, regressed: 0, unchanged: 3,
+      tool_count_before: 0, tool_count_after: 0,
+      matched: 0,
+    };
+
+    const notes = generateCommentary(c);
+    expect(notes.some(n => n.includes('NO BASELINE'))).toBe(true);
+    expect(notes.some(n => n.includes('Stable run'))).toBe(false);
+  });
+
   test('returns empty for stable run with no significant changes', () => {
     const c: ComparisonResult = {
       before_file: 'a.json', after_file: 'b.json',
@@ -544,5 +970,222 @@ describe('generateCommentary', () => {
 
     const notes = generateCommentary(c);
     expect(notes.some(n => n.includes('Stable run'))).toBe(true);
+  });
+});
+
+// --- Trials, panel verdicts and contract vetoes (eval reliability policy) ---
+
+const PANEL = EVAL_POLICY.panel;
+const pass = (trial: number, extra: Partial<PanelTrial> = {}): PanelTrial => ({ trial, outcome: 'passed', ...extra });
+const fail = (trial: number, extra: Partial<PanelTrial> = {}): PanelTrial => ({ trial, outcome: 'failed', ...extra });
+const behavior = (trials: PanelTrial[], quarantined = false) =>
+  panelVerdict({ case: 'case-x', kind: 'behavior', panel: PANEL, trials, quarantined });
+
+describe('panelVerdict', () => {
+  test('policy constants are the approved pre-registration', () => {
+    expect(EVAL_POLICY.panel).toEqual({ n: 3, k: 2 });
+    expect(EVAL_POLICY.quarantine).toEqual({
+      entry: { rate: 0.95, minTrials: 10 },
+      exit: { rate: 0.97, minTrials: 10 },
+      capFraction: 0.1,
+      expiryWeeklyRuns: 8,
+    });
+    expect(EVAL_POLICY.infraRedispatch).toBe(1);
+  });
+
+  test('rule: one trial, any failure fails the lane', () => {
+    const ok = panelVerdict({ case: 'r', kind: 'rule', panel: { n: 1, k: 1 }, trials: [pass(1)] });
+    expect(ok).toMatchObject({ status: 'PASS', split: false, failsLane: false, coverage: true, marks: '✓' });
+    const bad = panelVerdict({ case: 'r', kind: 'rule', panel: { n: 1, k: 1 }, trials: [fail(1)] });
+    expect(bad).toMatchObject({ status: 'FAIL', failsLane: true, coverage: false, redClass: 'VERDICT', marks: '✗' });
+  });
+
+  test('behavior 3/3 is a clean PASS', () => {
+    expect(behavior([pass(1), pass(2), pass(3)])).toMatchObject({ status: 'PASS', split: false, passed: 3, failsLane: false });
+  });
+
+  test('behavior 2/3 is a split PASS that shows its failed trial', () => {
+    const v = behavior([pass(1), fail(2, { exit_reason: 'timeout' }), pass(3)]);
+    expect(v).toMatchObject({ status: 'PASS', split: true, passed: 2, failed: 1, failsLane: false, coverage: true, marks: '✓✗✓', reason: 'PASS 2/3' });
+    expect(v.trials[1].exit_reason).toBe('timeout');
+  });
+
+  test('behavior 1/3 and 0/3 fail the lane', () => {
+    expect(behavior([pass(1), fail(2), fail(3)])).toMatchObject({ status: 'FAIL', failsLane: true, redClass: 'VERDICT' });
+    expect(behavior([fail(1), fail(2), fail(3)])).toMatchObject({ status: 'FAIL', failsLane: true });
+  });
+
+  test('a contract trial fails the panel even at 2/3', () => {
+    const v = behavior([pass(1), pass(2), fail(3, { failure_class: 'contract' })]);
+    expect(v).toMatchObject({ status: 'FAIL', contract: true, failsLane: true, redClass: 'VERDICT', reason: 'contract violation' });
+  });
+
+  test('a missing trial is INCOMPLETE and fails the lane', () => {
+    const v = behavior([pass(1), pass(3)]);
+    expect(v).toMatchObject({ status: 'INCOMPLETE', failsLane: true, coverage: false, redClass: 'INCOMPLETE', marks: '✓·✓' });
+    expect(v.reason).toContain('missing trial t2');
+  });
+
+  test('duplicate or out-of-range trial records are INCOMPLETE, never deduplicated', () => {
+    expect(behavior([pass(1), pass(2), pass(2), fail(3)]).status).toBe('INCOMPLETE');
+    expect(behavior([pass(1), pass(2), pass(3), pass(4)]).reason).toContain('unexpected trial t4');
+    const v = panelVerdict({ case: 'c', kind: 'behavior', panel: { n: 11, k: 6 }, trials: Array.from({ length: 10 }, (_, i) => pass(i + 2)) });
+    expect(v.reason).toContain('missing trial t1');
+  });
+
+  test('timeout and infra trials count as failed, never passing', () => {
+    const v = behavior([pass(1), fail(2, { exit_reason: 'timeout' }), fail(3, { failure_class: 'infra' })]);
+    expect(v).toMatchObject({ status: 'FAIL', passed: 1, failed: 2, failsLane: true, redClass: 'VERDICT' });
+    const infra = behavior([pass(1), fail(2, { failure_class: 'infra' }), fail(3, { failure_class: 'infra' })]);
+    expect(infra).toMatchObject({ status: 'FAIL', redClass: 'INFRA' });
+    expect(failureClassOf({ exit_reason: 'timeout' })).toBe('timeout');
+    expect(failureClassOf({})).toBe('assertion');
+  });
+
+  test('quarantined: 1/3 does not fail the lane, 0/3 and contract do, no coverage credit', () => {
+    expect(behavior([pass(1), fail(2), fail(3)], true)).toMatchObject({ status: 'FAIL', failsLane: false, coverage: false, redClass: null });
+    expect(behavior([fail(1), fail(2), fail(3)], true)).toMatchObject({ status: 'FAIL', failsLane: true });
+    expect(behavior([pass(1), pass(2), fail(3, { failure_class: 'contract' })], true)).toMatchObject({ status: 'FAIL', failsLane: true });
+    expect(behavior([pass(1), pass(2), pass(3)], true)).toMatchObject({ status: 'PASS', coverage: false, failsLane: false });
+    expect(behavior([pass(1), pass(2)], true)).toMatchObject({ status: 'INCOMPLETE', failsLane: true });
+  });
+
+  test('quarantined rule keeps rule meaning (k = n)', () => {
+    const v = panelVerdict({ case: 'r', kind: 'rule', panel: { n: 3, k: 3 }, trials: [pass(1), pass(2), fail(3)], quarantined: true });
+    expect(v).toMatchObject({ status: 'FAIL', failsLane: false });
+  });
+
+  test('all-skipped panel is SKIPPED with no credit; partly skipped is INCOMPLETE', () => {
+    const skip = (trial: number): PanelTrial => ({ trial, outcome: 'skipped' });
+    expect(behavior([skip(1), skip(2), skip(3)])).toMatchObject({ status: 'SKIPPED', coverage: false, failsLane: false });
+    expect(behavior([pass(1), pass(2), skip(3)])).toMatchObject({ status: 'INCOMPLETE', failsLane: true });
+  });
+
+  test('trials of different run attempts are never merged into one verdict', () => {
+    expect(() => behavior([pass(1), pass(2), fail(3, { attempt: 2 })])).toThrow(/run attempts/);
+    expect(behavior([pass(1, { attempt: 2 }), pass(2, { attempt: 2 }), pass(3, { attempt: 2 })]).attempt).toBe(2);
+  });
+
+  test('invalid panels throw', () => {
+    expect(() => panelVerdict({ case: 'c', kind: 'behavior', panel: { n: 3, k: 4 }, trials: [] })).toThrow(/invalid panel/);
+    expect(() => panelVerdict({ case: 'c', kind: 'nope' as any, panel: { n: 1, k: 1 }, trials: [] })).toThrow(/unknown kind/);
+  });
+});
+
+describe('trial context and expectContract', () => {
+  let dir: string;
+  const saved: Record<string, string | undefined> = {};
+  const keys = [...Object.values(TRIAL_ENV), 'GSTACK_EVAL_DIR'];
+  beforeEach(() => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'panel-verdict-'));
+    for (const key of keys) saved[key] = process.env[key];
+  });
+  afterEach(() => {
+    for (const key of keys) {
+      if (saved[key] === undefined) delete process.env[key];
+      else process.env[key] = saved[key];
+    }
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+  const setTrial = () => Object.assign(process.env, {
+    [TRIAL_ENV.caseId]: 'case-x', [TRIAL_ENV.kind]: 'behavior', [TRIAL_ENV.trial]: '2',
+    [TRIAL_ENV.panelN]: '3', [TRIAL_ENV.panelK]: '2', [TRIAL_ENV.policyVersion]: String(EVAL_POLICY.version),
+    GSTACK_EVAL_DIR: dir,
+  });
+
+  test('trialContextFromEnv: absent, complete, and malformed', () => {
+    for (const key of Object.values(TRIAL_ENV)) delete process.env[key];
+    expect(trialContextFromEnv()).toBeNull();
+    setTrial();
+    expect(trialContextFromEnv()).toEqual({ case_id: 'case-x', kind: 'behavior', trial: 2, panel: { n: 3, k: 2 }, policy_version: EVAL_POLICY.version });
+    process.env[TRIAL_ENV.trial] = '4';
+    expect(() => trialContextFromEnv()).toThrow(/Malformed trial context/);
+  });
+
+  test('passing contract is a no-op', () => {
+    setTrial();
+    expect(() => expectContract(true, 'fine')).not.toThrow();
+    expect(fs.existsSync(path.join(dir, CONTRACT_VIOLATIONS_FILE))).toBe(false);
+  });
+
+  test('failed contract stamps the recorded entry and the sidecar before throwing', () => {
+    setTrial();
+    const collector = new EvalCollector('e2e', dir);
+    collector.addTest({ name: 'case-x', suite: 's', tier: 'e2e', passed: true, duration_ms: 1, cost_usd: 0 });
+    expect(() => expectContract(false, 'handoff missing', { collector, name: 'case-x' })).toThrow(ContractViolation);
+    const partial = JSON.parse(fs.readFileSync(path.join(dir, '_partial-e2e.json'), 'utf-8'));
+    expect(partial.tests[0]).toMatchObject({ passed: false, failure_class: 'contract', case_id: 'case-x', trial: 2, kind: 'behavior', panel: { n: 3, k: 2 } });
+    const sidecar = fs.readFileSync(path.join(dir, CONTRACT_VIOLATIONS_FILE), 'utf-8').trim().split('\n').map((l) => JSON.parse(l));
+    expect(sidecar).toEqual([expect.objectContaining({ case_id: 'case-x', trial: 2, message: 'handoff missing' })]);
+  });
+
+  test('a contract marked before recording stamps the later record, or becomes its own at finalize', async () => {
+    setTrial();
+    const collector = new EvalCollector('e2e', dir);
+    expect(() => expectContract(0, 'no question asked', { collector, name: 'later' })).toThrow('CONTRACT: no question asked');
+    collector.addTest({ name: 'later', suite: 's', tier: 'e2e', passed: true, duration_ms: 1, cost_usd: 0 });
+    expect(() => expectContract(null, 'never recorded', { collector, name: 'orphan' })).toThrow();
+    const file = await collector.finalize();
+    const tests = JSON.parse(fs.readFileSync(file, 'utf-8')).tests;
+    expect(tests.find((t: any) => t.name === 'later')).toMatchObject({ passed: false, failure_class: 'contract' });
+    expect(tests.find((t: any) => t.name === 'orphan')).toMatchObject({ passed: false, failure_class: 'contract', error: 'never recorded' });
+  });
+});
+
+describe('trial-outcomes JSONL', () => {
+  const record = (extra: Partial<TrialOutcomeRecord> = {}): TrialOutcomeRecord => ({
+    schema: TRIAL_OUTCOME_SCHEMA, case: 'case-x', file: 'test/x.test.ts', tier: 'gate', kind: 'behavior',
+    trial: 1, panel: { n: 3, k: 2 }, attempt: 1, outcome: 'passed', duration_ms: 10, cost_usd: 0.1,
+    policy_version: EVAL_POLICY.version, quarantined: false, execution: 'executed', source: 'shard', ...extra,
+  });
+
+  test('round-trips valid records', () => {
+    const records = [record(), record({ trial: 2, outcome: 'failed', failure_class: 'timeout', exit_reason: 'timeout' })];
+    expect(parseTrialOutcomes(formatTrialOutcomes(records))).toEqual({ records, errors: [] });
+  });
+
+  test('writer fails closed; reader reports bad lines as data errors', () => {
+    expect(() => formatTrialOutcomes([record({ outcome: 'failed' })])).toThrow(/failed without failure_class/);
+    expect(() => formatTrialOutcomes([record({ trial: 4 })])).toThrow(/trial invalid/);
+    const text = `${JSON.stringify(record())}\nnot json\n${JSON.stringify({ ...record(), schema: 'other' })}\n`;
+    const parsed = parseTrialOutcomes(text);
+    expect(parsed.records).toHaveLength(1);
+    expect(parsed.errors).toEqual(['line 2: not JSON', 'line 3: schema other']);
+    expect(parseTrialOutcomes(text, { maxBytes: 10 }).errors[0]).toContain('exceed');
+  });
+
+  test('new optional fields: valid records pass the current reader and the frozen v1 reader', () => {
+    const failed = record({ trial: 2, outcome: 'failed', failure_class: 'assertion', exit_reason: 'success',
+      error: sanitizeTrialError('expect(received).toBe(expected)\n\nExpected: "b"\nReceived: "a"'),
+      failure_cause: 'assertion', failure_cause_evidence: 'session completed; check failed',
+      failure_detail: { expected: '"b"', received: '"a"' }, cost_known: false,
+      sessions: [{ key: 'claude-p:case-x#1', runner: 'claude-p', elapsed_ms: 1200, budget_ms: 300_000, end: 'completed' }] });
+    const judge = record({ trial: 3, outcome: 'failed', failure_class: 'assertion', failure_cause: 'assertion',
+      failure_detail: { judge: [{ dimension: 'clarity', mean: 3.67, threshold: 4, samples: 3, rationale: 'Clarity suffers from density.' }] } });
+    const passed = record({ sessions: [{ key: 'pty:case-x#1', runner: 'pty', elapsed_ms: 10, end: 'completed' }] });
+    for (const r of [failed, judge, passed]) {
+      expect(trialRecordProblemsV1(JSON.parse(JSON.stringify(r)))).toEqual([]);
+      expect(r.error === undefined || r.error.length <= TRIAL_ERROR_MAX).toBe(true);
+    }
+    expect(parseTrialOutcomes(formatTrialOutcomes([failed, judge, passed]))).toEqual({ records: [failed, judge, passed], errors: [] });
+  });
+
+  test('new optional fields are bounded and checked only when present', () => {
+    const failed = (extra: Partial<TrialOutcomeRecord> | Record<string, unknown>) => record({ outcome: 'failed', failure_class: 'assertion', ...extra } as Partial<TrialOutcomeRecord>);
+    const problems = (r: unknown) => parseTrialOutcomes(JSON.stringify(r)).errors;
+    expect(problems(record({ failure_cause: 'assertion' }))[0]).toContain('failure_cause on a non-failed trial');
+    expect(problems(failed({ failure_cause: 'detector' }))[0]).toContain("unknown failure_cause \"detector\" (written by a newer gstack; update this checkout to read it)");
+    expect(problems(failed({ failure_cause_evidence: 'x'.repeat(301) }))[0]).toContain('failure_cause_evidence invalid');
+    expect(problems(failed({ failure_detail: { expected: 'x'.repeat(201), received: '' } }))[0]).toContain('failure_detail invalid');
+    expect(problems(failed({ failure_detail: { judge: [] } }))[0]).toContain('failure_detail invalid');
+    expect(problems(record({ sessions: [{ key: 'k', runner: 'pty', elapsed_ms: -1, end: 'completed' }] }))[0]).toContain('sessions invalid');
+    expect(problems(record({ cost_known: 'no' } as any))[0]).toContain('cost_known invalid');
+    expect(problems(failed({}))).toEqual([]);
+  });
+
+  test('sanitizeTrialError keeps one capped line without mentions', () => {
+    expect(sanitizeTrialError('\n  expected @garrytan to `see`\nsecond')).toBe("expected @\u200bgarrytan to 'see'");
+    expect(sanitizeTrialError('x'.repeat(1000))!.length).toBe(300);
+    expect(sanitizeTrialError('')).toBeUndefined();
   });
 });

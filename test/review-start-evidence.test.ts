@@ -1,0 +1,418 @@
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import { execFileSync, spawnSync } from 'node:child_process';
+import { chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
+import { findFilesBySuffix, gitArgvIn } from './helpers/scratch-repo';
+import { canReuseSharedLibsAdvisory, sharedLibsFingerprint, stampGateFindings } from '../lib/review-evidence';
+
+const ROOT = resolve(import.meta.dir, '..');
+let repo: string;
+let home: string;
+
+function cli(name: string, args: string[] = [], cwd = repo, extraEnv: Record<string, string | undefined> = {}) {
+  return execFileSync(join(ROOT, 'bin', name), args, {
+    cwd, env: { ...process.env, GSTACK_HOME: home, ...extraEnv }, encoding: 'utf8', timeout: 10_000,
+  }).trim();
+}
+
+function git(...args: string[]) {
+  const result = gitArgvIn(repo, args, 10_000);
+  if (result.error || result.status !== 0)
+    throw new Error(`Fixture git failed: ${result.error?.message ?? result.stderr.toString()}`);
+  return result.stdout.toString().trim();
+}
+
+function log(token?: string, overrides: Record<string, any> = {}) {
+  const record = {
+    skill: 'review', status: 'clean', timestamp: new Date().toISOString(),
+    commit: git('rev-parse', '--short', 'HEAD'), completed: true, converged: true, cycles: 0,
+    ...overrides,
+  };
+  cli('gstack-review-log', [JSON.stringify(record), ...(token ? ['--finish', token] : [])]);
+  return rows().at(-1)!;
+}
+
+function rows() {
+  return cli('gstack-review-read').split('---CONFIG---')[0].trim().split('\n').map(line => JSON.parse(line));
+}
+
+beforeEach(() => {
+  repo = mkdtempSync(join(tmpdir(), 'review-start-repo-'));
+  home = mkdtempSync(join(tmpdir(), 'review-start-state-'));
+  git('init', '-q', '-b', 'main');
+  writeFileSync(join(repo, 'source.ts'), 'export const value = 1;\n');
+  git('add', 'source.ts');
+  git('commit', '-qm', 'initial');
+});
+
+afterEach(() => {
+  rmSync(repo, { recursive: true, force: true });
+  rmSync(home, { recursive: true, force: true });
+});
+
+// Gate findings: the logger, not the caller, says who dispositioned a gate
+// edit. A child that relaxed a test cannot log `actor: interactive, action:
+// kept` about itself; only a human-present session keeps a disposition.
+describe('gate finding actor stamping', () => {
+  const gate = (overrides: Record<string, any> = {}) => ({
+    fingerprint: 'test/a.test.ts:12:gate-integrity', severity: 'CRITICAL',
+    gate: 'RH-15', gate_id: 'g-0001', action: 'kept', reason: 'measured in ship-measure report', ...overrides,
+  });
+  const sessionEnv = (kind: 'interactive' | 'spawned' | 'headless') => ({
+    GSTACK_SESSION_KIND: kind === 'spawned' ? 'spawned' : undefined,
+    GSTACK_HEADLESS: kind === 'headless' ? '1' : undefined,
+    OPENCLAW_SESSION: undefined,
+    CLAUDE_CODE_ENTRYPOINT: kind === 'interactive' ? 'cli' : undefined,
+  });
+  const logWith = (kind: 'interactive' | 'spawned' | 'headless', findings: Record<string, any>[]) => {
+    const token = cli('gstack-review-log', ['--start', 'review'], repo, sessionEnv(kind));
+    const record = {
+      skill: 'review', status: 'issues_found', timestamp: new Date().toISOString(),
+      commit: git('rev-parse', '--short', 'HEAD'), completed: true, converged: true, cycles: 0,
+      issues_found: findings.length, critical: findings.length, informational: 0, findings,
+    };
+    cli('gstack-review-log', [JSON.stringify(record), '--finish', token], repo, sessionEnv(kind));
+    return rows().at(-1)!.findings as Record<string, any>[];
+  };
+
+  test('an interactive session keeps the disposition and the logger replaces a caller-supplied actor', () => {
+    const [kept, restored, open, plain] = logWith('interactive', [
+      gate({ actor: 'human' }), gate({ action: 'restored', reason: undefined }),
+      gate({ action: 'open', reason: 'should be dropped' }),
+      { fingerprint: 'src/a.ts:3:sql', severity: 'CRITICAL', action: 'skipped', actor: 'human' },
+    ]);
+    expect(kept).toMatchObject({ actor: 'interactive', action: 'kept', reason: 'measured in ship-measure report' });
+    expect(restored).toMatchObject({ actor: 'interactive', action: 'restored' });
+    expect(open).toMatchObject({ actor: 'interactive', action: 'open' });
+    expect(open.reason).toBeUndefined();
+    expect(plain.actor).toBe('human');
+    expect(plain.action).toBe('skipped');
+  });
+
+  for (const kind of ['spawned', 'headless'] as const) {
+    test(`a ${kind} session cannot record kept or restored on a gate finding`, () => {
+      const [kept, restored, plain] = logWith(kind, [
+        gate({ actor: 'interactive' }), gate({ action: 'restored', reason: undefined }),
+        { fingerprint: 'src/a.ts:3:sql', severity: 'CRITICAL', action: 'skipped' },
+      ]);
+      expect(kept).toMatchObject({ actor: kind, action: 'open' });
+      expect(kept.reason).toBeUndefined();
+      expect(restored).toMatchObject({ actor: kind, action: 'open' });
+      expect(plain.actor).toBeUndefined();
+      expect(plain.action).toBe('skipped');
+    });
+  }
+
+  test('a malformed gate action is a missing disposition, not a kept gate', () => {
+    const findings = [gate({ action: 'skipped' }), gate({ action: 'fixed' }), gate({ action: 'auto-fixed' })];
+    stampGateFindings(findings, 'interactive');
+    for (const finding of findings) expect(finding).toMatchObject({ actor: 'interactive', action: 'open' });
+    const ignored = [{ gate: '', action: 'kept', actor: 'human' }, 'not a record', null];
+    stampGateFindings(ignored, 'spawned');
+    expect(ignored[0]).toEqual({ gate: '', action: 'kept', actor: 'human' });
+  });
+});
+
+describe('review start/end binding (#2803)', () => {
+  test('a matching core snapshot preserves incomplete coverage and a saved native tree exposes later untracked edits', () => {
+    const core = log(cli('gstack-review-log', ['--start', 'review']), {
+      status: 'issues_found', completed: false, converged: false,
+    });
+    const native = log(cli('gstack-review-log', ['--start', 'adversarial-review']), {
+      skill: 'adversarial-review', source: 'in-host',
+    });
+    expect(core.review_binding.state).toBe('incomplete');
+    expect(core.wtree).toBeUndefined();
+    expect(native.review_binding.state).toBe('verified');
+    expect(core.review_binding.start_wtree).toBe(native.wtree);
+    expect(core.review_binding.end_wtree).toBe(native.wtree);
+    expect(git('diff', native.wtree, cli('gstack-wtree'))).toBe('');
+    writeFileSync(join(repo, 'new.ts'), 'export const changed = true;\n');
+    expect(git('diff', '--name-only', native.wtree, cli('gstack-wtree'))).toBe('new.ts');
+    const saved = rows()[0];
+    expect(saved.completed).toBe(false);
+    expect(saved.converged).toBe(false);
+    expect(saved.review_freshness.status).toBe('UNVERIFIED');
+  });
+
+  test('unchanged completed review is current, including an identical-content commit', () => {
+    writeFileSync(join(repo, 'source.ts'), 'export const value = 2;\n');
+    writeFileSync(join(repo, 'new.ts'), 'export {};\n');
+    const token = cli('gstack-review-log', ['--start', 'review']);
+    git('add', 'source.ts', 'new.ts');
+    git('commit', '-qm', 'reviewed content');
+    const row = log(token);
+    expect(row.review_binding.state).toBe('verified');
+    expect(row.review_binding.start_wtree).toBe(row.wtree);
+    expect(row.review_binding.end_wtree).toBe(row.wtree);
+    expect(row.review_binding.started_at).toMatch(/^\d{4}-/);
+    expect(row.review_binding.branch_id).toBe('0d6e4079e36703ebd37c00722f5891d28b0e2811dc114b129215123adcce3605');
+    expect(row.review_freshness.status).toBe('CURRENT');
+    git('commit', '--amend', '--no-edit');
+    expect(rows()[0].review_freshness.status).toBe('CURRENT');
+  });
+
+  for (const file of ['source.ts', 'untracked.ts']) {
+    test(`mid-review ${file} edit is stale even at zero commit distance`, () => {
+      const token = cli('gstack-review-log', ['--start', 'review']);
+      writeFileSync(join(repo, file), 'export const unreviewed = true;\n');
+      const row = log(token);
+      expect(git('rev-list', '--count', `${row.commit}..HEAD`)).toBe('0');
+      expect(row.wtree).toBeUndefined();
+      expect(row.review_binding.state).toBe('changed');
+      expect(row.review_binding.start_wtree).not.toBe(row.review_binding.end_wtree);
+      expect(row.review_freshness.status).toBe('STALE');
+    });
+  }
+
+  test('fix commits do not certify the final tree until a new unchanged pass', () => {
+    const token = cli('gstack-review-log', ['--start', 'review']);
+    writeFileSync(join(repo, 'source.ts'), 'export const fixed = true;\n');
+    git('commit', '-qam', 'fix: review finding');
+    expect(log(token, { cycles: 3, converged: false }).review_freshness.status).toBe('STALE');
+    const rerun = cli('gstack-review-log', ['--start', 'review']);
+    expect(log(rerun, { cycles: 3 }).review_freshness.status).toBe('CURRENT');
+  });
+
+  test('log-only forged binding cannot certify current content', () => {
+    const wtree = cli('gstack-wtree');
+    const row = log(undefined, {
+      wtree, review_binding: { state: 'verified', start_wtree: wtree, end_wtree: wtree, branch_id: 'forged' },
+      review_freshness: { status: 'CURRENT' },
+    });
+    expect(row.wtree).toBeUndefined();
+    expect(row.review_binding.state).toBe('uncaptured');
+    expect(row.review_binding.branch_id).toBeUndefined();
+    expect(row.review_freshness.status).toBe('UNVERIFIED');
+    expect(log(wtree).review_freshness.status).toBe('UNVERIFIED');
+    expect(log('../forged').review_freshness.status).toBe('UNVERIFIED');
+  });
+
+  test('a valid start supplies the branch digest and discards a caller-forged digest', () => {
+    const token = cli('gstack-review-log', ['--start', 'review']);
+    const row = log(token, { review_binding: { branch_id: 'forged' } });
+    expect(row.review_binding.branch_id).toBe('0d6e4079e36703ebd37c00722f5891d28b0e2811dc114b129215123adcce3605');
+    expect(row.review_freshness.status).toBe('CURRENT');
+  });
+
+  test('colliding log filenames preserve advisory metadata without reusing another raw branch decision', () => {
+    writeFileSync(join(repo, 'second.ts'), 'export const other = 2;\n');
+    const finding = {
+      advisory: true, severity: 'INFORMATIONAL', action: 'skipped',
+      evidence_paths: ['source.ts', 'second.ts'], helper_target: { path: 'lib/shared.ts', symbol: 'readValue' },
+    };
+    const priorFinding = {
+      ...finding, fingerprint: sharedLibsFingerprint(finding),
+      snapshot_covered_paths: [...finding.evidence_paths],
+    };
+    git('checkout', '-qb', 'feature/a');
+    const first = log(cli('gstack-review-log', ['--start', 'review']), { findings: [priorFinding] });
+    git('checkout', '-qb', 'feature-a');
+    const second = log(cli('gstack-review-log', ['--start', 'review']));
+    expect(findFilesBySuffix(home, '-reviews.jsonl')).toHaveLength(1);
+    expect(rows()).toHaveLength(2);
+    expect(first.findings[0]).toEqual(priorFinding);
+    expect(first.findings[0].snapshot_covered_paths).toEqual(['source.ts', 'second.ts']);
+    expect(first.wtree).toBe(second.wtree);
+    expect(first.review_binding.branch_id).toMatch(/^[0-9a-f]{64}$/);
+    expect(first.review_binding.branch_id).not.toBe(second.review_binding.branch_id);
+    const currentSnapshot = {
+      wtree: second.wtree, branch_id: second.review_binding.branch_id, covered_paths: finding.evidence_paths,
+    };
+    expect(canReuseSharedLibsAdvisory(first.findings[0], finding, first, currentSnapshot)).toBe(false);
+    expect(canReuseSharedLibsAdvisory(first.findings[0], finding, first, {
+      ...currentSnapshot, branch_id: first.review_binding.branch_id,
+    })).toBe(true);
+  });
+
+  test('start receipt is single-use and scoped to the reviewer and branch', () => {
+    const token = cli('gstack-review-log', ['--start', 'review']);
+    expect(log(token).review_freshness.status).toBe('CURRENT');
+    expect(log(token).review_freshness.status).toBe('UNVERIFIED');
+    const wrongSkill = cli('gstack-review-log', ['--start', 'adversarial-review']);
+    expect(log(wrongSkill).review_freshness.status).toBe('UNVERIFIED');
+    const wrongBranch = cli('gstack-review-log', ['--start', 'review']);
+    git('checkout', '-qb', 'other');
+    expect(log(wrongBranch).review_freshness.status).toBe('UNVERIFIED');
+  });
+
+  for (const flags of [
+    { completed: false }, { completed: undefined }, { converged: false }, { converged: undefined },
+    { status: 'unavailable' }, { status: 'issues_found', critical: 7, issues_found: 51 },
+    { critical: 7, issues_found: 51 },
+  ]) {
+    test(`incomplete, nonconverged or unresolved result is not current: ${JSON.stringify(flags)}`, () => {
+      const token = cli('gstack-review-log', ['--start', 'review']);
+      expect(log(token, flags).review_freshness.status).toBe('UNVERIFIED');
+    });
+  }
+
+  test('post-log untracked edits invalidate a previously current review', () => {
+    const token = cli('gstack-review-log', ['--start', 'review']);
+    log(token);
+    writeFileSync(join(repo, 'later.ts'), 'export {};\n');
+    expect(rows()[0].review_freshness.status).toBe('STALE');
+  });
+
+  test('a Codex pass needs a genuine unchanged rerun after fixes', () => {
+    const original = cli('gstack-review-log', ['--start', 'codex-review']);
+    writeFileSync(join(repo, 'source.ts'), 'export const fixed = true;\n');
+    expect(log(original, { skill: 'codex-review' }).review_freshness.status).toBe('STALE');
+    const rerun = cli('gstack-review-log', ['--start', 'codex-review']);
+    expect(log(rerun, { skill: 'codex-review' }).review_freshness.status).toBe('CURRENT');
+  });
+
+  for (const [findings, findings_fixed, freshness] of [
+    [2, 0, 'UNVERIFIED'],
+    [2, 1, 'UNVERIFIED'],
+    [2, 2, 'CURRENT'],
+    [0, 0, 'CURRENT'],
+  ] as const) {
+    test(`Codex gate pass with ${findings_fixed}/${findings} findings resolved grades ${freshness}`, () => {
+      const token = cli('gstack-review-log', ['--start', 'codex-review']);
+      const row = log(token, { skill: 'codex-review', status: 'clean', gate: 'pass', findings, findings_fixed });
+      expect(row.review_binding.state).toBe('verified');
+      expect(row.gate).toBe('pass');
+      expect(row.review_freshness.status).toBe(freshness);
+    });
+  }
+
+  test('legacy diff rows cannot use log-time wtree or HEAD; plan evidence is unchanged', () => {
+    log(undefined, { skill: 'plan-eng-review', completed: undefined, converged: undefined });
+    const file = findFilesBySuffix(home, '-reviews.jsonl')[0];
+    const plan = JSON.parse(readFileSync(file, 'utf8').trim());
+    const legacy = { ...plan, skill: 'review', review_freshness: { status: 'CURRENT' } };
+    writeFileSync(file, [plan, legacy, { ...legacy, wtree: undefined }].map(r => JSON.stringify(r)).join('\n') + '\n');
+    const read = rows();
+    expect(read[0]).toEqual(plan);
+    expect(read[0].wtree).toBe(cli('gstack-wtree'));
+    expect(read[1].review_freshness.status).toBe('UNVERIFIED');
+    expect(read[2].review_freshness.status).toBe('UNVERIFIED');
+  });
+
+  for (const skill of ['adversarial-review', 'codex-review', 'design-review-lite', 'ship']) {
+    test(`${skill} cannot fall through to legacy plan handling`, () => {
+      expect(log(undefined, { skill }).review_freshness.status).toBe('UNVERIFIED');
+    });
+  }
+
+  test('ship metrics cannot impersonate a completed review pass', () => {
+    const token = cli('gstack-review-log', ['--start', 'ship']);
+    const row = log(token, { skill: 'ship' });
+    expect(row.review_freshness.status).toBe('UNVERIFIED');
+    expect(row.review_freshness.reason).toContain('telemetry');
+  });
+});
+
+// E4: Codex's sandbox mounts .git read-only, so `git add -A` could not write
+// the fingerprint's blobs and /review lost its start capture. gstack-wtree now
+// writes new objects to a private directory owned by the review-log operation,
+// which keeps it until bindReview/checkSharedLibsReuse have read the tree.
+const asRoot = typeof process.getuid === 'function' && process.getuid() === 0;
+describe.skipIf(process.platform === 'win32' || asRoot)('review fingerprint under a read-only .git (E4)', () => {
+  let scratch: string;
+  beforeEach(() => { scratch = mkdtempSync(join(tmpdir(), 'review-ro-tmp-')); });
+  afterEach(() => {
+    spawnSync('chmod', ['-R', 'u+w', join(repo, '.git')], { timeout: 10_000 });
+    rmSync(scratch, { recursive: true, force: true });
+  });
+
+  const run = (name: string, args: string[], cwd: string, opts: { input?: string; env?: Record<string, string> } = {}) =>
+    spawnSync(join(ROOT, 'bin', name), args, {
+      cwd, input: opts.input, encoding: 'utf8', timeout: 20_000,
+      env: { ...process.env, GSTACK_HOME: home, TMPDIR: scratch, ...opts.env },
+    });
+  const finding = {
+    advisory: true, severity: 'INFORMATIONAL', action: 'skipped',
+    evidence_paths: ['source.ts', 'untracked.ts'], helper_target: { path: 'lib/shared.ts', symbol: 'readValue' },
+  };
+  const readOnlyGit = () => {
+    const r = spawnSync('chmod', ['-R', 'a-w', join(repo, '.git')], { timeout: 10_000 });
+    expect(r.status).toBe(0);
+  };
+
+  for (const where of ['main checkout', 'linked worktree']) {
+    test(`--start -> --finish -> shared-libs reuse with dirty and untracked files (${where})`, () => {
+      let cwd = repo;
+      if (where === 'linked worktree') {
+        cwd = join(scratch, 'linked wt');
+        git('worktree', 'add', '-q', '-b', 'linked', cwd);
+      }
+      writeFileSync(join(cwd, 'source.ts'), 'export const value = 42;\n');
+      writeFileSync(join(cwd, 'untracked.ts'), 'export const fresh = true;\n');
+      readOnlyGit();
+      const before = spawnSync('find', [join(repo, '.git', 'objects'), '-type', 'f'], { encoding: 'utf8', timeout: 10_000 }).stdout;
+
+      const start = run('gstack-review-log', ['--start', 'review'], cwd);
+      expect(start.stderr).toBe('');
+      expect(start.status).toBe(0);
+      const token = start.stdout.trim();
+      expect(token).toMatch(/^[0-9a-f-]{36}$/);
+      const record = { skill: 'review', status: 'clean', timestamp: new Date().toISOString(), completed: true, converged: true, findings: [finding] };
+      const finish = run('gstack-review-log', [JSON.stringify(record), '--finish', token], cwd);
+      expect(finish.status).toBe(0);
+      const logged = JSON.parse(run('gstack-review-read', [], cwd).stdout.split('---CONFIG---')[0].trim().split('\n').at(-1)!);
+      expect(logged.review_binding.state).toBe('verified');
+      expect(logged.wtree).toMatch(/^[0-9a-f]{40}$/);
+      // The consumer read the private tree and blobs before cleanup.
+      expect(logged.findings[0].snapshot_covered_paths).toEqual(['source.ts', 'untracked.ts']);
+
+      const again = run('gstack-review-log', ['--start', 'review'], cwd).stdout.trim();
+      const reuse = run('gstack-review-log', ['--check-shared-libs', again], cwd, { input: JSON.stringify(finding) });
+      expect(reuse.status).toBe(0);
+      expect(JSON.parse(reuse.stdout).reusable).toBe(true);
+
+      expect(spawnSync('find', [join(repo, '.git', 'objects'), '-type', 'f'], { encoding: 'utf8', timeout: 10_000 }).stdout).toBe(before);
+      expect(readdirSync(scratch).filter((name) => name.startsWith('gstack-wtree'))).toEqual([]);
+
+      // Same fingerprint as a writable .git.
+      spawnSync('chmod', ['-R', 'u+w', join(repo, '.git')], { timeout: 10_000 });
+      expect(run('gstack-wtree', [], cwd).stdout.trim()).toBe(logged.wtree);
+    }, 60_000);
+  }
+
+  test('the private directory is 0700 and alive while the consumer runs, then removed', () => {
+    writeFileSync(join(repo, 'untracked.ts'), 'export const fresh = true;\n');
+    readOnlyGit();
+    const shim = join(scratch, 'shim');
+    const probe = join(scratch, 'probe.log');
+    mkdirSync(shim);
+    writeFileSync(join(shim, 'bun'), [
+      '#!/usr/bin/env bash',
+      'first="${GIT_ALTERNATE_OBJECT_DIRECTORIES%%:*}"',
+      `[ -n "$first" ] && ls -ld "$first" | cut -c1-10 >> '${probe}'`,
+      `exec '${process.execPath}' "$@"`,
+    ].join('\n') + '\n', { mode: 0o755 });
+    const env = { PATH: `${shim}:${process.env.PATH}` };
+    const token = run('gstack-review-log', ['--start', 'review'], repo, { env }).stdout.trim();
+    const record = { skill: 'review', status: 'clean', timestamp: new Date().toISOString(), completed: true, converged: true };
+    expect(run('gstack-review-log', [JSON.stringify(record), '--finish', token], repo, { env }).status).toBe(0);
+    expect(readFileSync(probe, 'utf8').trim().split('\n')).toEqual(['drwx------', 'drwx------']);
+    expect(readdirSync(scratch).filter((name) => name.startsWith('gstack-wtree'))).toEqual([]);
+  }, 60_000);
+
+  test('a failed object write exits 1 with one stderr line and no partial hash', () => {
+    writeFileSync(join(repo, 'untracked.ts'), 'export const fresh = true;\n');
+    const objects = join(scratch, 'objects');
+    mkdirSync(objects, { mode: 0o500 });
+    const r = run('gstack-wtree', [], repo, { env: { GSTACK_WTREE_OBJECT_DIR: objects } });
+    chmodSync(objects, 0o700);
+    expect(r.status).toBe(1);
+    expect(r.stdout).toBe('');
+    expect(r.stderr.trim().split('\n')).toHaveLength(1);
+    expect(r.stderr).toStartWith('gstack-wtree: cannot stage the working tree: ');
+  });
+
+  test('an unwritable TMPDIR is named, and review-log reports it on stderr while stdout stays clean', () => {
+    const missing = join(scratch, 'no such dir');
+    const wtree = run('gstack-wtree', [], repo, { env: { TMPDIR: missing } });
+    expect(wtree.status).toBe(1);
+    expect(wtree.stdout).toBe('');
+    expect(wtree.stderr.trim()).toBe(`gstack-wtree: cannot create a temp index under ${missing}; set TMPDIR to a writable directory`);
+    const start = run('gstack-review-log', ['--start', 'review'], repo, { env: { TMPDIR: missing } });
+    expect(start.status).not.toBe(0);
+    expect(start.stdout).toBe('');
+    expect(start.stderr).toContain(`gstack-review-log: cannot create a private object directory under ${missing}; no working-tree fingerprint.`);
+  }, 30_000);
+});

@@ -1,0 +1,149 @@
+#!/usr/bin/env bash
+# gstack-safe-git — run one allowlisted, read-only Git query for audits that
+# must not execute project-controlled code (/deslop-shared-libs).
+#
+# Usage: gstack-safe-git [-C <dir>] <subcommand> [args...]
+#
+# Every invocation runs `git` with this fixed prefix; callers cannot add or
+# override it:
+#   GIT_OPTIONAL_LOCKS=0 GIT_NO_LAZY_FETCH=1 GIT_TERMINAL_PROMPT=0
+#   git --no-pager --no-lazy-fetch --no-replace-objects
+#       -c core.fsmonitor=false -c log.showSignature=false -c diff.submodule=short
+#
+# Only query shapes that cannot run clean/process filters, textconv or external
+# diff drivers, signature verifiers, pagers, transports, or index/ref writes are
+# forwarded. log/show/diff always get --no-ext-diff --no-textconv; diff is only
+# between two explicit object IDs. Everything else is refused with exit 2 and
+# a one-line message naming the allowed forms. Git's own exit status passes
+# through unchanged, including 129 when this Git lacks --no-lazy-fetch.
+#
+# The script sources nothing and executes only `git` from PATH.
+set -euo pipefail
+
+ALLOWED='allowed: rev-parse, symbolic-ref [--short] <ref>, branch --show-current, remote [-v | get-url <name>], config --get|--get-all|--get-regexp <key>, log, show, ls-tree, cat-file, rev-list, merge-base, for-each-ref, show-ref, grep, diff <object-id> <object-id> [-- <path>...], ls-files --cached --others --exclude-standard -z [-- <path>...]'
+
+refuse() {
+  echo "gstack-safe-git: refused: $1; $ALLOWED" >&2
+  exit 2
+}
+
+dir_args=()
+if [ "${1:-}" = "-C" ]; then
+  [ $# -ge 2 ] || refuse "-C needs a directory"
+  dir_args=(-C "$2")
+  shift 2
+fi
+[ $# -ge 1 ] || refuse "no subcommand"
+sub=$1
+shift
+case "$sub" in
+  -*) refuse "global option '$sub' (only a leading -C <dir> is accepted; the safety -c settings are fixed)" ;;
+  rev-parse|symbolic-ref|branch|remote|config|log|show|ls-tree|cat-file|rev-list|merge-base|for-each-ref|show-ref|grep|diff|ls-files) ;;
+  *) refuse "'$sub' is not an allowlisted read" ;;
+esac
+
+for arg in "$@"; do
+  [ "$arg" = "--" ] && break
+  case "$arg" in
+    --output|--output=*) refuse "'$arg' writes files" ;;
+    --ext-diff|--textconv|--filters|--path|--path=*) refuse "'$arg' can run configured diff drivers or filters" ;;
+    --show-signature|*%G*|*'%(signature'*) refuse "'$arg' runs a signature verifier" ;;
+    --no-index|--recurse-submodules) refuse "'$arg' reads outside the repository's committed objects" ;;
+  esac
+done
+
+positional_before_dashdash() {
+  local count=0 arg
+  for arg in "$@"; do
+    [ "$arg" = "--" ] && break
+    case "$arg" in -*) ;; *) count=$((count + 1)) ;; esac
+  done
+  echo "$count"
+}
+
+extra=()
+case "$sub" in
+  rev-parse|ls-tree|cat-file|rev-list|merge-base|for-each-ref|show-ref) ;;
+  log|show) extra=(--no-ext-diff --no-textconv) ;;
+  grep)
+    for arg in "$@"; do
+      [ "$arg" = "--" ] && break
+      case "$arg" in
+        -O*|--open-files-in-pager*) refuse "'$arg' launches a pager program" ;;
+      esac
+    done
+    ;;
+  symbolic-ref)
+    for arg in "$@"; do
+      case "$arg" in
+        -q|--quiet|--short|--no-recurse) ;;
+        -*) refuse "symbolic-ref '$arg' is not a read" ;;
+      esac
+    done
+    [ "$(positional_before_dashdash "$@")" = 1 ] || refuse "symbolic-ref reads exactly one ref"
+    ;;
+  branch)
+    [ "$*" = "--show-current" ] || refuse "branch is limited to 'branch --show-current'"
+    ;;
+  remote)
+    case "$*" in
+      ''|-v|--verbose) ;;
+      *)
+        [ "${1:-}" = "get-url" ] || refuse "remote is limited to listing and get-url"
+        shift_count=0
+        for arg in "${@:2}"; do
+          case "$arg" in
+            --push|--all) ;;
+            -*) refuse "remote get-url '$arg'" ;;
+            *) shift_count=$((shift_count + 1)) ;;
+          esac
+        done
+        [ "$shift_count" = 1 ] || refuse "remote get-url takes one remote name"
+        ;;
+    esac
+    ;;
+  config)
+    case "${1:-}" in
+      --get|--get-all|--get-regexp) ;;
+      *) refuse "config is limited to --get, --get-all and --get-regexp" ;;
+    esac
+    [ $# -ge 2 ] && [ $# -le 3 ] || refuse "config reads take a key and an optional value pattern"
+    for arg in "${@:2}"; do
+      case "$arg" in -*) refuse "config '$arg'" ;; esac
+    done
+    ;;
+  diff)
+    ids=0
+    for arg in "$@"; do
+      [ "$arg" = "--" ] && break
+      case "$arg" in
+        --cached|--staged|--merge-base|--merge-base=*) refuse "diff '$arg' compares the index or derived revisions" ;;
+        -*) ;;
+        *)
+          [[ "$arg" =~ ^[0-9a-fA-F]{7,64}$ ]] || refuse "diff operand '$arg' is not an explicit object ID (put paths after --)"
+          ids=$((ids + 1))
+          ;;
+      esac
+    done
+    [ "$ids" = 2 ] || refuse "diff needs exactly two explicit committed object IDs, never the worktree or index"
+    extra=(--no-ext-diff --no-textconv)
+    ;;
+  ls-files)
+    nul=0
+    for arg in "$@"; do
+      [ "$arg" = "--" ] && break
+      case "$arg" in
+        -z) nul=1 ;;
+        --cached|--others|--exclude-standard|--stage) ;;
+        *) refuse "ls-files '$arg' (the overlay form is 'ls-files --cached --others --exclude-standard -z [-- <path>...]')" ;;
+      esac
+    done
+    [ "$nul" = 1 ] || refuse "ls-files output must be NUL-delimited with -z"
+    ;;
+esac
+
+unset GIT_EXTERNAL_DIFF GIT_CONFIG_PARAMETERS GIT_CONFIG_COUNT
+export GIT_OPTIONAL_LOCKS=0 GIT_NO_LAZY_FETCH=1 GIT_TERMINAL_PROMPT=0
+exec git --no-pager --no-lazy-fetch --no-replace-objects \
+  -c core.fsmonitor=false -c log.showSignature=false -c diff.submodule=short \
+  ${dir_args[@]+"${dir_args[@]}"} "$sub" ${extra[@]+"${extra[@]}"} "$@"

@@ -1,0 +1,340 @@
+{
+ "sourceArchiveSha256": "33b7cd6a929fe2a0ab827dd0dd77aea9261357491f15220c0ef1359287b9d8d3",
+ "sourceRun": "39217387697 slice 8 qa-only-no-fix (PR #3272 head 3986ac5)",
+ "sourceEventIndices": [
+  466,
+  470,
+  656,
+  660,
+  701,
+  705,
+  772,
+  778
+ ],
+ "events": [
+  {
+   "type": "assistant",
+   "message": {
+    "model": "claude-opus-5-5",
+    "id": "msg_011CgBEbc3VPt2BCbX7eGKc6",
+    "type": "message",
+    "role": "assistant",
+    "content": [
+     {
+      "type": "tool_use",
+      "id": "toolu_01L7wBef1fN7eNy9mwQRni6M",
+      "name": "Bash",
+      "input": {
+       "command": "bun '__QA_GUARD__' run '__QA_FIXTURE__/qa-reports/deadline.json' -- bash -c 'bun \"__QA_FIXTURE__/fixture-browser-probe.ts\" \"__QA_BROWSE__\" \"http://127.0.0.1:39269/qa-only.html\" \"__QA_FIXTURE__/qa-reports/screenshots/initial.png\"'",
+       "description": "Run baseline browser probe under deadline guard"
+      },
+      "caller": {
+       "type": "direct"
+      }
+     }
+    ],
+    "container": null,
+    "stop_reason": null,
+    "stop_sequence": null,
+    "stop_details": null,
+    "usage": {
+     "input_tokens": 2,
+     "cache_creation_input_tokens": 329,
+     "cache_read_input_tokens": 45732,
+     "cache_creation": {
+      "ephemeral_5m_input_tokens": 329,
+      "ephemeral_1h_input_tokens": 0
+     },
+     "output_tokens": 16,
+     "service_tier": "standard",
+     "inference_geo": "global",
+     "speed": "standard"
+    },
+    "input_transformations": [],
+    "diagnostics": null,
+    "context_management": null
+   },
+   "parent_tool_use_id": null,
+   "session_id": "58ff97a2-be5b-40db-a3ce-fb390aad7c88",
+   "uuid": "35b66938-677e-4421-b459-c0a4c376b84d",
+   "timestamp": "2026-10-19T07:54:11.131Z",
+   "request_id": "req_011CgBEbbm8oyfaUy4RiMpug",
+   "wire_tool_inputs": {
+    "toolu_01L7wBef1fN7eNy9mwQRni6M": {
+     "command": "bun '__QA_GUARD__' run '__QA_FIXTURE__/qa-reports/deadline.json' -- bash -c 'bun \"__QA_FIXTURE__/fixture-browser-probe.ts\" \"__QA_BROWSE__\" \"http://127.0.0.1:39269/qa-only.html\" \"__QA_FIXTURE__/qa-reports/screenshots/initial.png\"'",
+     "description": "Run baseline browser probe under deadline guard"
+    }
+   }
+  },
+  {
+   "type": "user",
+   "message": {
+    "role": "user",
+    "content": [
+     {
+      "tool_use_id": "toolu_01L7wBef1fN7eNy9mwQRni6M",
+      "type": "tool_result",
+      "content": "QA_DEADLINE {\"guard\":\"qa-deadline\",\"event\":\"started\",\"version\":1,\"startedAt\":\"2026-10-19T07:54:07.184Z\",\"deadlineAt\":\"2026-10-19T07:54:37.184Z\",\"budgetMs\":30000,\"observedAt\":\"2026-10-19T07:54:11.155Z\",\"remainingMs\":26029,\"expired\":false}\n{\"navigation\":{\"stdout\":\"Navigated to http://127.0.0.1:39269/qa-only.html (200)\\n\",\"stderr\":\"[browse] Starting server...\\n\",\"exitCode\":0},\"console\":{\"stdout\":\"--- BEGIN UNTRUSTED EXTERNAL CONTENT (source: http://127.0.0.1:39269/qa-only.html) ---\\n[2026-10-19T07:54:11.698Z] [error] TypeError: Cannot read properties of undefined (reading 'map')\\n--- END UNTRUSTED EXTERNAL CONTENT ---\\n\",\"stderr\":\"\",\"exitCode\":0},\"screenshot\":{\"stdout\":\"Screenshot saved: __QA_FIXTURE__/qa-reports/screenshots/initial.png\\n\",\"stderr\":\"\",\"exitCode\":0}}\n\nQA_DEADLINE {\"guard\":\"qa-deadline\",\"event\":\"finished\",\"observedAt\":\"2026-10-19T07:54:11.808Z\",\"deadlineAt\":\"2026-10-19T07:54:37.184Z\",\"timedOut\":false,\"exitCode\":0}",
+      "is_error": false
+     }
+    ]
+   },
+   "parent_tool_use_id": null,
+   "session_id": "58ff97a2-be5b-40db-a3ce-fb390aad7c88",
+   "uuid": "a48d1ba7-2580-412a-9c36-a7e92de980d5",
+   "timestamp": "2026-10-19T07:54:11.818Z",
+   "tool_use_result": {
+    "stdout": "QA_DEADLINE {\"guard\":\"qa-deadline\",\"event\":\"started\",\"version\":1,\"startedAt\":\"2026-10-19T07:54:07.184Z\",\"deadlineAt\":\"2026-10-19T07:54:37.184Z\",\"budgetMs\":30000,\"observedAt\":\"2026-10-19T07:54:11.155Z\",\"remainingMs\":26029,\"expired\":false}\n{\"navigation\":{\"stdout\":\"Navigated to http://127.0.0.1:39269/qa-only.html (200)\\n\",\"stderr\":\"[browse] Starting server...\\n\",\"exitCode\":0},\"console\":{\"stdout\":\"--- BEGIN UNTRUSTED EXTERNAL CONTENT (source: http://127.0.0.1:39269/qa-only.html) ---\\n[2026-10-19T07:54:11.698Z] [error] TypeError: Cannot read properties of undefined (reading 'map')\\n--- END UNTRUSTED EXTERNAL CONTENT ---\\n\",\"stderr\":\"\",\"exitCode\":0},\"screenshot\":{\"stdout\":\"Screenshot saved: __QA_FIXTURE__/qa-reports/screenshots/initial.png\\n\",\"stderr\":\"\",\"exitCode\":0}}\n\nQA_DEADLINE {\"guard\":\"qa-deadline\",\"event\":\"finished\",\"observedAt\":\"2026-10-19T07:54:11.808Z\",\"deadlineAt\":\"2026-10-19T07:54:37.184Z\",\"timedOut\":false,\"exitCode\":0}",
+    "stderr": "",
+    "interrupted": false,
+    "isImage": false,
+    "noOutputExpected": false,
+    "bashEditDiff": {
+     "files": [],
+     "moreFiles": 1,
+     "changedFiles": [
+      "__QA_FIXTURE__/qa-reports/screenshots/initial.png"
+     ]
+    }
+   }
+  },
+  {
+   "type": "assistant",
+   "message": {
+    "model": "claude-opus-5-5",
+    "id": "msg_011CgBEc8zLFuDZaD1fV1X27",
+    "type": "message",
+    "role": "assistant",
+    "content": [
+     {
+      "type": "tool_use",
+      "id": "toolu_01B5gouuWiBq47RwAQzdjaW6",
+      "name": "Write",
+      "input": {
+       "file_path": "__QA_FIXTURE__/qa-reports/exploration-001.json",
+       "content": "{\n  \"observationCommand\": \"bun '__QA_GUARD__' run '__QA_FIXTURE__/qa-reports/deadline.json' -- bash -c 'bun \\\"__QA_FIXTURE__/fixture-browser-probe.ts\\\" \\\"__QA_BROWSE__\\\" \\\"http://127.0.0.1:39269/qa-only.html\\\" \\\"__QA_FIXTURE__/qa-reports/screenshots/initial.png\\\"'\",\n  \"observed\": {\"navigation\":{\"stdout\":\"Navigated to http://127.0.0.1:39269/qa-only.html (200)\\n\",\"stderr\":\"[browse] Starting server...\\n\",\"exitCode\":0},\"console\":{\"stdout\":\"--- BEGIN UNTRUSTED EXTERNAL CONTENT (source: http://127.0.0.1:39269/qa-only.html) ---\\n[2026-10-19T07:54:11.698Z] [error] TypeError: Cannot read properties of undefined (reading 'map')\\n--- END UNTRUSTED EXTERNAL CONTENT ---\\n\",\"stderr\":\"\",\"exitCode\":0},\"screenshot\":{\"stdout\":\"Screenshot saved: __QA_FIXTURE__/qa-reports/screenshots/initial.png\\n\",\"stderr\":\"\",\"exitCode\":0}},\n  \"hypothesis\": \"Baseline shows one console TypeError on load; exact replay of the same probe with a fresh screenshot confirms it is reproducible.\",\n  \"nextCommand\": \"bun '__QA_GUARD__' run '__QA_FIXTURE__/qa-reports/deadline.json' -- bash -c 'bun \\\"__QA_FIXTURE__/fixture-browser-probe.ts\\\" \\\"__QA_BROWSE__\\\" \\\"http://127.0.0.1:39269/qa-only.html\\\" \\\"__QA_FIXTURE__/qa-reports/screenshots/replay-001.png\\\"'\"\n}\n"
+      },
+      "caller": {
+       "type": "direct"
+      }
+     }
+    ],
+    "container": null,
+    "stop_reason": null,
+    "stop_sequence": null,
+    "stop_details": null,
+    "usage": {
+     "input_tokens": 2,
+     "cache_creation_input_tokens": 354,
+     "cache_read_input_tokens": 46991,
+     "cache_creation": {
+      "ephemeral_5m_input_tokens": 354,
+      "ephemeral_1h_input_tokens": 0
+     },
+     "output_tokens": 8,
+     "service_tier": "standard",
+     "inference_geo": "global",
+     "speed": "standard"
+    },
+    "input_transformations": [],
+    "diagnostics": null,
+    "context_management": null
+   },
+   "parent_tool_use_id": null,
+   "session_id": "58ff97a2-be5b-40db-a3ce-fb390aad7c88",
+   "uuid": "542289f5-d545-463a-a8b3-4789658d86d1",
+   "timestamp": "2026-10-19T07:54:23.625Z",
+   "request_id": "req_011CgBEc8jht4KHH1idTVyEj",
+   "wire_tool_inputs": {
+    "toolu_01B5gouuWiBq47RwAQzdjaW6": {
+     "file_path": "__QA_FIXTURE__/qa-reports/exploration-001.json",
+     "content": "{\n  \"observationCommand\": \"bun '__QA_GUARD__' run '__QA_FIXTURE__/qa-reports/deadline.json' -- bash -c 'bun \\\"__QA_FIXTURE__/fixture-browser-probe.ts\\\" \\\"__QA_BROWSE__\\\" \\\"http://127.0.0.1:39269/qa-only.html\\\" \\\"__QA_FIXTURE__/qa-reports/screenshots/initial.png\\\"'\",\n  \"observed\": {\"navigation\":{\"stdout\":\"Navigated to http://127.0.0.1:39269/qa-only.html (200)\\n\",\"stderr\":\"[browse] Starting server...\\n\",\"exitCode\":0},\"console\":{\"stdout\":\"--- BEGIN UNTRUSTED EXTERNAL CONTENT (source: http://127.0.0.1:39269/qa-only.html) ---\\n[2026-10-19T07:54:11.698Z] [error] TypeError: Cannot read properties of undefined (reading 'map')\\n--- END UNTRUSTED EXTERNAL CONTENT ---\\n\",\"stderr\":\"\",\"exitCode\":0},\"screenshot\":{\"stdout\":\"Screenshot saved: __QA_FIXTURE__/qa-reports/screenshots/initial.png\\n\",\"stderr\":\"\",\"exitCode\":0}},\n  \"hypothesis\": \"Baseline shows one console TypeError on load; exact replay of the same probe with a fresh screenshot confirms it is reproducible.\",\n  \"nextCommand\": \"bun '__QA_GUARD__' run '__QA_FIXTURE__/qa-reports/deadline.json' -- bash -c 'bun \\\"__QA_FIXTURE__/fixture-browser-probe.ts\\\" \\\"__QA_BROWSE__\\\" \\\"http://127.0.0.1:39269/qa-only.html\\\" \\\"__QA_FIXTURE__/qa-reports/screenshots/replay-001.png\\\"'\"\n}\n"
+    }
+   }
+  },
+  {
+   "type": "user",
+   "message": {
+    "role": "user",
+    "content": [
+     {
+      "tool_use_id": "toolu_01B5gouuWiBq47RwAQzdjaW6",
+      "type": "tool_result",
+      "content": "File created successfully at: __QA_FIXTURE__/qa-reports/exploration-001.json (file state is current in your context \u2014 no need to Read it back)"
+     }
+    ]
+   },
+   "parent_tool_use_id": null,
+   "session_id": "58ff97a2-be5b-40db-a3ce-fb390aad7c88",
+   "uuid": "f4b34e9f-8772-491e-96cb-5029c43001c9",
+   "timestamp": "2026-10-19T07:54:23.636Z",
+   "tool_use_result": {
+    "type": "create",
+    "filePath": "__QA_FIXTURE__/qa-reports/exploration-001.json",
+    "content": "{\n  \"observationCommand\": \"bun '__QA_GUARD__' run '__QA_FIXTURE__/qa-reports/deadline.json' -- bash -c 'bun \\\"__QA_FIXTURE__/fixture-browser-probe.ts\\\" \\\"__QA_BROWSE__\\\" \\\"http://127.0.0.1:39269/qa-only.html\\\" \\\"__QA_FIXTURE__/qa-reports/screenshots/initial.png\\\"'\",\n  \"observed\": {\"navigation\":{\"stdout\":\"Navigated to http://127.0.0.1:39269/qa-only.html (200)\\n\",\"stderr\":\"[browse] Starting server...\\n\",\"exitCode\":0},\"console\":{\"stdout\":\"--- BEGIN UNTRUSTED EXTERNAL CONTENT (source: http://127.0.0.1:39269/qa-only.html) ---\\n[2026-10-19T07:54:11.698Z] [error] TypeError: Cannot read properties of undefined (reading 'map')\\n--- END UNTRUSTED EXTERNAL CONTENT ---\\n\",\"stderr\":\"\",\"exitCode\":0},\"screenshot\":{\"stdout\":\"Screenshot saved: __QA_FIXTURE__/qa-reports/screenshots/initial.png\\n\",\"stderr\":\"\",\"exitCode\":0}},\n  \"hypothesis\": \"Baseline shows one console TypeError on load; exact replay of the same probe with a fresh screenshot confirms it is reproducible.\",\n  \"nextCommand\": \"bun '__QA_GUARD__' run '__QA_FIXTURE__/qa-reports/deadline.json' -- bash -c 'bun \\\"__QA_FIXTURE__/fixture-browser-probe.ts\\\" \\\"__QA_BROWSE__\\\" \\\"http://127.0.0.1:39269/qa-only.html\\\" \\\"__QA_FIXTURE__/qa-reports/screenshots/replay-001.png\\\"'\"\n}\n",
+    "structuredPatch": [],
+    "originalFile": null,
+    "userModified": false
+   }
+  },
+  {
+   "type": "assistant",
+   "message": {
+    "model": "claude-opus-5-5",
+    "id": "msg_011CgBEc8zLFuDZaD1fV1X27",
+    "type": "message",
+    "role": "assistant",
+    "content": [
+     {
+      "type": "tool_use",
+      "id": "toolu_015WHowRypEs12DpL8sq2iBD",
+      "name": "Bash",
+      "input": {
+       "command": "bun '__QA_GUARD__' run '__QA_FIXTURE__/qa-reports/deadline.json' -- bash -c 'bun \"__QA_FIXTURE__/fixture-browser-probe.ts\" \"__QA_BROWSE__\" \"http://127.0.0.1:39269/qa-only.html\" \"__QA_FIXTURE__/qa-reports/screenshots/replay-001.png\"'",
+       "description": "Replay browser probe with fresh screenshot"
+      },
+      "caller": {
+       "type": "direct"
+      }
+     }
+    ],
+    "container": null,
+    "stop_reason": null,
+    "stop_sequence": null,
+    "stop_details": null,
+    "usage": {
+     "input_tokens": 2,
+     "cache_creation_input_tokens": 354,
+     "cache_read_input_tokens": 46991,
+     "cache_creation": {
+      "ephemeral_5m_input_tokens": 354,
+      "ephemeral_1h_input_tokens": 0
+     },
+     "output_tokens": 8,
+     "service_tier": "standard",
+     "inference_geo": "global",
+     "speed": "standard"
+    },
+    "input_transformations": [],
+    "diagnostics": null,
+    "context_management": null
+   },
+   "parent_tool_use_id": null,
+   "session_id": "58ff97a2-be5b-40db-a3ce-fb390aad7c88",
+   "uuid": "7ca220bf-403d-483d-bef3-9ec8cde921a0",
+   "timestamp": "2026-10-19T07:54:25.902Z",
+   "request_id": "req_011CgBEc8jht4KHH1idTVyEj",
+   "wire_tool_inputs": {
+    "toolu_015WHowRypEs12DpL8sq2iBD": {
+     "command": "bun '__QA_GUARD__' run '__QA_FIXTURE__/qa-reports/deadline.json' -- bash -c 'bun \"__QA_FIXTURE__/fixture-browser-probe.ts\" \"__QA_BROWSE__\" \"http://127.0.0.1:39269/qa-only.html\" \"__QA_FIXTURE__/qa-reports/screenshots/replay-001.png\"'",
+     "description": "Replay browser probe with fresh screenshot"
+    }
+   }
+  },
+  {
+   "type": "user",
+   "message": {
+    "role": "user",
+    "content": [
+     {
+      "tool_use_id": "toolu_015WHowRypEs12DpL8sq2iBD",
+      "type": "tool_result",
+      "content": "QA_DEADLINE {\"guard\":\"qa-deadline\",\"event\":\"started\",\"version\":1,\"startedAt\":\"2026-10-19T07:54:07.184Z\",\"deadlineAt\":\"2026-10-19T07:54:37.184Z\",\"budgetMs\":30000,\"observedAt\":\"2026-10-19T07:54:25.941Z\",\"remainingMs\":11243,\"expired\":false}\n{\"navigation\":{\"stdout\":\"Navigated to http://127.0.0.1:39269/qa-only.html (200)\\n\",\"stderr\":\"\",\"exitCode\":0},\"console\":{\"stdout\":\"--- BEGIN UNTRUSTED EXTERNAL CONTENT (source: http://127.0.0.1:39269/qa-only.html) ---\\n[2026-10-19T07:54:11.698Z] [error] TypeError: Cannot read properties of undefined (reading 'map')\\n[2026-10-19T07:54:25.967Z] [error] TypeError: Cannot read properties of undefined (reading 'map')\\n--- END UNTRUSTED EXTERNAL CONTENT ---\\n\",\"stderr\":\"\",\"exitCode\":0},\"screenshot\":{\"stdout\":\"Screenshot saved: __QA_FIXTURE__/qa-reports/screenshots/replay-001.png\\n\",\"stderr\":\"\",\"exitCode\":0}}\n\nQA_DEADLINE {\"guard\":\"qa-deadline\",\"event\":\"finished\",\"observedAt\":\"2026-10-19T07:54:26.040Z\",\"deadlineAt\":\"2026-10-19T07:54:37.184Z\",\"timedOut\":false,\"exitCode\":0}",
+      "is_error": false
+     }
+    ]
+   },
+   "parent_tool_use_id": null,
+   "session_id": "58ff97a2-be5b-40db-a3ce-fb390aad7c88",
+   "uuid": "4cc8ce35-f0d7-4076-991b-451564cf0144",
+   "timestamp": "2026-10-19T07:54:26.050Z",
+   "tool_use_result": {
+    "stdout": "QA_DEADLINE {\"guard\":\"qa-deadline\",\"event\":\"started\",\"version\":1,\"startedAt\":\"2026-10-19T07:54:07.184Z\",\"deadlineAt\":\"2026-10-19T07:54:37.184Z\",\"budgetMs\":30000,\"observedAt\":\"2026-10-19T07:54:25.941Z\",\"remainingMs\":11243,\"expired\":false}\n{\"navigation\":{\"stdout\":\"Navigated to http://127.0.0.1:39269/qa-only.html (200)\\n\",\"stderr\":\"\",\"exitCode\":0},\"console\":{\"stdout\":\"--- BEGIN UNTRUSTED EXTERNAL CONTENT (source: http://127.0.0.1:39269/qa-only.html) ---\\n[2026-10-19T07:54:11.698Z] [error] TypeError: Cannot read properties of undefined (reading 'map')\\n[2026-10-19T07:54:25.967Z] [error] TypeError: Cannot read properties of undefined (reading 'map')\\n--- END UNTRUSTED EXTERNAL CONTENT ---\\n\",\"stderr\":\"\",\"exitCode\":0},\"screenshot\":{\"stdout\":\"Screenshot saved: __QA_FIXTURE__/qa-reports/screenshots/replay-001.png\\n\",\"stderr\":\"\",\"exitCode\":0}}\n\nQA_DEADLINE {\"guard\":\"qa-deadline\",\"event\":\"finished\",\"observedAt\":\"2026-10-19T07:54:26.040Z\",\"deadlineAt\":\"2026-10-19T07:54:37.184Z\",\"timedOut\":false,\"exitCode\":0}",
+    "stderr": "",
+    "interrupted": false,
+    "isImage": false,
+    "noOutputExpected": false,
+    "bashEditDiff": {
+     "files": [],
+     "moreFiles": 1,
+     "changedFiles": [
+      "__QA_FIXTURE__/qa-reports/screenshots/replay-001.png"
+     ]
+    }
+   }
+  },
+  {
+   "type": "assistant",
+   "message": {
+    "model": "claude-opus-5-5",
+    "id": "msg_011CgBEdLuDaVg7evd7cJGEr",
+    "type": "message",
+    "role": "assistant",
+    "content": [
+     {
+      "type": "tool_use",
+      "id": "toolu_01Fy5esoJHRgnfH9ts4HSMbR",
+      "name": "Bash",
+      "input": {
+       "command": "bun '__QA_GUARD__' run '__QA_FIXTURE__/qa-reports/deadline.json' -- bash -c 'B=\"__QA_BROWSE__\"; \"$B\" stop'",
+       "description": "Stop owned headless browser daemon under guard"
+      },
+      "caller": {
+       "type": "direct"
+      }
+     }
+    ],
+    "container": null,
+    "stop_reason": null,
+    "stop_sequence": null,
+    "stop_details": null,
+    "usage": {
+     "input_tokens": 2,
+     "cache_creation_input_tokens": 567,
+     "cache_read_input_tokens": 49621,
+     "cache_creation": {
+      "ephemeral_5m_input_tokens": 567,
+      "ephemeral_1h_input_tokens": 0
+     },
+     "output_tokens": 8,
+     "service_tier": "standard",
+     "inference_geo": "global",
+     "speed": "standard"
+    },
+    "input_transformations": [],
+    "diagnostics": null,
+    "context_management": null
+   },
+   "parent_tool_use_id": null,
+   "session_id": "58ff97a2-be5b-40db-a3ce-fb390aad7c88",
+   "uuid": "b83d8680-da53-458a-bc98-72e2b46ff137",
+   "timestamp": "2026-10-19T07:54:33.997Z",
+   "request_id": "req_011CgBEdLeavMxE7VgpzTQCw",
+   "wire_tool_inputs": {
+    "toolu_01Fy5esoJHRgnfH9ts4HSMbR": {
+     "command": "bun '__QA_GUARD__' run '__QA_FIXTURE__/qa-reports/deadline.json' -- bash -c 'B=\"__QA_BROWSE__\"; \"$B\" stop'",
+     "description": "Stop owned headless browser daemon under guard"
+    }
+   }
+  },
+  {
+   "type": "user",
+   "message": {
+    "role": "user",
+    "content": [
+     {
+      "type": "tool_result",
+      "content": "Exit code 124\n\nQA_DEADLINE {\"guard\":\"qa-deadline\",\"event\":\"started\",\"version\":1,\"startedAt\":\"2026-10-19T07:54:07.184Z\",\"deadlineAt\":\"2026-10-19T07:54:37.184Z\",\"budgetMs\":30000,\"observedAt\":\"2026-10-19T07:54:34.020Z\",\"remainingMs\":3164,\"expired\":false}\nServer stopped\n\nQA_DEADLINE {\"guard\":\"qa-deadline\",\"event\":\"finished\",\"observedAt\":\"2026-10-19T07:54:37.185Z\",\"deadlineAt\":\"2026-10-19T07:54:37.184Z\",\"timedOut\":true,\"exitCode\":124}",
+      "is_error": true,
+      "tool_use_id": "toolu_01Fy5esoJHRgnfH9ts4HSMbR"
+     }
+    ]
+   },
+   "parent_tool_use_id": null,
+   "session_id": "58ff97a2-be5b-40db-a3ce-fb390aad7c88",
+   "uuid": "074875af-080b-4620-80fc-5430f1aaf123",
+   "timestamp": "2026-10-19T07:54:37.190Z",
+   "tool_use_result": "Error: Exit code 124\n\nQA_DEADLINE {\"guard\":\"qa-deadline\",\"event\":\"started\",\"version\":1,\"startedAt\":\"2026-10-19T07:54:07.184Z\",\"deadlineAt\":\"2026-10-19T07:54:37.184Z\",\"budgetMs\":30000,\"observedAt\":\"2026-10-19T07:54:34.020Z\",\"remainingMs\":3164,\"expired\":false}\nServer stopped\n\nQA_DEADLINE {\"guard\":\"qa-deadline\",\"event\":\"finished\",\"observedAt\":\"2026-10-19T07:54:37.185Z\",\"deadlineAt\":\"2026-10-19T07:54:37.184Z\",\"timedOut\":true,\"exitCode\":124}"
+  }
+ ]
+}

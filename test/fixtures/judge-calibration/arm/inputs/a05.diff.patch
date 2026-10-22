@@ -1,0 +1,35 @@
+diff --git a/lib/invoice_csv.rb b/lib/invoice_csv.rb
+index f4e1bb4..b73997f 100644
+--- a/lib/invoice_csv.rb
++++ b/lib/invoice_csv.rb
+@@ -11,8 +11,14 @@ class InvoiceCsv
+     CSV.generate do |csv|
+       csv << HEADERS
+       @invoices.each do |inv|
+-        csv << [inv.number, inv.customer, inv.issued_on.to_s, format("%.2f", inv.total)]
++        csv << [inv.number, inv.customer, format_date(inv.issued_on), format("%.2f", inv.total)]
+       end
+     end
+   end
++
++  private
++
++  def format_date(time, format: "%Y-%m-%d")
++    time.strftime(format)
++  end
+ end
+diff --git a/spec/invoice_csv_spec.rb b/spec/invoice_csv_spec.rb
+index b6bb033..90f948b 100644
+--- a/spec/invoice_csv_spec.rb
++++ b/spec/invoice_csv_spec.rb
+@@ -7,4 +7,10 @@ RSpec.describe InvoiceCsv do
+     csv = described_class.new([]).to_csv
+     expect(csv.lines.first.chomp).to eq("number,customer,issued_on,total")
+   end
++
++  it "writes issued_on as YYYY-MM-DD in the invoice's zone" do
++    issued = Time.new(2026, 3, 4, 23, 30, 0, "-08:00")
++    csv = described_class.new([Invoice.new("INV-7", "Acme", issued, 12.5)]).to_csv
++    expect(csv.lines.last.chomp).to eq("INV-7,Acme,2026-03-04,12.50")
++  end
+ end

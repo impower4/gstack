@@ -1,0 +1,65 @@
+{
+  "workstream": "W3 browse route table",
+  "recordedAt": "96764e80",
+  "sources": {
+    "browse/src/server.ts": {
+      "e2e": [
+        "aside-browse-basic",
+        "aside-browse-flow",
+        "benchmark-workflow",
+        "browse-basic",
+        "browse-snapshot",
+        "canary-workflow",
+        "carve-section-loading-browse",
+        "design-review-detector-shim-dom",
+        "design-review-fix",
+        "diagram-authoring-quality",
+        "diagram-triplet",
+        "qa-b6-static",
+        "qa-b7-spa",
+        "qa-b8-checkout",
+        "qa-fix-loop",
+        "qa-only-no-fix",
+        "qa-quick"
+      ],
+      "llmJudge": [
+        "browse/SKILL.md reference"
+      ]
+    }
+  },
+  "modules": {
+    "browse/src/routes/activity.ts": [
+      "browse/src/server.ts"
+    ],
+    "browse/src/routes/commands.ts": [
+      "browse/src/server.ts"
+    ],
+    "browse/src/routes/core.ts": [
+      "browse/src/server.ts"
+    ],
+    "browse/src/routes/files.ts": [
+      "browse/src/server.ts"
+    ],
+    "browse/src/routes/index.ts": [
+      "browse/src/server.ts"
+    ],
+    "browse/src/routes/inspector.ts": [
+      "browse/src/server.ts"
+    ],
+    "browse/src/routes/pairing.ts": [
+      "browse/src/server.ts"
+    ],
+    "browse/src/routes/pty.ts": [
+      "browse/src/server.ts"
+    ],
+    "browse/src/routes/table.ts": [
+      "browse/src/server.ts"
+    ],
+    "browse/src/routes/tokens.ts": [
+      "browse/src/server.ts"
+    ],
+    "browse/src/routes/tunnel.ts": [
+      "browse/src/server.ts"
+    ]
+  }
+}

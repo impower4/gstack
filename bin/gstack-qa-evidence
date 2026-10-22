@@ -1,0 +1,4 @@
+#!/usr/bin/env -S bun --no-env-file --config=/dev/null
+import { qaEvidenceMain } from '../lib/qa-evidence';
+
+process.exit(await qaEvidenceMain(process.argv.slice(2)));

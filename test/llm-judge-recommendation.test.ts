@@ -6,13 +6,16 @@
  * negative coverage: hand-graded good/bad recommendation strings, asserted
  * against the same threshold the production E2E tests use (>= 4).
  *
- * Costs ~$0.04 per run (4 Haiku calls + 3 deterministic-only fixtures).
+ * Each fixture is a pre-registered 3-sample judge panel: numeric substance
+ * gates on the panel median (2 of 3 samples), the boolean checks on a 2-of-3 majority, and an
+ * erroring sample fails the panel (never resampled). Costs ~$0.12 per run.
  * Touchfile-gated to test/helpers/llm-judge.ts so it fires on rubric
  * tweaks but not every test run. Runs only under EVALS=1 with an API key.
  */
 
 import { expect } from 'bun:test';
-import { judgeRecommendation } from './helpers/llm-judge';
+import { CAPTURE_MS } from './helpers/eval-budgets';
+import { judgePanel, judgePanelMajority, judgePanelMedian, judgePanelReasoning, judgeRecommendation } from './helpers/llm-judge';
 import { describeIfSelected, testIfSelected } from './helpers/e2e-helpers';
 
 // Fixtures wrap a realistic AskUserQuestion shape so the judge sees the menu
@@ -36,13 +39,24 @@ C) Hybrid — V1 client-side, V1.5 promotes to gbrain
 Net: optimize for V1 ship velocity vs long-term agent reusability.`;
 }
 
+async function judgeRecommendationPanel(text: string) {
+  const samples = await judgePanel(() => judgeRecommendation(text));
+  return {
+    present: judgePanelMajority(samples, 'present'),
+    commits: judgePanelMajority(samples, 'commits'),
+    has_because: judgePanelMajority(samples, 'has_because'),
+    reason_substance: judgePanelMedian(samples, ['reason_substance']).reason_substance,
+    reasoning: judgePanelReasoning(samples),
+  };
+}
+
 describeIfSelected('judgeRecommendation rubric sanity', ['llm-judge-recommendation'], () => {
   testIfSelected('llm-judge-recommendation', async () => {
     // Run all 7 fixtures sequentially in one test entry so the eval-store sees
     // a single result; individual assertions surface as failed expectations.
 
     // SUBSTANCE 5: option-specific reason that contrasts an alternative.
-    const good5 = await judgeRecommendation(buildAUQ(
+    const good5 = await judgeRecommendationPanel(buildAUQ(
       'Recommendation: Choose C because hybrid ships V1 in gstack-only without blocking on cross-repo gbrain coordination, and locks the migration path before other agents take a hard dependency.',
     ));
     expect(good5.present).toBe(true);
@@ -54,7 +68,7 @@ describeIfSelected('judgeRecommendation rubric sanity', ['llm-judge-recommendati
     ).toBeGreaterThanOrEqual(4);
 
     // SUBSTANCE 4: concrete option-specific reason without alternative comparison.
-    const good4 = await judgeRecommendation(buildAUQ(
+    const good4 = await judgeRecommendationPanel(buildAUQ(
       'Recommendation: Choose B because client-side composition uses MCP tools that already exist in gstack and avoids any gbrain release dependency for V1.',
     ));
     expect(good4.present).toBe(true);
@@ -64,7 +78,7 @@ describeIfSelected('judgeRecommendation rubric sanity', ['llm-judge-recommendati
     ).toBeGreaterThanOrEqual(4);
 
     // SUBSTANCE ~1: boilerplate.
-    const bad1 = await judgeRecommendation(buildAUQ(
+    const bad1 = await judgeRecommendationPanel(buildAUQ(
       'Recommendation: Choose B because it is better.',
     ));
     expect(bad1.present).toBe(true);
@@ -75,7 +89,7 @@ describeIfSelected('judgeRecommendation rubric sanity', ['llm-judge-recommendati
     ).toBeLessThan(4);
 
     // SUBSTANCE ~3: generic.
-    const bad3 = await judgeRecommendation(buildAUQ(
+    const bad3 = await judgeRecommendationPanel(buildAUQ(
       'Recommendation: Choose B because it is faster.',
     ));
     expect(bad3.present).toBe(true);
@@ -86,7 +100,7 @@ describeIfSelected('judgeRecommendation rubric sanity', ['llm-judge-recommendati
     ).toBeLessThan(4);
 
     // NO BECAUSE: missing causal connective.
-    const noBecause = await judgeRecommendation(buildAUQ(
+    const noBecause = await judgeRecommendationPanel(buildAUQ(
       'Recommendation: Choose B (it has the best tradeoffs).',
     ));
     expect(noBecause.present).toBe(true);
@@ -94,7 +108,7 @@ describeIfSelected('judgeRecommendation rubric sanity', ['llm-judge-recommendati
     expect(noBecause.reason_substance).toBe(1);
 
     // NO RECOMMENDATION: line missing entirely.
-    const noRec = await judgeRecommendation(`D1 — Where should the smarts live?
+    const noRec = await judgeRecommendationPanel(`D1 — Where should the smarts live?
 ELI10: ...
 Pros / cons:
 A) Server-side
@@ -108,7 +122,7 @@ Net: ...`);
     // adversarial subagent emit a synthesis Recommendation line, it follows
     // the same canonical shape and is graded by the same rubric. These
     // fixtures pin the v1.25.1.0+ cross-model-skill emit format documented
-    // in codex/SKILL.md.tmpl Steps 2A/2B/2C and scripts/resolvers/review.ts.
+    // in codex/SKILL.md.tmpl Steps 2A/2B/2C and scripts/resolvers/outside-voice-steps.ts.
     // Substance-5 cross-model fixtures explicitly compare against an
     // alternative (a different finding, a different recommended action, or
     // no-fix vs fix). The same rubric the AskUserQuestion judge uses applies:
@@ -145,7 +159,7 @@ Net: ...`);
       ],
     ] as Array<[string, string, boolean]>;
     for (const [label, text, shouldPass] of crossModelCases) {
-      const score = await judgeRecommendation(text);
+      const score = await judgeRecommendationPanel(text);
       expect(score.present, `[cross-model:${label}] present should be true`).toBe(true);
       expect(score.has_because, `[cross-model:${label}] has_because should be true`).toBe(true);
       if (shouldPass) {
@@ -174,12 +188,12 @@ Net: ...`);
       ['whichever fits',         'Recommendation: whichever fits the team — A or B both work.'],
     ];
     for (const [label, text] of hedgeForms) {
-      const score = await judgeRecommendation(buildAUQ(text));
+      const score = await judgeRecommendationPanel(buildAUQ(text));
       expect(score.present, `[hedge:${label}] present should be true`).toBe(true);
       expect(
         score.commits,
         `[hedge:${label}] expected commits=false; got ${score.commits}. text="${text}"`,
       ).toBe(false);
     }
-  }, 240_000);
+  }, CAPTURE_MS);
 });

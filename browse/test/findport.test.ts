@@ -1,6 +1,7 @@
 import { describe, test, expect } from 'bun:test';
 import * as net from 'net';
 import * as path from 'path';
+import { __testInternals__ } from '../src/server';
 
 const polyfillPath = path.resolve(import.meta.dir, '../src/bun-polyfill.cjs');
 
@@ -28,6 +29,47 @@ function getFreePort(): Promise<number> {
 }
 
 describe('findPort / isPortAvailable', () => {
+  test('explicit BROWSE_PORT diagnostic distinguishes bind denial from occupied port', () => {
+    const blocked = __testInternals__.formatExplicitPortUnavailableError(34567, {
+      available: false,
+      code: 'EPERM',
+      message: 'operation not permitted',
+    }).message;
+
+    expect(blocked).toContain('Cannot bind BROWSE_PORT=34567');
+    expect(blocked).toContain('localhost port binding is blocked');
+    expect(blocked).toContain('not that the port is occupied');
+
+    const occupied = __testInternals__.formatExplicitPortUnavailableError(34567, {
+      available: false,
+      code: 'EADDRINUSE',
+      message: 'address already in use',
+    }).message;
+
+    expect(occupied).toBe('[browse] Port 34567 (from BROWSE_PORT env) is in use');
+  });
+
+  test('random port diagnostic calls out sandbox-style bind denial', () => {
+    const message = __testInternals__.formatRandomPortUnavailableError([
+      { port: 11001, result: { available: false, code: 'EADDRINUSE', message: 'address already in use' } },
+      { port: 12002, result: { available: false, code: 'EPERM', message: 'operation not permitted' } },
+    ]).message;
+
+    expect(message).toContain('Cannot bind localhost ports after 2 attempts');
+    expect(message).toContain('Last error: 12002 (EPERM: operation not permitted)');
+    expect(message).toContain('not that every sampled port is occupied');
+    expect(message).toContain('set BROWSE_PORT to an approved port');
+  });
+
+  test('random port diagnostic preserves old busy-port meaning when all attempts are occupied', () => {
+    const message = __testInternals__.formatRandomPortUnavailableError([
+      { port: 11001, result: { available: false, code: 'EADDRINUSE', message: 'address already in use' } },
+      { port: 12002, result: { available: false, code: 'EADDRINUSE', message: 'address already in use' } },
+    ]).message;
+
+    expect(message).toContain('No available port after 5 attempts');
+    expect(message).toContain('every sampled port was already in use');
+  });
 
   test('isPortAvailable returns true for a free port', async () => {
     // Use the same isPortAvailable logic from server.ts
@@ -118,7 +160,7 @@ describe('findPort / isPortAvailable', () => {
       }
 
       test();
-    `], { stdout: 'pipe', stderr: 'pipe' });
+    `], { stdout: 'pipe', stderr: 'pipe', timeout: 30_000 });
 
     const output = result.stdout.toString().trim();
     // Confirms the polyfill's stop() is fire-and-forget — callers
@@ -129,25 +171,20 @@ describe('findPort / isPortAvailable', () => {
   test('net.createServer approach does not have the race condition', async () => {
     // Prove the fix: net.createServer with proper async bind/close
     // releases the port cleanly
-    const result = Bun.spawnSync(['node', '-e', `
+    const result = Bun.spawnSync(['node', '-e', ` // timeout in trailing options
       const net = require('net');
 
       async function testFix() {
-        const port = 10000 + Math.floor(Math.random() * 50000);
-
-        // Simulate the NEW isPortAvailable: proper async bind/close
-        const isFree = await new Promise((resolve) => {
+        // Ask the OS for an available test port. A random port may already
+        // belong to another parallel test or local service.
+        const port = await new Promise((resolve, reject) => {
           const srv = net.createServer();
-          srv.once('error', () => resolve(false));
-          srv.listen(port, '127.0.0.1', () => {
-            srv.close(() => resolve(true));
+          srv.once('error', reject);
+          srv.listen(0, '127.0.0.1', () => {
+            const allocatedPort = srv.address().port;
+            srv.close((error) => error ? reject(error) : resolve(allocatedPort));
           });
         });
-
-        if (!isFree) {
-          console.log('PORT_BUSY');
-          return;
-        }
 
         // Immediately try to bind — should succeed because close()
         // completed before the Promise resolved
@@ -162,9 +199,13 @@ describe('findPort / isPortAvailable', () => {
         console.log(canBind ? 'FIX_WORKS' : 'FIX_BROKEN');
       }
 
-      testFix();
-    `], { stdout: 'pipe', stderr: 'pipe' });
+      testFix().catch((error) => {
+        console.error(error);
+        process.exitCode = 1;
+      });
+    `], { stdout: 'pipe', stderr: 'pipe', timeout: 30_000 });
 
+    expect(result.exitCode, result.stderr.toString()).toBe(0);
     const output = result.stdout.toString().trim();
     expect(output).toBe('FIX_WORKS');
   });

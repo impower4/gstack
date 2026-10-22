@@ -1,0 +1,6 @@
+Two advisory issues; nothing blocks.
+
+P2 — The new flag is missing from the help text.
+P2 — The changelog entry names the wrong command.
+
+Verdict: not ready (2 P2)

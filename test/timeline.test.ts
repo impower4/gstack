@@ -1,5 +1,5 @@
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
-import { execSync, ExecSyncOptionsWithStringEncoding } from 'child_process';
+import { execFileSync, execSync, spawnSync, ExecSyncOptionsWithStringEncoding } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
@@ -40,6 +40,30 @@ function runRead(args: string = ''): string {
   } catch {
     return '';
   }
+}
+
+function runReadArgs(args: string[] = []): string {
+  const execOpts: ExecSyncOptionsWithStringEncoding = {
+    cwd: ROOT,
+    env: { ...process.env, GSTACK_HOME: tmpDir },
+    encoding: 'utf-8',
+    timeout: 15000,
+  };
+  try {
+    return execFileSync(path.join(BIN, 'gstack-timeline-read'), args, execOpts).trim(); // timeout via execOpts
+  } catch {
+    return '';
+  }
+}
+
+function runReadStatus(args: string[]): { status: number | null; stdout: string; stderr: string } {
+  const result = spawnSync(path.join(BIN, 'gstack-timeline-read'), args, {
+    cwd: ROOT,
+    env: { ...process.env, GSTACK_HOME: tmpDir },
+    encoding: 'utf-8',
+    timeout: 15000,
+  });
+  return { status: result.status, stdout: result.stdout, stderr: result.stderr };
 }
 
 beforeEach(() => {
@@ -136,6 +160,17 @@ describe('gstack-timeline-read', () => {
     expect(output).not.toContain('feature-b');
   });
 
+  test('filters branch names containing single quotes', () => {
+    runLog(JSON.stringify({ skill: 'review', event: 'completed', branch: "feature/o'hare", outcome: 'approved', ts: '2026-03-28T10:00:00Z' }));
+    runLog(JSON.stringify({ skill: 'ship', event: 'completed', branch: 'feature-other', outcome: 'merged', ts: '2026-03-28T11:00:00Z' }));
+
+    const output = runReadArgs(['--branch', "feature/o'hare"]);
+
+    expect(output).toContain('review');
+    expect(output).toContain("feature/o'hare");
+    expect(output).not.toContain('feature-other');
+  });
+
   test('limits output with --limit', () => {
     for (let i = 0; i < 5; i++) {
       runLog(JSON.stringify({ skill: 'review', event: 'completed', branch: 'main', outcome: 'approved', ts: `2026-03-2${i}T10:00:00Z` }));
@@ -151,4 +186,100 @@ describe('gstack-timeline-read', () => {
     expect(unlimitedEvents).toBe(5);
     expect(limitedEvents).toBe(2);
   });
+
+  test('no --limit still shows the 20 most recent events', () => {
+    for (let i = 0; i < 25; i++) {
+      runLog(JSON.stringify({ skill: 'review', event: 'completed', branch: 'main', ts: `2026-03-01T10:${String(i).padStart(2, '0')}:00Z` }));
+    }
+    const result = runReadStatus([]);
+    expect(result.status).toBe(0);
+    const events = result.stdout.split('\n').filter(l => l.startsWith('- '));
+    expect(events.length).toBe(20);
+    expect(events[0]).toContain('10:05:00Z');
+  });
+
+  // #1723: a malformed --limit used to be parsed leniently (1abc -> 1) or
+  // silently replaced by the default; a bare --limit crashed on unbound $2.
+  const badLimits: Array<[string, string[], string]> = [
+    ['missing value', ['--limit'], 'got no value'],
+    ['zero', ['--limit', '0'], "got '0'"],
+    ['negative', ['--limit', '-5'], "got '-5'"],
+    ['non-numeric', ['--limit', 'abc'], "got 'abc'"],
+    ['trailing garbage', ['--limit', '1abc'], "got '1abc'"],
+  ];
+  for (const history of ['empty', 'populated'] as const) {
+    for (const [label, args, got] of badLimits) {
+      test(`--limit ${label} exits 2 with an example on ${history} history`, () => {
+        if (history === 'populated') {
+          runLog(JSON.stringify({ skill: 'review', event: 'completed', branch: 'main', ts: '2026-03-28T10:00:00Z' }));
+        }
+        const result = runReadStatus(args);
+        expect(result.status).toBe(2);
+        expect(result.stdout).toBe('');
+        expect(result.stderr).toContain('--limit must be a positive integer');
+        expect(result.stderr).toContain(got);
+        expect(result.stderr).toContain('example: --limit 20');
+      });
+    }
+  }
+
+  // --since/--branch used to read an unbound $2 (exit 1), and an unparseable
+  // --since silently returned unfiltered history.
+  const badFilters: Array<[string, string[], string]> = [
+    ['--since missing value', ['--since'], '--since must be a relative time like "7 days ago" (got no value)'],
+    ['--since empty value', ['--since', ''], '--since must be a relative time like "7 days ago" (got an empty value)'],
+    ['--since followed by a flag', ['--since', '--limit', '5'], "(got flag '--limit')"],
+    ['--since yesterday', ['--since', 'yesterday'], "--since must be a relative time like \"7 days ago\" (got 'yesterday')"],
+    ['--since 2 weeks', ['--since', '2 weeks'], "(got '2 weeks')"],
+    ['--since 7days', ['--since', '7days'], "(got '7days')"],
+    ['--since impossible month', ['--since', '2026-13-01'], "(got '2026-13-01')"],
+    ['--since unanchored', ['--since', 'about 7 days ago, roughly'], "(got 'about 7 days ago, roughly')"],
+    ['--branch missing value', ['--branch'], '--branch must be a branch name (got no value)'],
+    ['--branch empty value', ['--branch', ''], '--branch must be a branch name (got an empty value)'],
+    ['--branch followed by a flag', ['--branch', '--limit', '5'], "--branch must be a branch name (got flag '--limit')"],
+    ['unknown flag', ['--bogus'], "unknown argument '--bogus'"],
+    ['stray argument', ['stray'], "unknown argument 'stray'"],
+  ];
+  for (const history of ['empty', 'populated'] as const) {
+    for (const [label, args, message] of badFilters) {
+      test(`${label} exits 2 before any read on ${history} history`, () => {
+        if (history === 'populated') {
+          runLog(JSON.stringify({ skill: 'review', event: 'completed', branch: 'main', ts: '2026-03-28T10:00:00Z' }));
+        }
+        const result = runReadStatus(args);
+        expect(result.status, result.stderr).toBe(2);
+        expect(result.stdout).toBe('');
+        expect(result.stderr).toContain(message);
+        if (label.startsWith('--since')) expect(result.stderr).toContain('accepted: "<N> minute|hour|day|week|month[s] ago", "<N>h|d|w", or an ISO date');
+        if (label === 'unknown flag' || label === 'stray argument') expect(result.stderr).toContain('Usage: gstack-timeline-read');
+      });
+    }
+
+    test(`--help prints the usage line and exits 0 on ${history} history`, () => {
+      if (history === 'populated') {
+        runLog(JSON.stringify({ skill: 'review', event: 'completed', branch: 'main', ts: '2026-03-28T10:00:00Z' }));
+      }
+      const result = runReadStatus(['--help']);
+      expect(result.status).toBe(0);
+      expect(result.stdout.trim()).toBe('Usage: gstack-timeline-read [--since "7 days ago"|7d|YYYY-MM-DD] [--limit N] [--branch NAME]');
+    });
+
+    const yesterday = new Date(Date.now() - 86_400_000).toISOString().slice(0, 10);
+    for (const since of ['7 days ago', '3 Hours ago', '7d', '24h', '1w', yesterday, `${yesterday}T00:00:00Z`]) {
+      test(`--since '${since}' keeps recent events and drops old ones on ${history} history`, () => {
+        if (history === 'populated') {
+          runLog(JSON.stringify({ skill: 'review', event: 'completed', branch: 'main', ts: '2020-01-01T10:00:00Z' }));
+          runLog(JSON.stringify({ skill: 'ship', event: 'completed', branch: 'main', ts: new Date(Date.now() - 3_600_000).toISOString() }));
+        }
+        const result = runReadStatus(['--since', since]);
+        expect(result.status, result.stderr).toBe(0);
+        expect(result.stderr).toBe('');
+        if (history === 'empty') expect(result.stdout).toBe('');
+        else {
+          expect(result.stdout).toContain('/ship completed');
+          expect(result.stdout).not.toContain('/review completed');
+        }
+      });
+    }
+  }
 });

@@ -1,0 +1,22 @@
+{
+ "provenance": {
+  "run": "36597762183",
+  "job": "109508195705",
+  "note": "pending Step 0D focus menu left unanswered until the 609 s timeout"
+ },
+ "question": {
+  "question": "D1 — Review all 7 design dimensions, or focus?\nProject/branch/task: main — plan-design-review of PLAN.md (\"Plan: Marketing landing page\").\nELI10: I've rated this plan 2/10 on design completeness. It makes three layout calls and all three hurt the page: centered body copy is hard to scan, the h1 has no room to be the headline, and the main button looks the same as the \"Learn more\" link so visitors don't know what to click. Almost everything else (type, spacing, sections, states, mobile, accessibility) is unspecified. Next I'll generate visual mockups, then review every dimension and ask you about each fix one at a time.\nStakes if we pick wrong: a narrow review ships a landing page that looks fine in a screenshot but converts poorly and reads badly on phones.\nRecommendation: A because the plan is thin everywhere, so every dimension has real gaps; skipping any leaves holes the implementer will fill by guessing.\nCompleteness: A=10/10, B=6/10\nPros / cons:\nA) All 7 dimensions (recommended)\n  ✅ Covers hierarchy, states, journey, slop risk, responsive, accessibility, and copy in one pass\n  ✅ Matches your standing instruction to review all seven dimensions\n  ❌ More decision briefs to answer, roughly one per gap found in each pass\nB) Focus on hierarchy + CTA only\n  ✅ Fastest path to fixing the three anti-patterns already named in the plan\n  ✅ Fewer questions if you only want the headline problems fixed today\n  ❌ Leaves responsive, accessibility, states, and copy unspecified for the implementer\nNet: A trades more questions for a plan someone can actually build from; B fixes the obvious and leaves the rest to chance.",
+  "header": "Review scope",
+  "multiSelect": false,
+  "options": [
+   {
+    "label": "All 7 dimensions (recommended)",
+    "description": "✅ Full coverage of every design dimension\n✅ Matches the standing 'review all seven' instruction\n❌ More per-gap decision briefs to answer"
+   },
+   {
+    "label": "Focus: hierarchy + CTA",
+    "description": "✅ Fastest fix for the three named anti-patterns\n✅ Fewer questions today\n❌ Responsive, a11y, states, copy stay unspecified"
+   }
+  ]
+ }
+}

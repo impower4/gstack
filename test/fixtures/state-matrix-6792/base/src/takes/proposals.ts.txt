@@ -1,0 +1,35 @@
+export type ProposalKind = 'takes_add' | 'takes_remove';
+export type ProposalStatus = 'pending' | 'accepted' | 'dropped';
+
+export interface Take { id: string; claim: string; active: boolean }
+export interface Proposal { id: string; kind: ProposalKind; takeId: string; claim?: string; status: ProposalStatus }
+
+export class TakeStore {
+  takes = new Map<string, Take>();
+  proposals = new Map<string, Proposal>();
+}
+
+function pending(store: TakeStore, id: string): Proposal {
+  const p = store.proposals.get(id);
+  if (!p || p.status !== 'pending') throw new Error('proposal ' + id + ' is not pending');
+  return p;
+}
+
+/** The owner accepts a pending proposal: its change is applied to the take. */
+export function acceptProposal(store: TakeStore, id: string): void {
+  const p = pending(store, id);
+  switch (p.kind) {
+    case 'takes_add':
+      store.takes.set(p.takeId, { id: p.takeId, claim: p.claim ?? '', active: true });
+      break;
+    case 'takes_remove':
+      store.takes.delete(p.takeId);
+      break;
+  }
+  p.status = 'accepted';
+}
+
+/** The owner drops a pending proposal: the take is left as it was. */
+export function dropProposal(store: TakeStore, id: string): void {
+  pending(store, id).status = 'dropped';
+}

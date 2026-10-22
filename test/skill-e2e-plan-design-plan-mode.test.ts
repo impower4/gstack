@@ -1,5 +1,5 @@
 /**
- * plan-design-review plan-mode smoke (gate, paid, real-PTY).
+ * plan-design-review plan-mode smoke (periodic, paid, real-PTY).
  *
  * See test/skill-e2e-plan-ceo-plan-mode.test.ts for the shared assertion
  * contract. Exercises the same contract against /plan-design-review.
@@ -9,32 +9,105 @@
  * 'plan_ready' are valid pass outcomes.
  */
 
-import { describe, test, expect } from 'bun:test';
+import { test, expect } from 'bun:test';
+import { CAPTURE_MS, CAPTURE_LONG_MS } from './helpers/eval-budgets';
+import { describeE2ETier } from './helpers/e2e-gate';
+import { assertNoPlanFileDecisions, assertPlanModeWithEvidence, seededPlanTargeted } from './helpers/plan-mode-evidence';
 import {
   runPlanSkillObservation,
   assertReportAtBottomIfPlanWritten,
+  planFileHasDecisionsSection,
 } from './helpers/claude-pty-runner';
 
-const shouldRun = !!process.env.EVALS && process.env.EVALS_TIER === 'gate';
-const describeE2E = shouldRun ? describe : describe.skip;
+const describeE2E = describeE2ETier('periodic');
 
-describeE2E('plan-design-review plan-mode smoke (gate)', () => {
+// UI-heavy seed with guaranteed design gaps (center-aligned everything, no
+// empty states, no responsive intent) so the review has real findings to
+// surface. Inline twin of the eng smoke's SEED_PLAN_FORCING_FINDINGS —
+// FORCING_FLOOR_DESIGN from forcing-finding-seeds.ts is NOT reusable here:
+// it embeds a write-to-/tmp instruction shaped for the floor check's
+// followUpPrompt, which would trip strictPlanWrites as a silent_write.
+const SEED_PLAN_UI_HEAVY = `
+# Plan: Marketing landing page
+
+## Layout
+All headings, taglines, and body copy will be center-aligned for a
+"clean modern look." The hero h1 sits 8px above the subhead; the CTA
+button has the same visual weight as the "Learn more" link beside it.
+
+## Pages
+- / (hero, 3-column features grid, testimonials carousel, footer)
+- /pricing (3 tier cards)
+
+## States
+Only the happy path is designed. No empty states, no error states,
+no loading states. Mobile: "stacks on mobile."
+`;
+
+// Seed-only phrases; seeing one after the slash command shows the review read the seeded plan.
+const SEED_PLAN_TOKENS = ['Marketing landing page', 'testimonials carousel', '3 tier cards'];
+
+describeE2E('plan-design-review plan-mode smoke (periodic)', () => {
   test('reaches a terminal outcome (asked or plan_ready) without silent writes', async () => {
     const obs = await runPlanSkillObservation({
       skillName: 'plan-design-review',
       inPlanMode: true,
-      timeoutMs: 300_000,
+      timeoutMs: CAPTURE_MS,
     });
 
-    if (obs.outcome === 'silent_write' || obs.outcome === 'exited' || obs.outcome === 'timeout') {
-      throw new Error(
-        `plan-design-review plan-mode smoke FAILED: outcome=${obs.outcome}\n` +
-          `summary: ${obs.summary}\n` +
-          `elapsed: ${obs.elapsedMs}ms\n` +
-          `--- evidence (last 2KB visible) ---\n${obs.evidence}`,
-      );
-    }
-    expect(['asked', 'plan_ready']).toContain(obs.outcome);
-    assertReportAtBottomIfPlanWritten(obs);
-  }, 360_000);
+    assertPlanModeWithEvidence('plan-design-review', 'reaches a terminal outcome (asked or plan_ready) without silent writes', obs, () => {
+      if (obs.outcome === 'silent_write' || obs.outcome === 'exited' || obs.outcome === 'timeout') {
+        throw new Error(
+          `plan-design-review plan-mode smoke FAILED: outcome=${obs.outcome}\n` +
+            `summary: ${obs.summary}\n` +
+            `elapsed: ${obs.elapsedMs}ms\n` +
+            `--- evidence (last 2KB visible) ---\n${obs.evidence}`,
+        );
+      }
+      expect(['asked', 'plan_ready']).toContain(obs.outcome);
+      assertReportAtBottomIfPlanWritten(obs);
+      assertNoPlanFileDecisions(obs, planFileHasDecisionsSection);
+    });
+  }, CAPTURE_LONG_MS);
+
+  // Plan-mode scope-gate bypass: with a seeded UI-heavy plan in plan mode,
+  // the gate must NOT render its "What should I review?" menu; the review
+  // targets the seeded plan, then proceeds to the pre-review audit and
+  // mockups. Mirrors the eng smoke's seeded STOP-gate test, without
+  // --disallowedTools (native AUQ available is the common path here).
+  test('scope gate auto-selects B when a plan is seeded in plan mode', async () => {
+    const obs = await runPlanSkillObservation({
+      skillName: 'plan-design-review',
+      inPlanMode: true,
+      initialPlanContent: SEED_PLAN_UI_HEAVY,
+      trackTokens: SEED_PLAN_TOKENS,
+      timeoutMs: CAPTURE_MS,
+    });
+
+    assertPlanModeWithEvidence('plan-design-review', 'scope gate auto-selects B when a plan is seeded in plan mode', obs, () => {
+      if (
+        obs.outcome === 'wrote_findings_before_asking' ||
+        obs.outcome === 'auto_decided' ||
+        obs.outcome === 'silent_write' ||
+        obs.outcome === 'exited' ||
+        obs.outcome === 'timeout'
+      ) {
+        throw new Error(
+          `plan-design plan-mode bypass FAILED: outcome=${obs.outcome}\n` +
+            `summary: ${obs.summary}\nelapsed: ${obs.elapsedMs}ms\n` +
+            `--- evidence (last 2KB) ---\n${obs.evidence}`,
+        );
+      }
+
+      expect(['asked', 'plan_ready']).toContain(obs.outcome);
+      assertReportAtBottomIfPlanWritten(obs);
+      assertNoPlanFileDecisions(obs, planFileHasDecisionsSection);
+
+      // The bypass contract: no scope menu, and the seeded plan is the target.
+      // The announcement's exact wording is not graded.
+      expect(obs.scopeGateQuestionObserved ?? false).toBe(false);
+      console.log(`[plan-design plan-mode] scope announcement observed: ${obs.scopeGateAutoSelectObserved ?? false}; seed tokens: ${JSON.stringify(obs.tokensObserved ?? {})}`);
+      expect(seededPlanTargeted(obs, SEED_PLAN_TOKENS), 'seeded plan was not targeted (scopeGateAutoSelectObserved or seed-only plan tokens)').toBe(true);
+    });
+  }, CAPTURE_LONG_MS);
 });

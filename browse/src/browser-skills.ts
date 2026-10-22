@@ -22,8 +22,8 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
-import * as os from 'os';
 import * as cp from 'child_process';
+import { resolveStateRoot } from '../../lib/state-root';
 
 // ─── Types ──────────────────────────────────────────────────────
 
@@ -85,20 +85,20 @@ export interface TierPaths {
  * Project tier requires git or a project hint; returns null when neither resolves.
  */
 export function defaultTierPaths(opts: { projectRoot?: string; home?: string; bundledRoot?: string } = {}): TierPaths {
-  const home = opts.home ?? os.homedir();
+  const stateRoot = opts.home !== undefined ? path.join(opts.home, '.gstack') : resolveStateRoot();
   const projectRoot = opts.projectRoot ?? detectProjectRoot();
   const bundledRoot = opts.bundledRoot ?? detectBundledRoot();
 
   return {
     project: projectRoot ? path.join(projectRoot, '.gstack', 'browser-skills') : null,
-    global: path.join(home, '.gstack', 'browser-skills'),
+    global: path.join(stateRoot, 'browser-skills'),
     bundled: path.join(bundledRoot, 'browser-skills'),
   };
 }
 
 function detectProjectRoot(): string | null {
   try {
-    const proc = cp.spawnSync('git', ['rev-parse', '--show-toplevel'], { encoding: 'utf-8', timeout: 2000 });
+    const proc = cp.spawnSync('git', ['rev-parse', '--show-toplevel'], { encoding: 'utf-8', timeout: 2000, windowsHide: true });
     if (proc.status === 0) {
       const out = proc.stdout.trim();
       return out || null;

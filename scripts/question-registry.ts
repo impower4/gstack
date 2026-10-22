@@ -206,6 +206,14 @@ export const QUESTIONS = {
     options: ['fix-now', 'investigate'],
     description: "LLM trust boundary violation — fix before merge?",
   },
+  'review-gate-disposition': {
+    id: 'review-gate-disposition',
+    skill: 'review',
+    category: 'approval',
+    door_type: 'one-way',
+    options: ['restore', 'keep-justified', 'keep-other', 'leave-open'],
+    description: "Gate edit (test, threshold, CI or suppression relaxed) — restore the gate, keep it with a reason, or leave it open for a later human?",
+  },
 
   // -----------------------------------------------------------------------
   // /office-hours — YC diagnostic + builder brainstorm
@@ -327,6 +335,14 @@ export const QUESTIONS = {
     options: ['reduce', 'hold'],
     signal_key: 'scope-appetite',
     description: "Plan touches 8+ files — reduce scope or hold?",
+  },
+  'plan-eng-review-structure': {
+    id: 'plan-eng-review-structure',
+    skill: 'plan-eng-review',
+    category: 'routing',
+    door_type: 'two-way',
+    options: ['original-arrangement', 'smaller-arrangement'],
+    description: "Complexity gate — Original arrangement or Smaller arrangement (file/class layout only)?",
   },
   'plan-eng-review-test-gap': {
     id: 'plan-eng-review-test-gap',
@@ -455,6 +471,7 @@ export const QUESTIONS = {
     category: 'approval',
     door_type: 'one-way',
     options: ['accept', 'reject'],
+    signal_key: 'decision-autonomy',
     description: "Merge this PR to base branch?",
   },
   'land-and-deploy-rollback': {
@@ -463,7 +480,24 @@ export const QUESTIONS = {
     category: 'approval',
     door_type: 'one-way',
     options: ['accept', 'reject'],
+    signal_key: 'decision-autonomy',
     description: "Canary detected regressions — roll back the deploy?",
+  },
+  'land-and-deploy-ci-override': {
+    id: 'land-and-deploy-ci-override',
+    skill: 'land-and-deploy',
+    category: 'approval',
+    door_type: 'one-way',
+    options: ['accept', 'reject'],
+    description: "Merge this head while these named non-required CI checks are red or pending?",
+  },
+  'land-and-deploy-no-ci-confirm': {
+    id: 'land-and-deploy-no-ci-confirm',
+    skill: 'land-and-deploy',
+    category: 'approval',
+    door_type: 'one-way',
+    options: ['accept', 'reject'],
+    description: "No CI ran on this head — merge it anyway?",
   },
 
   // -----------------------------------------------------------------------

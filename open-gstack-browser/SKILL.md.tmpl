@@ -1,5 +1,6 @@
 ---
 name: open-gstack-browser
+preamble-tier: 1
 version: 0.2.0
 description: |
   Launch GStack Browser — AI-controlled Chromium with the sidebar extension baked in.
@@ -29,33 +30,71 @@ anti-bot stealth, and custom branding. You see every action in real time.
 
 {{BROWSE_SETUP}}
 
-## Step 0: Pre-flight cleanup
+## Step 0: Check for a running browse daemon
 
-Before connecting, kill any stale browse servers and clean up lock files that
-may have persisted from a crash. This prevents "already connected" false
-positives and Chromium profile lock conflicts.
+A running browse daemon may hold open tabs, cookies and logged-in sessions,
+and replacing it loses them. Probe without starting one
+(`BROWSE_NO_AUTOSTART=1` keeps `status` from booting a daemon):
 
 ```bash
-# Kill any existing browse server
-if [ -f "$(git rev-parse --show-toplevel 2>/dev/null)/.gstack/browse.json" ]; then
-  _OLD_PID=$(cat "$(git rev-parse --show-toplevel)/.gstack/browse.json" 2>/dev/null | grep -o '"pid":[0-9]*' | grep -o '[0-9]*')
-  [ -n "$_OLD_PID" ] && kill "$_OLD_PID" 2>/dev/null || true
-  sleep 1
-  [ -n "$_OLD_PID" ] && kill -9 "$_OLD_PID" 2>/dev/null || true
-  rm -f "$(git rev-parse --show-toplevel)/.gstack/browse.json"
-fi
-# Clean Chromium profile locks (can persist after crashes)
-_PROFILE_DIR="$HOME/.gstack/chromium-profile"
-for _LF in SingletonLock SingletonSocket SingletonCookie; do
-  rm -f "$_PROFILE_DIR/$_LF" 2>/dev/null || true
-done
-echo "Pre-flight cleanup done"
+_STATUS=$(BROWSE_NO_AUTOSTART=1 $B status 2>&1); _STATUS_RC=$?
+printf '%s\n' "$_STATUS" | head -5
+if [ "$_STATUS_RC" -ne 0 ]; then echo "DAEMON: none"
+elif printf '%s' "$_STATUS" | grep -q 'Mode: headed'; then echo "DAEMON: headed"
+else echo "DAEMON: live"; fi
 ```
+
+- **`DAEMON: none`**: no daemon answered. Clear Chromium profile locks left
+  by a crash, then run Step 1's plain `$B connect`. The CLI reaps orphaned
+  Chromium and stale state itself, and it still refuses to replace a daemon
+  that is alive but too busy to answer; if it refuses, show its output and
+  stop.
+
+  ```bash
+  GSTACK_STATE_ROOT=$(~/.claude/skills/gstack/bin/gstack-paths --get GSTACK_STATE_ROOT); : "${GSTACK_STATE_ROOT:?gstack-paths failed; reinstall with ./setup or /gstack-upgrade}"
+  _PROFILE_DIR="$GSTACK_STATE_ROOT/chromium-profile"
+  for _LF in SingletonLock SingletonSocket SingletonCookie; do
+    rm -f "$_PROFILE_DIR/$_LF" 2>/dev/null || true
+  done
+  ```
+
+- **`DAEMON: headed`**: GStack Browser is already open. Step 1's plain
+  `$B connect` reports that; continue to Step 2.
+
+- **`DAEMON: live`**: a headless daemon is running. With `SESSION_KIND:
+  spawned` or `headless`, do not ask and do not replace it. Print this and
+  stop:
+
+  ```bash
+  printf 'Live browse daemon left running. Run %s stop, then re-run /open-gstack-browser to replace it.\n' "$B"
+  ```
+
+  Otherwise AskUserQuestion. Replacing the daemon cannot be undone:
+
+  > "A browse daemon is already running (tabs and logins may be active).
+  > Opening GStack Browser replaces it, and everything in that daemon is
+  > lost."
+  >
+  > Recommendation: B unless you are done with the running session.
+
+  Options:
+  - A) Replace it (runs `$B connect --force-restart`; its tabs, cookies and logins are lost)
+  - B) Keep it running and stop here
+
+  Only an explicit A runs Step 1 with `--force-restart`. On B, or a reply
+  that is not clearly A, print the "Live browse daemon left running" line
+  above and stop.
 
 ## Step 1: Connect
 
 ```bash
 $B connect
+```
+
+After an explicit A in Step 0 only:
+
+```bash
+$B connect --force-restart
 ```
 
 This launches GStack Browser (rebranded Chromium) in headed mode with:
@@ -83,7 +122,7 @@ $B status
 Confirm the output shows `Mode: headed`. Read the port from the state file:
 
 ```bash
-cat "$(git rev-parse --show-toplevel 2>/dev/null)/.gstack/browse.json" 2>/dev/null | grep -o '"port":[0-9]*' | grep -o '[0-9]*'
+cat "$(git rev-parse --show-toplevel 2>/dev/null)/.gstack/browse.json" 2>/dev/null | grep -o '"port":[[:space:]]*[0-9]*' | grep -o '[0-9]*'
 ```
 
 The port should be **34567**. If it's different, note it — the user may need it

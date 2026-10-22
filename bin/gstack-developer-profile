@@ -17,6 +17,12 @@
 #   --check-mismatch    detect meaningful gaps between declared and observed.
 #   --migrate           migrate builder-profile.jsonl → developer-profile.json.
 #                       Idempotent; archives the source file on success.
+#   --log-session    append a session entry (from /office-hours) to
+#                       sessions[] and update aggregates. Required fields:
+#                       date, mode. Silent skip on invalid input.
+#   --reconcile         backfill count-only sessions[] entries from office-hours
+#                       `completed` events in projects/*/timeline.jsonl.
+#                       Idempotent; backfilled rows count for tenure only.
 #
 # Profile file: ~/.gstack/developer-profile.json (unified schema — see
 # docs/designs/PLAN_TUNING_V0.md). Event file: ~/.gstack/projects/{SLUG}/
@@ -25,7 +31,17 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-GSTACK_HOME="${GSTACK_HOME:-$HOME/.gstack}"
+# GSTACK_STATE_ROOT takes precedence over GSTACK_HOME (test isolation per D16).
+. "$(dirname "$0")/gstack-state-root.sh" 2>/dev/null || { echo "$0: cannot resolve the gstack state root: $(dirname "$0")/gstack-state-root.sh is missing. fix: reinstall with ./setup or /gstack-upgrade (docs/state-root.md)" >&2; exit 1; }
+gstack_state_root_select
+GSTACK_HOME="$_gstack_sr_root"
+# Windows git-bash: GSTACK_HOME resolves to an MSYS path (/c/Users/...), which
+# Bun on Windows cannot open as a filesystem path (bites --derive). Normalize
+# once, here, before PROFILE_FILE/LEGACY_FILE are derived from it below —
+# doing it after would leave those two on the stale MSYS form.
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*) command -v cygpath >/dev/null 2>&1 && GSTACK_HOME="$(cygpath -m "$GSTACK_HOME")" ;;
+esac
 PROFILE_FILE="$GSTACK_HOME/developer-profile.json"
 LEGACY_FILE="$GSTACK_HOME/builder-profile.jsonl"
 eval "$("$SCRIPT_DIR/gstack-slug" 2>/dev/null || true)"
@@ -51,10 +67,10 @@ do_migrate() {
 
   # Run migration in a temp file, then atomic rename.
   local TMPOUT
-  TMPOUT=$(mktemp "$GSTACK_HOME/developer-profile.json.XXXXXX.tmp")
+  TMPOUT=$(mktemp "$GSTACK_HOME/developer-profile.json.tmp.XXXXXX")
   trap 'rm -f "$TMPOUT"' EXIT
 
-  cat "$LEGACY_FILE" | bun -e "
+  cat "$LEGACY_FILE" | bun --no-env-file --config=/dev/null -e "
     const lines = (await Bun.stdin.text()).trim().split('\n').filter(Boolean);
     const sessions = [];
     const signalsAcc = {};
@@ -111,7 +127,7 @@ do_migrate() {
   mv "$LEGACY_FILE" "$LEGACY_FILE.migrated-$TS"
 
   local COUNT
-  COUNT=$(bun -e "console.log(JSON.parse(require('fs').readFileSync('$PROFILE_FILE','utf-8')).sessions.length)" 2>/dev/null || echo "?")
+  COUNT=$(PROFILE_FILE_PATH="$PROFILE_FILE" bun --no-env-file --config=/dev/null -e "console.log(JSON.parse(require('fs').readFileSync(process.env.PROFILE_FILE_PATH,'utf-8')).sessions.length)" 2>/dev/null || echo "?")
   echo "MIGRATE: ok — migrated $COUNT sessions from builder-profile.jsonl"
 }
 
@@ -155,27 +171,175 @@ EOF
 }
 
 # -----------------------------------------------------------------------
+# Record session: append a session entry from /office-hours to sessions[]
+# and update aggregates (signals_accumulated, resources_shown, topics).
+# Fix for #1671: the writer side of the v1.0.0.0 migration. Reader and
+# writer now share the same file.
+# Silent skip on invalid input (matches gstack-timeline-log:22-26 pattern).
+# -----------------------------------------------------------------------
+do_log_session() {
+  local INPUT="${1:-}"
+  if [ -z "$INPUT" ]; then
+    return 0
+  fi
+
+  # Validate: input must be parseable JSON with required fields (date, mode).
+  if ! printf '%s' "$INPUT" | bun --no-env-file --config=/dev/null -e "
+    const j = JSON.parse(await Bun.stdin.text());
+    if (!j.date || !j.mode) process.exit(1);
+  " 2>/dev/null; then
+    return 0
+  fi
+
+  ensure_profile
+
+  local TMPOUT
+  TMPOUT=$(mktemp "$GSTACK_HOME/developer-profile.json.tmp.XXXXXX")
+  trap 'rm -f "$TMPOUT"' EXIT
+
+  PROFILE_FILE_PATH="$PROFILE_FILE" RECORD_INPUT="$INPUT" TMPOUT_PATH="$TMPOUT" bun --no-env-file --config=/dev/null -e "
+    const fs = require('fs');
+    const entry = JSON.parse(process.env.RECORD_INPUT);
+    if (!entry.ts) entry.ts = new Date().toISOString();
+
+    const profile = JSON.parse(fs.readFileSync(process.env.PROFILE_FILE_PATH, 'utf-8'));
+    profile.sessions = profile.sessions || [];
+    profile.sessions.push(entry);
+
+    profile.signals_accumulated = profile.signals_accumulated || {};
+    for (const s of (entry.signals || [])) {
+      profile.signals_accumulated[s] = (profile.signals_accumulated[s] || 0) + 1;
+    }
+
+    profile.resources_shown = profile.resources_shown || [];
+    const resSet = new Set(profile.resources_shown);
+    for (const r of (entry.resources_shown || [])) resSet.add(r);
+    profile.resources_shown = Array.from(resSet);
+
+    profile.topics = profile.topics || [];
+    const topicSet = new Set(profile.topics);
+    for (const t of (entry.topics || [])) topicSet.add(t);
+    profile.topics = Array.from(topicSet);
+
+    fs.writeFileSync(process.env.TMPOUT_PATH, JSON.stringify(profile, null, 2));
+  "
+
+  mv "$TMPOUT" "$PROFILE_FILE"
+  trap - EXIT
+  "$SCRIPT_DIR/gstack-brain-enqueue" "developer-profile.json" 2>/dev/null &
+}
+
+# -----------------------------------------------------------------------
+# Reconcile: sessions[] is written only at office-hours Phase 4.5, so runs
+# that ended earlier never count toward tenure. Backfill one count-only row
+# per office-hours `completed` timeline event that has no sessions[] entry
+# for the same project within 60 minutes (extended back by the run's
+# duration_s when it is under 8h, since Phase 4.5 logs mid-run). The file is
+# rewritten only when something was added.
+# -----------------------------------------------------------------------
+do_reconcile() {
+  ensure_profile
+
+  local TMPOUT
+  TMPOUT=$(mktemp "$GSTACK_HOME/developer-profile.json.tmp.XXXXXX")
+  trap 'rm -f "$TMPOUT"' EXIT
+
+  PROFILE_FILE_PATH="$PROFILE_FILE" PROJECTS_DIR="$GSTACK_HOME/projects" TMPOUT_PATH="$TMPOUT" bun --no-env-file --config=/dev/null -e "
+    const fs = require('fs');
+    const path = require('path');
+    const profile = JSON.parse(fs.readFileSync(process.env.PROFILE_FILE_PATH, 'utf-8'));
+    profile.sessions = profile.sessions || [];
+
+    const runs = [];
+    let slugs = [];
+    try { slugs = fs.readdirSync(process.env.PROJECTS_DIR); } catch {}
+    for (const slug of slugs) {
+      let lines = [];
+      try { lines = fs.readFileSync(path.join(process.env.PROJECTS_DIR, slug, 'timeline.jsonl'), 'utf-8').split('\n'); } catch { continue; }
+      for (const line of lines) {
+        let e;
+        try { e = JSON.parse(line); } catch { continue; }
+        if (!e || e.skill !== 'office-hours' || e.event !== 'completed') continue;
+        const t = Date.parse(e.ts);
+        if (Number.isNaN(t)) continue;
+        const dur = Number(e.duration_s);
+        runs.push({ t, ts: e.ts, slug, mode: e.mode, span: dur > 0 && dur < 8 * 3600 ? dur * 1000 : 0 });
+      }
+    }
+    runs.sort((a, b) => a.t - b.t);
+
+    const HOUR = 60 * 60 * 1000;
+    const covered = profile.sessions
+      .filter(s => s && s.mode !== 'resources')
+      .map(s => ({ t: Date.parse(s.ts || s.date || ''), slug: s.project_slug || null }))
+      .filter(c => !Number.isNaN(c.t));
+
+    let added = 0;
+    for (const run of runs) {
+      const matched = covered.some(c => (c.slug === null || c.slug === run.slug)
+        && c.t >= run.t - run.span - HOUR && c.t <= run.t + HOUR);
+      if (matched) continue;
+      covered.push({ t: run.t, slug: run.slug });
+      profile.sessions.push({
+        date: run.ts,
+        mode: run.mode && run.mode !== 'resources' ? run.mode : 'unknown',
+        project_slug: run.slug,
+        signal_count: 0,
+        signals: [],
+        backfilled: true,
+      });
+      added++;
+    }
+
+    if (added > 0) {
+      const at = s => { const t = Date.parse(s.ts || s.date || ''); return Number.isNaN(t) ? Infinity : t; };
+      profile.sessions.sort((a, b) => at(a) - at(b));
+      fs.writeFileSync(process.env.TMPOUT_PATH, JSON.stringify(profile, null, 2));
+    }
+    console.log('RECONCILE: ' + added + ' backfilled from ' + runs.length + ' office-hours run(s)');
+  "
+
+  if [ -s "$TMPOUT" ]; then
+    mv "$TMPOUT" "$PROFILE_FILE"
+    trap - EXIT
+    "$SCRIPT_DIR/gstack-brain-enqueue" "developer-profile.json" 2>/dev/null &
+  else
+    rm -f "$TMPOUT"
+    trap - EXIT
+  fi
+}
+
+# -----------------------------------------------------------------------
 # Read: emit legacy KEY: VALUE output for /office-hours compat.
 # -----------------------------------------------------------------------
 do_read() {
   ensure_profile
-  cat "$PROFILE_FILE" | bun -e "
+  cat "$PROFILE_FILE" | bun --no-env-file --config=/dev/null -e "
     const p = JSON.parse(await Bun.stdin.text());
     const sessions = p.sessions || [];
-    const count = sessions.length;
+
+    // SESSION_COUNT / TIER / CROSS_PROJECT / NUDGE must reflect real sessions, not
+    // resource-tracking events (the Phase 6 auto-append). Without this filter, a
+    // session's resources entry written immediately after the real session inflates
+    // the count (bumping TIER), clobbers LAST_PROJECT/LAST_ASSIGNMENT/LAST_DESIGN_TITLE,
+    // and pushes NUDGE_ELIGIBLE over its threshold from bookkeeping alone.
+    const realSessions = sessions.filter(e => e.mode !== 'resources');
+    // Backfilled rows (--reconcile) carry no content: they count for tenure only.
+    const loggedSessions = realSessions.filter(e => !e.backfilled);
+
+    const count = realSessions.length;
     let tier = 'introduction';
     if (count >= 8) tier = 'inner_circle';
     else if (count >= 4) tier = 'regular';
     else if (count >= 1) tier = 'welcome_back';
-
-    const last = sessions[count - 1] || {};
-    const prev = sessions[count - 2] || {};
+    const last = loggedSessions[loggedSessions.length - 1] || {};
+    const prev = loggedSessions[loggedSessions.length - 2] || {};
     const crossProject = prev.project_slug && last.project_slug
       ? prev.project_slug !== last.project_slug
       : false;
 
-    const designs = sessions.map(e => e.design_doc || '').filter(Boolean);
-    const designTitles = sessions
+    const designs = loggedSessions.map(e => e.design_doc || '').filter(Boolean);
+    const designTitles = loggedSessions
       .map(e => (e.design_doc ? (e.project_slug || 'unknown') : ''))
       .filter(Boolean);
 
@@ -184,7 +348,11 @@ do_read() {
     for (const v of Object.values(signalCounts)) totalSignals += v;
     const signalStr = Object.entries(signalCounts).map(([k,v]) => k + ':' + v).join(',');
 
-    const builderSessions = sessions.filter(e => e.mode !== 'startup').length;
+    // Builder-mode design sessions only — the builder->founder nudge is about
+    // someone who keeps returning to *build*, not startup-mode diagnostics and not
+    // resources bookkeeping. (Was \`e.mode !== 'startup'\`, which counted resources
+    // entries and excluded real startup sessions.)
+    const builderSessions = loggedSessions.filter(e => e.mode === 'builder').length;
     const nudgeEligible = builderSessions >= 3 && totalSignals >= 5;
 
     const resources = p.resources_shown || [];
@@ -220,7 +388,7 @@ do_profile() {
 # -----------------------------------------------------------------------
 do_gap() {
   ensure_profile
-  cat "$PROFILE_FILE" | bun -e "
+  cat "$PROFILE_FILE" | bun --no-env-file --config=/dev/null -e "
     const p = JSON.parse(await Bun.stdin.text());
     const declared = p.declared || {};
     const inferred = (p.inferred && p.inferred.values) || {};
@@ -249,7 +417,7 @@ do_derive() {
   fi
 
   cd "$ROOT_DIR"
-  PROFILE_FILE_PATH="$PROFILE_FILE" EVENTS_PATH="$EVENTS" bun -e "
+  PROFILE_FILE_PATH="$PROFILE_FILE" EVENTS_PATH="$EVENTS" bun --no-env-file --config=/dev/null -e "
     import('./scripts/question-registry.ts').then(async (regmod) => {
       const sigmod = await import('./scripts/psychographic-signals.ts');
       const fs = require('fs');
@@ -270,6 +438,7 @@ do_derive() {
       const qids = new Set();
       const days = new Set();
       let count = 0;
+      let signalEvents = 0;
       for (const line of lines) {
         let e;
         try { e = JSON.parse(line); } catch { continue; }
@@ -279,8 +448,8 @@ do_derive() {
         qids.add(e.question_id);
         if (e.ts) days.add(String(e.ts).slice(0,10));
         const def = QUESTIONS[e.question_id];
-        if (def && def.signal_key) {
-          applySignal(totals, def.signal_key, e.user_choice);
+        if (def && def.signal_key && applySignal(totals, def.signal_key, e.user_choice).length > 0) {
+          signalEvents++;
         }
       }
 
@@ -292,6 +461,9 @@ do_derive() {
       profile.inferred = {
         values,
         sample_size: count,
+        // Events that actually moved a dimension (B10): sample_size counts every
+        // logged answer, most of which match no signal and leave the 0.5 seed.
+        signal_events: signalEvents,
         diversity: {
           skills_covered: skills.size,
           question_ids_covered: qids.size,
@@ -332,7 +504,7 @@ do_trace() {
     return 0
   fi
   cd "$ROOT_DIR"
-  EVENTS_PATH="$EVENTS" TRACE_DIM="$DIM" bun -e "
+  EVENTS_PATH="$EVENTS" TRACE_DIM="$DIM" bun --no-env-file --config=/dev/null -e "
     import('./scripts/question-registry.ts').then(async (regmod) => {
       const sigmod = await import('./scripts/psychographic-signals.ts');
       const fs = require('fs');
@@ -370,7 +542,7 @@ do_trace() {
 # -----------------------------------------------------------------------
 do_check_mismatch() {
   ensure_profile
-  cat "$PROFILE_FILE" | bun -e "
+  cat "$PROFILE_FILE" | bun --no-env-file --config=/dev/null -e "
     const p = JSON.parse(await Bun.stdin.text());
     const declared = p.declared || {};
     const inferred = (p.inferred && p.inferred.values) || {};
@@ -414,7 +586,7 @@ do_narrative() {
 do_vibe() {
   ensure_profile
   cd "$ROOT_DIR"
-  cat "$PROFILE_FILE" | PROFILE_DATA="$(cat "$PROFILE_FILE")" bun -e "
+  cat "$PROFILE_FILE" | PROFILE_DATA="$(cat "$PROFILE_FILE")" bun --no-env-file --config=/dev/null -e "
     import('./scripts/archetypes.ts').then(async (mod) => {
       const p = JSON.parse(process.env.PROFILE_DATA);
       const dims = (p.inferred && p.inferred.values) || {
@@ -441,6 +613,8 @@ case "$CMD" in
   --vibe) do_vibe ;;
   --check-mismatch) do_check_mismatch ;;
   --migrate) do_migrate ;;
+  --log-session) do_log_session "$@" ;;
+  --reconcile) do_reconcile ;;
   --help|-h) sed -n '1,/^set -euo/p' "$0" | sed 's|^# \?||' ;;
   *)
     echo "gstack-developer-profile: unknown subcommand '$CMD'" >&2

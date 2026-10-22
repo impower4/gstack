@@ -1,0 +1,7 @@
+{"type":"thread.started","thread_id":"01a150b3-ae5a-7932-ba51-4c295c66adf4"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"I’ll write and overwrite `hello.txt` with `printf`, then read it with `cat`.\n"}}
+{"type":"item.started","item":{"id":"item_1","type":"command_execution","command":"/bin/bash -lc \"printf 'hi' > hello.txt\nprintf 'hello' > hello.txt\ncat hello.txt\"","aggregated_output":"","exit_code":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_1","type":"command_execution","command":"/bin/bash -lc \"printf 'hi' > hello.txt\nprintf 'hello' > hello.txt\ncat hello.txt\"","aggregated_output":"hello","exit_code":0,"status":"completed"}}
+{"type":"item.completed","item":{"id":"item_2","type":"agent_message","text":"`cat hello.txt` output: `hello`"}}
+{"type":"turn.completed","usage":{"input_tokens":25009,"cached_input_tokens":12437,"cache_write_input_tokens":12566,"output_tokens":86,"reasoning_output_tokens":0}}

@@ -20,9 +20,10 @@ import * as fs from 'fs';
 import * as path from 'path';
 import {
   mintPtySessionToken, validatePtySessionToken, revokePtySessionToken,
-  extractPtyCookie, buildPtySetCookie, buildPtyClearCookie,
+  extractPtyCookie, buildPtySetCookie,
   PTY_COOKIE_NAME, __resetPtySessions,
 } from '../src/pty-session-cookie';
+import { makeServer, stubRouteContext, callRoute, routeEntry } from './route-test-harness';
 
 const SERVER_SRC = fs.readFileSync(path.join(import.meta.dir, '../src/server.ts'), 'utf-8');
 const AGENT_SRC = fs.readFileSync(path.join(import.meta.dir, '../src/terminal-agent.ts'), 'utf-8');
@@ -61,10 +62,6 @@ describe('pty-session-cookie: mint/validate/revoke', () => {
     expect(cookie).not.toContain('Secure');
   });
 
-  test('clear-cookie has Max-Age=0', () => {
-    expect(buildPtyClearCookie()).toContain('Max-Age=0');
-  });
-
   test('extractPtyCookie reads gstack_pty from a Cookie header', () => {
     const { token } = mintPtySessionToken();
     const req = new Request('http://127.0.0.1/ws', {
@@ -93,17 +90,22 @@ describe('Source-level guard: /pty-session is not on the tunnel surface', () => 
   });
 });
 
-describe('Source-level guard: /health does NOT surface ptyToken', () => {
-  test('/health response body does not include ptyToken', () => {
-    const healthIdx = SERVER_SRC.indexOf("url.pathname === '/health'");
-    expect(healthIdx).toBeGreaterThan(-1);
-    // Slice from /health through the response close-bracket.
-    const slice = SERVER_SRC.slice(healthIdx, healthIdx + 2000);
-    // The /health JSON.stringify body must not mention the cookie token.
+describe('/health does NOT surface ptyToken', () => {
+  test('/health response body does not include ptyToken', async () => {
     // It's allowed to include `terminalPort` (a port number, not auth).
-    expect(slice).not.toContain('ptyToken');
-    expect(slice).not.toContain('gstack_pty');
-    expect(slice).toContain('terminalPort');
+    const ctx = stubRouteContext({
+      browserManager: {
+        isHealthy: () => true, probeActiveTab: async () => ({ id: 1, responsive: true }),
+        getConnectionMode: () => 'launched', getTabCount: () => 1,
+      } as any,
+      terminal: { readPort: () => 4242, grantToken: async () => true, restartSession: async () => true },
+    });
+    const text = await (await callRoute('GET', '/health', ctx)).text();
+    const body = JSON.parse(text);
+    expect(body.terminalPort).toBe(4242);
+    expect(Object.keys(body).sort()).toEqual(['activeTab', 'mode', 'status', 'tabs', 'terminalPort', 'uptime']);
+    expect(text).not.toContain('ptyToken');
+    expect(text).not.toContain('gstack_pty');
   });
 });
 
@@ -118,43 +120,69 @@ describe('Source-level guard: terminal-agent', () => {
     // missing-origin attempt would surface the 401 cookie message and
     // signal to attackers that they need to forge a cookie.
     const wsHandler = AGENT_SRC.slice(AGENT_SRC.indexOf("if (url.pathname === '/ws')"));
-    expect(wsHandler).toContain('chrome-extension://');
+    expect(wsHandler).toContain('allowedExtensionOrigin()');
     expect(wsHandler).toContain('forbidden origin');
   });
 
   test('validates the session token against an in-memory token set', () => {
     const wsHandler = AGENT_SRC.slice(AGENT_SRC.indexOf("if (url.pathname === '/ws')"));
     // Two transports: Sec-WebSocket-Protocol (preferred for browsers) and
-    // Cookie gstack_pty (fallback). Both verify against validTokens.
+    // the gstack_pty cookie fallback — parsing shared via extractPtyCookie
+    // (the hand-rolled parse here had drifted from the server's), validation
+    // still against the agent's own validTokens map.
     expect(wsHandler).toContain('sec-websocket-protocol');
-    expect(wsHandler).toContain('gstack_pty');
+    expect(wsHandler).toContain('extractPtyCookie');
     expect(wsHandler).toContain('validTokens.has');
   });
 
-  test('Sec-WebSocket-Protocol auth: strips gstack-pty. prefix and echoes back', () => {
+  test('Sec-WebSocket-Protocol auth: strips gstack-pty. prefix, no manual echo', () => {
     const wsHandler = AGENT_SRC.slice(AGENT_SRC.indexOf("if (url.pathname === '/ws')"));
     // Browsers send `Sec-WebSocket-Protocol: gstack-pty.<token>`. The agent
-    // must strip the prefix before checking validTokens, AND echo the
-    // protocol back in the upgrade response — without the echo, the
-    // browser closes the connection immediately.
+    // must strip the prefix before checking validTokens. The protocol echo
+    // is Bun's job: Bun >= 1.3 auto-echoes the first offered protocol in the
+    // 101 response. A manual echo on top produced a DUPLICATE
+    // Sec-WebSocket-Protocol header, which strict clients (Chromium, python
+    // websockets) reject per RFC 6455 — the sidebar terminal could never
+    // connect. Pin the invariant: no manual echo in the upgrade call.
     expect(wsHandler).toContain("'gstack-pty.'");
-    expect(wsHandler).toContain('Sec-WebSocket-Protocol');
-    expect(wsHandler).toContain('acceptedProtocol');
+    expect(wsHandler).toContain('sec-websocket-protocol');
+    expect(wsHandler).not.toContain("headers: { 'Sec-WebSocket-Protocol'");
   });
 
   test('lazy spawn: claude PTY is spawned in message handler, not on upgrade', () => {
     // The whole point of lazy-spawn (codex finding #8) is that the WS
-    // upgrade itself does NOT call spawnClaude. Spawn happens on first
-    // message frame.
+    // upgrade itself does NOT spawn claude. Spawn happens on first
+    // message frame (binary input or the v1.44 explicit `start` frame),
+    // routed through the maybeSpawnPty helper, which is the only caller
+    // of spawnClaude.
     const upgradeBlock = AGENT_SRC.slice(
       AGENT_SRC.indexOf("if (url.pathname === '/ws')"),
       AGENT_SRC.indexOf("websocket: {"),
     );
+    // v1.44 renamed spawnClaude -> maybeSpawnPty (explicit `start` frame +
+    // lazy first-byte spawn share one helper). Pin was stale from then until
+    // the free suite got a CI job.
     expect(upgradeBlock).not.toContain('spawnClaude(');
+    expect(upgradeBlock).not.toContain('maybeSpawnPty(');
     // Spawn must be invoked from the message handler (lazy on first byte).
+    // v1.44 routes both spawn triggers (explicit {type:"start"} text frame
+    // and the lazy binary-frame path) through the maybeSpawnPty helper.
     const messageHandler = AGENT_SRC.slice(AGENT_SRC.indexOf('message(ws, raw)'));
-    expect(messageHandler).toContain('spawnClaude(');
+    expect(messageHandler).toContain('maybeSpawnPty(');
     expect(messageHandler).toContain('!session.spawned');
+    // The open() upgrade handler must not spawn — it only creates the
+    // (spawned: false) session record or re-attaches a detached one.
+    const openBlock = AGENT_SRC.slice(
+      AGENT_SRC.indexOf('open(ws)'),
+      AGENT_SRC.indexOf('message(ws, raw)'),
+    );
+    expect(openBlock).not.toContain('spawnClaude(');
+    expect(openBlock).not.toContain('maybeSpawnPty(');
+    // And the helper itself is where spawnClaude actually happens, gated
+    // on session.spawned so it stays a single-shot lazy spawn.
+    const helperBlock = AGENT_SRC.slice(AGENT_SRC.indexOf('function maybeSpawnPty'));
+    expect(helperBlock).toContain('spawnClaude(');
+    expect(helperBlock).toContain('if (session.spawned) return true;');
   });
 
   test('process.on uncaughtException + unhandledRejection handlers exist', () => {
@@ -164,21 +192,25 @@ describe('Source-level guard: terminal-agent', () => {
 
   test('cleanup escalates SIGINT to SIGKILL after 3s on close', () => {
     // disposeSession must be idempotent and use a SIGINT-then-SIGKILL pattern.
-    const dispose = AGENT_SRC.slice(AGENT_SRC.indexOf('function disposeSession'));
-    expect(dispose).toContain("'SIGINT'");
-    expect(dispose).toContain("'SIGKILL'");
-    expect(dispose).toContain('3000');
+    const dispose = AGENT_SRC.slice(AGENT_SRC.indexOf('function disposeSession'), AGENT_SRC.indexOf('function sendPtyCompletion'));
+    const lifecycle = fs.readFileSync(path.join(import.meta.dir, '../src/terminal-pty-lifecycle.ts'), 'utf-8');
+    expect(dispose).toContain('disposePtyProcess(proc)');
+    expect(lifecycle).toContain("'SIGINT'");
+    expect(lifecycle).toContain("'SIGKILL'");
+    expect(lifecycle).toContain('PTY_SHUTDOWN_GRACE_MS = 3000');
   });
 
   test('tabState frames write tabs.json + active-tab.json', () => {
     expect(AGENT_SRC).toContain("msg?.type === 'tabState'");
     expect(AGENT_SRC).toContain('function handleTabState');
     const fn = AGENT_SRC.slice(AGENT_SRC.indexOf('function handleTabState'));
-    // Atomic write via tmp + rename for both files (so claude never reads
-    // a half-written JSON document).
+    // Atomic write for both files (so claude never reads a half-written
+    // JSON document) — via the shared lib/fs-atomic helper, which owns the
+    // tmp + rename dance. Quiet variant: state-file writes are
+    // fire-and-forget and must never take down the agent.
     expect(fn).toContain("'tabs.json'");
     expect(fn).toContain("'active-tab.json'");
-    expect(fn).toContain('renameSync');
+    expect(fn).toContain('atomicWriteQuiet');
     // Skip chrome:// and chrome-extension:// pages — they're not useful
     // targets for browse commands.
     expect(fn).toContain("startsWith('chrome://')");
@@ -203,21 +235,28 @@ describe('Source-level guard: terminal-agent', () => {
   });
 });
 
-describe('Source-level guard: server.ts /pty-session route', () => {
-  test('validates AUTH_TOKEN, grants over loopback, returns token + Set-Cookie', () => {
-    const route = SERVER_SRC.slice(SERVER_SRC.indexOf("url.pathname === '/pty-session'"));
+describe('/pty-session route', () => {
+  test('validates AUTH_TOKEN, grants over loopback, returns token + Set-Cookie', async () => {
     // Must check auth before minting.
-    const beforeMint = route.slice(0, route.indexOf('mintPtySessionToken'));
-    expect(beforeMint).toContain('validateAuth');
-    // Must call the loopback grant before responding (otherwise the
-    // agent's validTokens Set never sees the token and /ws would 401).
-    expect(route).toContain('grantPtyToken');
-    // Must return the token in the JSON body for the
-    // Sec-WebSocket-Protocol auth path (cross-port cookies don't survive
-    // SameSite=Strict from a chrome-extension origin).
-    expect(route).toContain('ptySessionToken');
-    // Set-Cookie is kept as a fallback for non-browser callers.
-    expect(route).toContain('Set-Cookie');
-    expect(route).toContain('buildPtySetCookie');
+    expect(routeEntry('POST', '/pty-session').auth).toBe('root-bearer');
+    const server = makeServer();
+    try {
+      const denied = await server.local('/pty-session', { method: 'POST' });
+      expect(denied.status).toBe(401);
+    } finally { server.cleanup(); }
+    // Must call the loopback grant before responding (otherwise the agent's
+    // validTokens Set never sees the token and /ws would 401), return the
+    // token in the JSON body for the Sec-WebSocket-Protocol auth path
+    // (cross-port cookies don't survive SameSite=Strict from a
+    // chrome-extension origin), and keep Set-Cookie as a fallback for
+    // non-browser callers.
+    const granted: string[] = [];
+    const ctx = stubRouteContext({
+      terminal: { readPort: () => 4242, grantToken: async (token) => { granted.push(token); return true; }, restartSession: async () => true },
+    });
+    const resp = await callRoute('POST', '/pty-session', ctx);
+    const body = await resp.json() as any;
+    expect(granted).toEqual([body.ptySessionToken]);
+    expect(resp.headers.get('set-cookie')).toBe(buildPtySetCookie(body.ptySessionToken));
   });
 });

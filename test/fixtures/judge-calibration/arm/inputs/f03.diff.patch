@@ -1,0 +1,83 @@
+diff --git a/tests/test_config.py b/tests/test_config.py
+new file mode 100644
+index 0000000..302c50c
+--- /dev/null
++++ b/tests/test_config.py
+@@ -0,0 +1,20 @@
++from worker.config import DEFAULT_TIMEOUT, worker_timeout
++
++
++def test_reads_timeout_from_toml(tmp_path, monkeypatch):
++    monkeypatch.delenv("WORKER_TIMEOUT", raising=False)
++    cfg = tmp_path / "config.toml"
++    cfg.write_text('[worker]\ntimeout_seconds = 90  # slow upstream\n')
++    assert worker_timeout(cfg) == 90
++
++
++def test_env_overrides_file(tmp_path, monkeypatch):
++    monkeypatch.setenv("WORKER_TIMEOUT", "5")
++    cfg = tmp_path / "config.toml"
++    cfg.write_text("[worker]\ntimeout_seconds = 90\n")
++    assert worker_timeout(cfg) == 5
++
++
++def test_missing_file_uses_default(tmp_path, monkeypatch):
++    monkeypatch.delenv("WORKER_TIMEOUT", raising=False)
++    assert worker_timeout(tmp_path / "absent.toml") == DEFAULT_TIMEOUT
+diff --git a/worker/config.py b/worker/config.py
+index 08f1b04..fdeb4c2 100644
+--- a/worker/config.py
++++ b/worker/config.py
+@@ -1,7 +1,50 @@
+ import os
++from pathlib import Path
+ 
+ DEFAULT_TIMEOUT = 30
++CONFIG_PATH = Path(__file__).resolve().parent.parent / "config.toml"
+ 
+ 
+-def worker_timeout() -> int:
+-    return int(os.environ.get("WORKER_TIMEOUT", DEFAULT_TIMEOUT))
++def _parse_value(raw: str):
++    raw = raw.strip()
++    if raw.startswith(('"', "'")) and raw.endswith(raw[0]):
++        return raw[1:-1]
++    if raw in ("true", "false"):
++        return raw == "true"
++    try:
++        return int(raw.replace("_", ""))
++    except ValueError:
++        pass
++    try:
++        return float(raw)
++    except ValueError:
++        raise ValueError(f"unsupported TOML value: {raw!r}")
++
++
++def _parse_toml(text: str) -> dict:
++    """Minimal TOML reader: [tables], key = value, comments."""
++    data: dict = {}
++    table = data
++    for lineno, line in enumerate(text.splitlines(), 1):
++        line = line.split("#", 1)[0].strip()
++        if not line:
++            continue
++        if line.startswith("[") and line.endswith("]"):
++            table = data
++            for part in line[1:-1].strip().split("."):
++                table = table.setdefault(part.strip(), {})
++            continue
++        if "=" not in line:
++            raise ValueError(f"config.toml:{lineno}: expected key = value")
++        key, value = line.split("=", 1)
++        table[key.strip()] = _parse_value(value)
++    return data
++
++
++def worker_timeout(config_path: Path = CONFIG_PATH) -> int:
++    if "WORKER_TIMEOUT" in os.environ:
++        return int(os.environ["WORKER_TIMEOUT"])
++    if config_path.exists():
++        config = _parse_toml(config_path.read_text())
++        return int(config.get("worker", {}).get("timeout_seconds", DEFAULT_TIMEOUT))
++    return DEFAULT_TIMEOUT

@@ -1,0 +1,62 @@
+diff --git a/api/pagination.py b/api/pagination.py
+index 6029713..fa9c032 100644
+--- a/api/pagination.py
++++ b/api/pagination.py
+@@ -1,10 +1,20 @@
++import math
++
++
+ def paginate(items, page, per_page=10):
+-    """Return one page of `items` plus paging metadata for the JSON response."""
+-    start = page * per_page
++    """Return one page of `items` plus paging metadata for the JSON response.
++
++    Pages are 1-indexed.
++    """
++    if page < 1:
++        raise ValueError(f"page must be >= 1, got {page}")
++    if per_page < 1:
++        raise ValueError(f"per_page must be >= 1, got {per_page}")
++    start = (page - 1) * per_page
+     end = start + per_page
+     return {
+         "items": items[start:end],
+         "page": page,
+         "per_page": per_page,
+-        "total_pages": len(items) // per_page,
++        "total_pages": math.ceil(len(items) / per_page),
+     }
+diff --git a/tests/test_pagination.py b/tests/test_pagination.py
+index 897ad1d..6e37778 100644
+--- a/tests/test_pagination.py
++++ b/tests/test_pagination.py
+@@ -1,6 +1,29 @@
++import pytest
++
+ from api.pagination import paginate
+ 
+ 
+ def test_metadata_shape():
+     result = paginate(list(range(30)), 1, per_page=10)
+     assert set(result) == {"items", "page", "per_page", "total_pages"}
++
++
++def test_first_page_is_page_one():
++    assert paginate(list(range(23)), 1)["items"] == list(range(10))
++
++
++def test_last_partial_page():
++    result = paginate(list(range(23)), 3)
++    assert result["items"] == [20, 21, 22]
++    assert result["total_pages"] == 3
++
++
++def test_exact_multiple_and_empty():
++    assert paginate(list(range(20)), 1)["total_pages"] == 2
++    assert paginate([], 1)["total_pages"] == 0
++
++
++@pytest.mark.parametrize("page,per_page", [(0, 10), (-1, 10), (1, 0)])
++def test_rejects_out_of_range(page, per_page):
++    with pytest.raises(ValueError):
++        paginate(list(range(5)), page, per_page=per_page)

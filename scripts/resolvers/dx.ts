@@ -9,6 +9,7 @@
  * to avoid prompt bloat.
  */
 import type { TemplateContext } from './types';
+import { DX_ERROR_COMPACT, DX_ERROR_ITEMS } from '../../lib/dx-error-contract';
 
 export function generateDxFramework(ctx: TemplateContext): string {
   const hallOfFamePath = `${ctx.paths.skillRoot}/plan-devex-review/dx-hall-of-fame.md`;
@@ -21,10 +22,11 @@ These are the laws. Every recommendation traces back to one of these.
 2. **Incremental steps.** Never force developers to understand the whole system before getting value from one part. Gentle ramp, not cliff.
 3. **Learn by doing.** Playgrounds, sandboxes, copy-paste code that works in context. Reference docs are necessary but never sufficient.
 4. **Decide for me, let me override.** Opinionated defaults are features. Escape hatches are requirements. Strong opinions, loosely held.
-5. **Fight uncertainty.** Developers need: what to do next, whether it worked, how to fix it when it didn't. Every error = problem + cause + fix.
+5. **Fight uncertainty.** Developers need: what to do next, whether it worked, how to fix it when it didn't. Every error meets the agent-ready error contract, so an agent can repair it or escalate precisely without reading the source.
 6. **Show code in context.** Hello world is a lie. Show real auth, real error handling, real deployment. Solve 100% of the problem.
 7. **Speed is a feature.** Iteration speed is everything. Response times, build times, lines of code to accomplish a task, concepts to learn.
 8. **Create magical moments.** What would feel like magic? Stripe's instant API response. Vercel's push-to-deploy. Find yours and make it the first thing developers experience.
+9. **Agents are users too.** Non-interactive by default, structured output, layered \`--help\`, and errors written as the agent's next prompt.
 
 ## The Seven DX Characteristics
 
@@ -44,7 +46,7 @@ Internalize these; don't enumerate them.
 
 1. **Chef-for-chefs** — Your users build products for a living. The bar is higher because they notice everything.
 2. **First five minutes obsession** — New dev arrives. Clock starts. Can they hello-world without docs, sales, or credit card?
-3. **Error message empathy** — Every error is pain. Does it identify the problem, explain the cause, show the fix, link to docs?
+3. **Error message empathy** — Every error is pain, and an agent often hits it first. Would an agent that hit this unattended know the safe next command, or exactly what to ask a human for?
 4. **Escape hatch awareness** — Every default needs an override. No escape hatch = no trust = no adoption at scale.
 5. **Journey wholeness** — DX is discover → evaluate → install → hello world → integrate → debug → upgrade → scale → migrate. Every gap = a lost dev.
 6. **Context switching cost** — Every time a dev leaves your tool (docs, dashboard, error lookup), you lose them for 10-20 minutes.
@@ -82,4 +84,14 @@ During each review pass, load the relevant section from:
 
 Read ONLY the section for the current pass (e.g., "## Pass 1" for Getting Started).
 Do NOT read the entire file at once. This keeps context focused.`;
+}
+
+/** {{DX_ERROR_COMPACT}}: the contract's compact form for reviewer prompts. */
+export function generateDxErrorCompact(_ctx: TemplateContext): string {
+  return DX_ERROR_COMPACT;
+}
+
+/** {{DX_ERROR_ITEMS}}: the contract's item names, for steps that load the full text lazily. */
+export function generateDxErrorItems(_ctx: TemplateContext): string {
+  return DX_ERROR_ITEMS.join(', ');
 }

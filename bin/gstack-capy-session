@@ -1,0 +1,123 @@
+#!/usr/bin/env bash
+# gstack-capy-session — the full Capy skill wrapper: the checkout-owned half
+# of a Capy session start. The frozen bootstrapper the Drive skill holds
+# (capy/skill/gstack/scripts/install.sh) clones or fast-forwards this checkout
+# and execs this script with its own arguments plus:
+#   GSTACK_CAPY_WRAPPER_REV / GSTACK_CAPY_WRAPPER_PATH  the bootstrapper that ran
+#   GSTACK_CAPY_REMOTE_MIN    the supported minimum from origin's capy/support.env, or `unknown`
+#   GSTACK_CAPY_REMOTE_VERSION origin's VERSION read in this run (wrapper 2+; the
+#                             installer's `latest: <ver> available` trailer note)
+#   GSTACK_CAPY_UPGRADED_FROM the version it fast-forwarded from (setup is never skipped then)
+#   GSTACK_CAPY_CLONED        the repo it just cloned (wrapper 2+; the installer's `cloned` line)
+#   GSTACK_CAPY_LOCK_HELD=1   install mode: .gstack-capy-install.lock is held on an
+#                             inherited descriptor; nothing here takes it again
+# Because this file moves with the checkout, session-start behavior can change
+# without anyone recopying the Drive skill; that includes the stale-copy owner
+# action, read from capy/support.env through gstack_support_env_get.
+#
+# Always current when online: the bootstrapper moves a checkout only when it
+# is below GSTACK_MIN_REVISION (the floor). Above the floor, this half keeps
+# the checkout at the tip of origin's default branch: in install mode, when
+# the bootstrapper's FETCH_HEAD is ahead of HEAD, it runs
+# bin/gstack-upgrade --ff-only-no-reinstall (every refusal of gstack-upgrade
+# applies: dirty, diverged, pinned, Bun hold, a live workflow lease) and on
+# success re-execs the NEW checkout's copy of this script with the same
+# arguments (GSTACK_CAPY_SELF_UPGRADED=1 stops a second attempt) before the
+# installer runs. Lines: `SELF_UPGRADE: done <old> -> <new>` | `skipped (<reason>)`
+# | `none (current)` | `disabled (<the variable: GSTACK_CAPY_SELF_UPGRADE=off or
+# GSTACK_CAPY_AUTO_UPGRADE=0>)`.
+# --check never moves the checkout; behind origin it prints
+# `gstack-capy-session: behind origin/<branch>: <installed> -> <remote> (<n> commits); fix: ...`.
+# Whenever the session ends behind origin (--check, or a self-upgrade that was
+# skipped or disabled) it exports GSTACK_CAPY_BEHIND=<n>, GSTACK_CAPY_BEHIND_TO=<remote
+# VERSION> and GSTACK_CAPY_BEHIND_FIX=<command> for the installer's trailer notes
+# `behind=<n> (latest: <remote>); fix: <command>`. The command never contains
+# "; " (the note separator): after a refused self-upgrade it is bin/gstack-upgrade,
+# which prints its own refusal and fix. A skipped self-upgrade (refused, busy,
+# or gstack-upgrade missing) also exports GSTACK_CAPY_BEHIND_BLOCKED=<reason; fix: …
+# (CODE)>, and the installer turns an ok trailer into `gstack: fail behind`: a
+# session that meant to upgrade and could not is never certified ok.
+#
+# Usage: gstack-capy-session [--check] --root <checkout> [gstack-capy-install arguments]
+#   --check  certify only (bin/gstack-capy-install --check: the doctor with the
+#            launch PATH and the remote minimum, the verdict, the launch line)
+#   default  install or repair (bin/gstack-capy-install)
+# The last line is the `gstack:` trailer; the exit status is the installer's.
+set -u
+ROOT="$(cd "$(dirname "$0")/.." && pwd -P)"
+CHECK=0 SKILL=""
+prev=""
+for a in "$@"; do
+  [ "$prev" = --root ] && ROOT="$a"
+  case "$prev" in --for|--only) SKILL="$a" ;; esac
+  [ "$a" = --check ] && CHECK=1
+  prev="$a"
+done
+INSTALLER="$ROOT/bin/gstack-capy-install"
+if [ ! -x "$INSTALLER" ]; then
+  echo "gstack: fail installer — $INSTALLER is missing; fix: bash ${GSTACK_CAPY_WRAPPER_PATH:-<skill>/scripts/install.sh} (re-clones or fast-forwards)"
+  exit 1
+fi
+[ "${GSTACK_CAPY_REMOTE_MIN:-}" = unknown ] && echo "gstack-capy-session: remote minimum unknown (fetch failed); the revision row is local only"
+# shellcheck source=bin/gstack-install-verdict.sh
+. "$ROOT/bin/gstack-install-verdict.sh"
+MIN_WRAPPER=$(gstack_support_env_get "$(gstack_source_root "$ROOT/bin")" GSTACK_CAPY_MIN_WRAPPER)
+if [ -n "$MIN_WRAPPER" ] && [ "${GSTACK_CAPY_WRAPPER_REV:-0}" -lt "$MIN_WRAPPER" ] 2>/dev/null; then
+  echo "gstack-capy-skill: owner action — Drive copy is wrapper ${GSTACK_CAPY_WRAPPER_REV:-0}, minimum $MIN_WRAPPER; copy $ROOT/capy/skill/gstack/ (CAPY_WRAPPER_STALE)"
+fi
+
+# Behind origin? Only when the bootstrapper fetched (a known remote minimum
+# means FETCH_HEAD is origin's default branch tip) and that tip is not already
+# in HEAD.
+behind() {
+  [ -n "${GSTACK_CAPY_REMOTE_MIN:-}" ] && [ "$GSTACK_CAPY_REMOTE_MIN" != unknown ] || return 1
+  git -C "$ROOT" rev-parse -q --verify FETCH_HEAD >/dev/null 2>&1 || return 1
+  ! git -C "$ROOT" merge-base --is-ancestor FETCH_HEAD HEAD 2>/dev/null
+}
+disabled() { echo "SELF_UPGRADE: disabled ($1)"; behind && report_behind "unset $1, then $RERUN"; } # VAR — the switch that turned the fast-forward off
+# report_behind FIX — hand the installer the gap and the command that closes
+# it, for the trailer's `behind=<n>` note (lanes relay only the trailer).
+report_behind() {
+  export GSTACK_CAPY_BEHIND="$(git -C "$ROOT" rev-list --count HEAD..FETCH_HEAD 2>/dev/null || echo '?')" \
+    GSTACK_CAPY_BEHIND_TO="$(git -C "$ROOT" show FETCH_HEAD:VERSION 2>/dev/null | head -1)" GSTACK_CAPY_BEHIND_FIX="$1"
+}
+unset GSTACK_CAPY_BEHIND GSTACK_CAPY_BEHIND_TO GSTACK_CAPY_BEHIND_FIX GSTACK_CAPY_BEHIND_BLOCKED
+RERUN="bash ${GSTACK_CAPY_WRAPPER_PATH:-<skill>/scripts/install.sh}${SKILL:+ --for $SKILL}"
+if [ "$CHECK" -eq 1 ]; then
+  if behind; then
+    # The rerun fast-forwards only what gstack-upgrade would move; otherwise
+    # gstack-upgrade itself names the refusal and its fix.
+    if [ "${GSTACK_CAPY_SELF_UPGRADE:-}" = off ]; then report_behind "unset GSTACK_CAPY_SELF_UPGRADE, then $RERUN"
+    elif [ "${GSTACK_CAPY_AUTO_UPGRADE:-1}" = 0 ]; then report_behind "unset GSTACK_CAPY_AUTO_UPGRADE, then $RERUN"
+    elif [ "$(git -C "$ROOT" symbolic-ref -q --short HEAD 2>/dev/null)" != "$(sed -n "1s/.*branch '\([^']*\)' of .*/\1/p" "$(git -C "$ROOT" rev-parse --absolute-git-dir 2>/dev/null)/FETCH_HEAD" 2>/dev/null)" ] \
+      || [ -n "$(git -C "$ROOT" status --porcelain --untracked-files=no 2>/dev/null)" ] \
+      || ! git -C "$ROOT" merge-base --is-ancestor HEAD FETCH_HEAD 2>/dev/null; then report_behind "$ROOT/bin/gstack-upgrade"
+    else report_behind "$RERUN"
+    fi
+    BRANCH=$(git -C "$ROOT" symbolic-ref -q --short HEAD 2>/dev/null || echo HEAD)
+    echo "gstack-capy-session: behind origin/$BRANCH: $(head -1 "$ROOT/VERSION" 2>/dev/null) -> $GSTACK_CAPY_BEHIND_TO ($GSTACK_CAPY_BEHIND commits); fix: $GSTACK_CAPY_BEHIND_FIX$([ "$GSTACK_CAPY_BEHIND_FIX" = "$RERUN" ] && echo ' (fast-forwards)')"
+  fi
+elif [ "${GSTACK_CAPY_SELF_UPGRADED:-}" != 1 ]; then
+  if [ "${GSTACK_CAPY_SELF_UPGRADE:-}" = off ]; then disabled GSTACK_CAPY_SELF_UPGRADE
+  elif [ "${GSTACK_CAPY_AUTO_UPGRADE:-1}" = 0 ]; then disabled GSTACK_CAPY_AUTO_UPGRADE
+  elif [ -z "${GSTACK_CAPY_REMOTE_MIN:-}" ] || [ "$GSTACK_CAPY_REMOTE_MIN" = unknown ]; then echo "SELF_UPGRADE: none (remote minimum unknown)"
+  elif ! behind; then echo "SELF_UPGRADE: none (current)"
+  elif [ ! -x "$ROOT/bin/gstack-upgrade" ]; then echo "SELF_UPGRADE: skipped ($ROOT/bin/gstack-upgrade is missing)"; report_behind "$RERUN"
+    export GSTACK_CAPY_BEHIND_BLOCKED="$ROOT/bin/gstack-upgrade is missing; fix: $RERUN (UPGRADE_REFUSED)"
+  else
+    OLD=$(head -1 "$ROOT/VERSION" 2>/dev/null)
+    UP_OUT=$("$ROOT/bin/gstack-upgrade" --ff-only-no-reinstall 2>&1); UP_RC=$?
+    [ -n "$UP_OUT" ] && printf '%s\n' "$UP_OUT"
+    if [ "$UP_RC" -eq 0 ]; then
+      echo "SELF_UPGRADE: done $OLD -> $(head -1 "$ROOT/VERSION" 2>/dev/null)"
+      export GSTACK_CAPY_UPGRADED_FROM="$OLD" GSTACK_CAPY_SELF_UPGRADED=1
+      exec "$ROOT/bin/gstack-capy-session" "$@"
+    fi
+    REASON=$(printf '%s\n' "$UP_OUT" | sed -n 's/^gstack-upgrade: \(.*\); nothing was changed; fix: /\1; fix: /p' | tail -1)
+    [ -n "$REASON" ] || REASON=$(printf '%s\n' "$UP_OUT" | sed -n 's/^gstack-upgrade: //p' | tail -1)
+    echo "SELF_UPGRADE: skipped (${REASON:-gstack-upgrade exit $UP_RC})"
+    report_behind "$ROOT/bin/gstack-upgrade"
+    export GSTACK_CAPY_BEHIND_BLOCKED="${REASON:-gstack-upgrade exit $UP_RC; fix: $ROOT/bin/gstack-upgrade (UPGRADE_REFUSED)}"
+  fi
+fi
+exec "$INSTALLER" "$@"

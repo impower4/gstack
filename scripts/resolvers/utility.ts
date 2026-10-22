@@ -1,11 +1,40 @@
 import type { TemplateContext } from './types';
+import { CODEX_MODEL_CONFIG_FLAG, CODEX_REVIEW_MODEL_CONFIG_FLAG, CODEX_WEB_SEARCH_FLAG } from './constants';
+import { CLAUDE_CAPTURE_EVAL_MODEL } from '../../lib/eval-model';
+
+/**
+ * {{CODEX_WEB_SEARCH_FLAG}} — the non-deprecated codex web-search flag
+ * (#2525). Templates with inline codex invocations reference this token so
+ * the flag has exactly one source of truth (scripts/resolvers/constants.ts).
+ */
+export function generateCodexWebSearchFlag(_ctx: TemplateContext): string {
+  return CODEX_WEB_SEARCH_FLAG;
+}
+
+/**
+ * {{CODEX_MODEL_CONFIG_FLAG}} — the default frontier Codex model override.
+ * Users can override it with GSTACK_CODEX_MODEL, or replace it with a
+ * request-specific `-c model="..."` when the skill input names a model.
+ */
+export function generateCodexModelConfigFlag(_ctx: TemplateContext): string {
+  return CODEX_MODEL_CONFIG_FLAG;
+}
+
+export function generateCodexReviewModelConfigFlag(_ctx: TemplateContext): string {
+  return CODEX_REVIEW_MODEL_CONFIG_FLAG;
+}
+
+export function generateClaudeModelFlag(_ctx: TemplateContext): string {
+  return `--model "\${GSTACK_CLAUDE_MODEL:-${CLAUDE_CAPTURE_EVAL_MODEL}}"`;
+}
 
 export function generateSlugEval(ctx: TemplateContext): string {
-  return `eval "$(${ctx.paths.binDir}/gstack-slug 2>/dev/null)"`;
+  return `SLUG=$(${ctx.paths.binDir}/gstack-slug --get SLUG 2>/dev/null)`;
 }
 
 export function generateSlugSetup(ctx: TemplateContext): string {
-  return `eval "$(${ctx.paths.binDir}/gstack-slug 2>/dev/null)" && mkdir -p ~/.gstack/projects/$SLUG`;
+  return `GSTACK_STATE_ROOT=$(${ctx.paths.binDir}/gstack-paths --get GSTACK_STATE_ROOT); : "\${GSTACK_STATE_ROOT:?gstack-paths failed; reinstall with ./setup or /gstack-upgrade}"
+SLUG=$(${ctx.paths.binDir}/gstack-slug --get SLUG 2>/dev/null) && mkdir -p "$GSTACK_STATE_ROOT/projects/$SLUG" && echo "PROJECT_DIR: $GSTACK_STATE_ROOT/projects/$SLUG"`;
 }
 
 export function generateBaseBranchDetect(_ctx: TemplateContext): string {
@@ -57,8 +86,11 @@ echo "$DEPLOY_CONFIG"
 
 # If config exists, parse it
 if [ "$DEPLOY_CONFIG" != "NO_CONFIG" ]; then
-  PROD_URL=$(echo "$DEPLOY_CONFIG" | grep -i "production.*url" | head -1 | sed 's/.*: *//')
-  PLATFORM=$(echo "$DEPLOY_CONFIG" | grep -i "platform" | head -1 | sed 's/.*: *//')
+  # Cut at the FIRST ": ", not the last. A greedy 's/.*: *//' ate the scheme of
+  # any URL: "Production URL: https://x.com" became "//x.com", because the last
+  # ":" belongs to "https:".
+  PROD_URL=$(echo "$DEPLOY_CONFIG" | grep -i "production.*url" | head -1 | sed 's/^[^:]*: *//')
+  PLATFORM=$(echo "$DEPLOY_CONFIG" | grep -i "platform" | head -1 | sed 's/^[^:]*: *//')
   echo "PERSISTED_PLATFORM:$PLATFORM"
   echo "PERSISTED_URL:$PROD_URL"
 fi
@@ -87,223 +119,198 @@ If you want to persist deploy settings for future runs, suggest the user run \`/
 }
 
 export function generateQAMethodology(_ctx: TemplateContext): string {
-  return `## Modes
+  return `# Browser QA methodology
+
+Run only for selected browser surfaces. Map diffs with source before probes; discovery stays black-box, diagnosis caller-owned.
+
+The shared exploratory loop owns execution order, not these technique phases. Its
+checkpoint rule covers every probe after the baseline, including orientation, links,
+exact replay and additional evidence. Never batch across checkpoints.
+
+## Modes
+
+For /qa and /qa-only, choose Full, Quick or Regression. Resolve conflicting depth flags
+by asking before probes. /review and /ship keep their caller's smoke and plan bounds.
+Diff-aware selects scope, not another pass. Time caps include checkpoints and evidence.
+At exhaustion, stop probing and report unfinished coverage, never skip checkpoints.
 
 ### Diff-aware (automatic when on a feature branch with no URL)
 
-This is the **primary mode** for developers verifying their work. When the user says \`/qa\` without a URL and the repo is on a feature branch, automatically:
+Substitute the detected base for \`main\`:
 
-1. **Analyze the branch diff** to understand what changed:
-   \`\`\`bash
-   git diff main...HEAD --name-only
-   git log main..HEAD --oneline
-   \`\`\`
+\`\`\`bash
+git diff main...HEAD --name-only
+git log main..HEAD --oneline
+\`\`\`
 
-2. **Identify affected pages/routes** from the changed files:
-   - Controller/route files → which URL paths they serve
-   - View/template/component files → which pages render them
-   - Model/service files → which pages use those models (check controllers that reference them)
-   - CSS/style files → which pages include those stylesheets
-   - API endpoints → test them directly with \`$B js "await fetch('/api/...')"\`
-   - Static pages (markdown, HTML) → navigate to them directly
+Map changed controllers/routes/views/components/models/services/styles to pages. Check commits/PR intent; add related TODO bugs to the test plan. Open static pages directly. For browser-surface API probes:
 
-   **If no obvious pages/routes are identified from the diff:** Do not skip browser testing. The user invoked /qa because they want browser-based verification. Fall back to Quick mode — navigate to the homepage, follow the top 5 navigation targets, check console for errors, and test any interactive elements found. Backend, config, and infrastructure changes affect app behavior — always verify the app still works.
+\`\`\`bash
+aside repl '
+const pg = await openTab("<base-url>");
+const r = await fetch("<base-url>/api/...", { method: "GET" });
+console.log("API_STATUS=" + r.status);
+console.log("API_BODY_START"); console.log((await r.text()).slice(0, 4000)); console.log("API_BODY_END");
+await closeTab(pg); console.log("GSTACK_STEP_OK");
+'
+\`\`\`
 
-3. **Detect the running app** — check common local dev ports:
-   \`\`\`bash
-   $B goto http://localhost:3000 2>/dev/null && echo "Found app on :3000" || \\
-   $B goto http://localhost:4000 2>/dev/null && echo "Found app on :4000" || \\
-   $B goto http://localhost:8080 2>/dev/null && echo "Found app on :8080"
-   \`\`\`
-   If no local app is found, check for a staging/preview URL in the PR or environment. If nothing works, ask the user for the URL.
+After selecting and isolating a browser surface, find a local app if its URL is missing:
 
-4. **Test each affected page/route:**
-   - Navigate to the page
-   - Take a screenshot
-   - Check console for errors
-   - If the change was interactive (forms, buttons, flows), test the interaction end-to-end
-   - Use \`snapshot -D\` before and after actions to verify the change had the expected effect
+\`\`\`bash
+for p in 3000 4000 8080; do curl -sI --max-time 3 "http://localhost:$p" >/dev/null 2>&1 && echo "Found app on :$p"; done
+\`\`\`
 
-5. **Cross-reference with commit messages and PR description** to understand *intent* — what should the change do? Verify it actually does that.
+Use the supplied URL or first responder/staging/preview; ask if none. Test changed/adjacent pages and flows. Flag new bugs absent from TODOS.md in the Phase 6 report.
 
-6. **Check TODOS.md** (if it exists) for known bugs or issues related to the changed files. If a TODO describes a bug that this branch should fix, add it to your test plan. If you find a new bug during QA that isn't in TODOS.md, note it in the report.
+**No identifiable pages:** use Quick plus discovered interactions, even for backend/config/infrastructure changes.
 
-7. **Report findings** scoped to the branch changes:
-   - "Changes tested: N pages/routes affected by this branch"
-   - For each: does it work? Screenshot evidence.
-   - Any regressions on adjacent pages?
-
-**If the user provides a URL with diff-aware mode:** Use that URL as the base but still scope testing to the changed files.
-
-### Full (default when URL is provided)
-Systematic exploration. Visit every reachable page. Document 5-10 well-evidenced issues. Produce health score. Takes 5-15 minutes depending on app size.
+### Full (default with a URL)
+Visit every reachable page (5-15 minutes). Score health; document 5-10 evidenced issues, never invent any.
 
 ### Quick (\`--quick\`)
-30-second smoke test. Visit homepage + top 5 navigation targets. Check: page loads? Console errors? Broken links? Produce health score. No detailed issue documentation.
+3 minutes: homepage + top 5 navigation targets. Check loads/console/broken links; score per Health Score Rubric; skip detailed issues/checklist, never the shared loop's gates.
 
 ### Regression (\`--regression <baseline>\`)
-Run full mode, then load \`baseline.json\` from a previous run. Diff: which issues are fixed? Which are new? What's the score delta? Append regression section to report.
-
----
+Run Full; append fixed/new issues and score delta. Preserve the supplied prior baseline.
+A missing or unreadable baseline is a missing prerequisite: it blocks the comparison, not the Full run.
 
 ## Workflow
 
 ### Phase 1: Initialize
 
-1. Find browse binary (see Setup above)
-2. Create output directories
-3. Copy report template from \`qa/templates/qa-report-template.md\` to output dir
-4. Start timer for duration tracking
+Reuse the caller's BROWSER SETUP and owned artifact paths: Aside READY, otherwise \`$B\`
+(\`NEEDS_ASIDE\`/\`ASIDE_NOT_RUNNING\`). Complete only missing setup within caller
+authority. Clamp the shared loop's deadline guard to the caller's running deadline.
 
 ### Phase 2: Authenticate (if needed)
 
-**If the user specified auth credentials:**
-
-\`\`\`bash
-$B goto <login-url>
-$B snapshot -i                    # find the login form
-$B fill @e3 "user@example.com"
-$B fill @e4 "[REDACTED]"         # NEVER include real passwords in report
-$B click @e5                      # submit
-$B snapshot -D                    # verify login succeeded
-\`\`\`
-
-**If the user provided a cookie file:**
-
-\`\`\`bash
-$B cookie-import cookies.json
-$B goto <target-url>
-\`\`\`
-
-**If 2FA/OTP is required:** Ask the user for the code and wait.
-
-**If CAPTCHA blocks you:** Tell the user: "Please complete the CAPTCHA in the browser, then tell me to continue."
+Follow BROWSER SETUP's **Browser access decision** for /setup-browser-cookies or \`$B handoff\`/\`$B resume\`. Rerun after user sign-in/2FA/OTP/CAPTCHA. Never handle credentials or expose cookies/tokens/localStorage.
 
 ### Phase 3: Orient
 
-Get a map of the application:
+Establish the successful baseline before challenges. Observe the page or interaction's
+expected result/state, not merely a successful load.
+
+**Read/flow:** set \`flow = true\` and replace action/wait for interactions. Keep ONE script; tabs close at its end.
 
 \`\`\`bash
-$B goto <target-url>
-$B snapshot -i -a -o "$REPORT_DIR/screenshots/initial.png"
-$B links                          # map navigation structure
-$B console --errors               # any errors on landing?
+aside repl '
+const flow = false;
+const HOOK = \`(() => { window.__gstackErrs = window.__gstackErrs || []; const oe = console.error; console.error = (...a) => { window.__gstackErrs.push(a.map(String).join(" ")); oe.apply(console, a); }; window.addEventListener("error", e => window.__gstackErrs.push("uncaught: " + e.message)); window.addEventListener("unhandledrejection", e => window.__gstackErrs.push("unhandledrejection: " + (e.reason && e.reason.message || e.reason))); })()\`;
+const pg = await openTab("about:blank");
+await pg._sendToTarget("Page.addScriptToEvaluateOnNewDocument", { source: HOOK });
+await pg.goto("<target-url>");
+console.log((await snapshot(pg, { interactive: true })).tree);
+await pg.screenshot({ path: flow ? "issue-001-step-1.jpg" : "initial.jpg", type: "jpeg", quality: 60, fullPage: !flow });
+if (flow) {
+  await pg.locator("e12").click();
+  await sleep(500);
+  console.log("DIFF_START"); console.log((await snapshot(pg)).diff); console.log("DIFF_END");
+  await pg.screenshot({ path: "issue-001-result.jpg", type: "jpeg", quality: 60 });
+}
+console.log("URL=" + pg.url());
+console.log("CONSOLE_ERRORS=" + JSON.stringify(await pg.evaluate(() => window.__gstackErrs)));
+console.log("TEXT_START"); console.log((await pg.evaluate(() => document.body.innerText)).slice(0, 20000)); console.log("TEXT_END");
+console.log("ASIDE_DIR=" + pwd);
+await closeTab(pg); console.log("GSTACK_STEP_OK");
+'
 \`\`\`
 
-**Detect framework** (note in report metadata):
-- \`__next\` in HTML or \`_next/data\` requests → Next.js
-- \`csrf-token\` meta tag → Rails
-- \`wp-content\` in URLs → WordPress
-- Client-side routing with no page reloads → SPA
+EVERY screenshot: \`cp "<ASIDE_DIR>/initial.jpg" "$REPORT_DIR/screenshots/initial.jpg"\` (substitute names), then Read it. Never delete reports/screenshots.
 
-**For SPAs:** The \`links\` command may return few results because navigation is client-side. Use \`snapshot -i\` to find nav elements (buttons, menu items) instead.
+**Links:** same-origin safe paths; HEAD only locally (requests carry cookies).
+
+\`\`\`bash
+aside repl '
+const pg = await openTab("<target-url>");
+const links = await pg.evaluate(() => [...new Set([...document.querySelectorAll("a[href]")].map(a => a.href))].filter(h => new URL(h).origin === location.origin && !/logout|signout|delete|remove|cancel|unsubscribe/i.test(h)));
+const local = await pg.evaluate(() => /^(localhost|127\\.0\\.0\\.1|0\\.0\\.0\\.0|::1|\\[::1\\])$|\\.(localhost|test)$/.test(location.hostname));
+for (const l of links) { if (!local) { console.log("LINK ?", l); continue; } const r = await fetch(l, { method: "HEAD" }).catch(e => ({ status: "ERR " + e.message })); console.log("LINK", r.status, l); }
+await closeTab(pg); console.log("GSTACK_STEP_OK");
+'
+\`\`\`
+
+\`LINK\` 4xx/5xx or \`ERR\` is broken; \`LINK ?\` is unverified. Snapshot SPA buttons/menus missing from links.
+
+Framework: \`__next\`/\`_next/data\` = Next.js; \`csrf-token\` = Rails; \`wp-content\` = WordPress; no-reload navigation = SPA.
 
 ### Phase 4: Explore
 
-Visit pages systematically. At each page:
+Select the next candidate from the preceding result. For each page, use the read script with \`page-<name>.jpg\`. Check layout, controls, empty/invalid/edge-case forms, navigation and empty/loading/error/overflow states per \`qa/references/issue-taxonomy.md\`. Prioritize core flows over secondary pages; Quick skips this checklist. For mobile:
 
 \`\`\`bash
-$B goto <page-url>
-$B snapshot -i -a -o "$REPORT_DIR/screenshots/page-name.png"
-$B console --errors
+aside repl '
+const pg = await openTab("<page-url>");
+await pg._sendToTarget("Emulation.setDeviceMetricsOverride", { width: 375, height: 812, deviceScaleFactor: 2, mobile: true });
+await sleep(300);
+await pg.screenshot({ path: "page-mobile.jpg", type: "jpeg", quality: 60, fullPage: true });
+await pg._sendToTarget("Emulation.clearDeviceMetricsOverride", {});
+console.log("ASIDE_DIR=" + pwd); await closeTab(pg); console.log("GSTACK_STEP_OK");
+'
 \`\`\`
-
-Then follow the **per-page exploration checklist** (see \`qa/references/issue-taxonomy.md\`):
-
-1. **Visual scan** — Look at the annotated screenshot for layout issues
-2. **Interactive elements** — Click buttons, links, controls. Do they work?
-3. **Forms** — Fill and submit. Test empty, invalid, edge cases
-4. **Navigation** — Check all paths in and out
-5. **States** — Empty state, loading, error, overflow
-6. **Console** — Any new JS errors after interactions?
-7. **Responsiveness** — Check mobile viewport if relevant:
-   \`\`\`bash
-   $B viewport 375x812
-   $B screenshot "$REPORT_DIR/screenshots/page-mobile.png"
-   $B viewport 1280x720
-   \`\`\`
-
-**Depth judgment:** Spend more time on core features (homepage, dashboard, checkout, search) and less on secondary pages (about, terms, privacy).
-
-**Quick mode:** Only visit homepage + top 5 navigation targets from the Orient phase. Skip the per-page checklist — just check: loads? Console errors? Broken links visible?
 
 ### Phase 5: Document
 
-Document each issue **immediately when found** — don't batch them.
+Confirm each issue by retrying once under the shared loop's exact-replay rule, then
+minimize and report screenshot evidence immediately. A timeout before replay finishes leaves
+confirmation incomplete. Later timeouts leave confirmed defects intact but evidence
+or minimization unfinished.
 
-**Two evidence tiers:**
+**Interactive:** Phase 3, \`flow = true\`. Alternatives: \`pg.fill("#email", "qa@example.com")\`, \`pg.getByRole("button", { name: "Save" }).click()\`, \`pg.waitForSelector("#done")\`, \`pg.waitForURL(/dashboard/)\`. Link before/after screenshots in repro steps.
 
-**Interactive bugs** (broken flows, dead buttons, form failures):
-1. Take a screenshot before the action
-2. Perform the action
-3. Take a screenshot showing the result
-4. Use \`snapshot -D\` to show what changed
-5. Write repro steps referencing screenshots
+**Static** (copy/layout/images): one annotated screenshot and description.
 
 \`\`\`bash
-$B screenshot "$REPORT_DIR/screenshots/issue-001-step-1.png"
-$B click @e5
-$B screenshot "$REPORT_DIR/screenshots/issue-001-result.png"
-$B snapshot -D
+aside repl '
+const pg = await openTab("<page-url>");
+const a = await annotatedScreenshot(pg);
+await fs.writeFile(path.join(pwd, "issue-002.png"), Buffer.from(a.base64Image, "base64"));
+console.log("ASIDE_DIR=" + pwd); await closeTab(pg); console.log("GSTACK_STEP_OK");
+'
 \`\`\`
-
-**Static bugs** (typos, layout issues, missing images):
-1. Take a single annotated screenshot showing the problem
-2. Describe what's wrong
-
-\`\`\`bash
-$B snapshot -i -a -o "$REPORT_DIR/screenshots/issue-002.png"
-\`\`\`
-
-**Write each issue to the report immediately** using the template format from \`qa/templates/qa-report-template.md\`.
 
 ### Phase 6: Wrap Up
 
-1. **Compute health score** using the rubric below
-2. **Write "Top 3 Things to Fix"** — the 3 highest-severity issues
-3. **Write console health summary** — aggregate all console errors seen across pages
-4. **Update severity counts** in the summary table
-5. **Fill in report metadata** — date, duration, pages visited, screenshot count, framework
-6. **Save baseline** — write \`baseline.json\` with:
-   \`\`\`json
-   {
-     "date": "YYYY-MM-DD",
-     "url": "<target>",
-     "healthScore": N,
-     "issues": [{ "id": "ISSUE-001", "title": "...", "severity": "...", "category": "..." }],
-     "categoryScores": { "console": N, "links": N, ... }
-   }
-   \`\`\`
+Format retained evidence without new probes, using \`templates/qa-report-template.md\`
+from this host's installed QA directory and the caller's artifact/mixed-report rules.
 
-**Regression mode:** After writing the report, load the baseline file. Compare:
-- Health score delta
-- Issues fixed (in baseline but not current)
-- New issues (in current but not baseline)
-- Append the regression section to the report
-
----
+Report score, Top 3 Things to Fix by severity, console health, severity counts, date, duration, page/screenshot counts and framework. Save \`baseline.json\`: \`date\` (YYYY-MM-DD), \`url\`, \`healthScore\`, \`issues\` (\`id\`, \`title\`, \`severity\`, \`category\`), \`categoryScores\`. Regression: fixed = prior only, new = current only.
 
 ## Health Score Rubric
 
 Compute each category score (0-100), then take the weighted average.
 
+### Counting
+- Deduplicate the same root cause across pages. Use one primary category, first applicable: Links (navigation), Accessibility (access barriers), Functional (behavior), Performance (speed), Visual (layout), Content (copy), UX (friction), Console (remaining errors). No double deductions.
+- Exclude **untested** categories; label partial scores **provisional** with coverage. None tested: "not scored". Compare only identical coverage.
+
 ### Console (weight: 15%)
+Deduplicate reproducible errors/exceptions by message+source across pages. Exclude warnings, info, and defects scored elsewhere.
 - 0 errors → 100
 - 1-3 errors → 70
 - 4-10 errors → 40
-- 10+ errors → 10
+- 11+ errors → 10
 
 ### Links (weight: 10%)
+Count unique broken destinations, including client-side routes: repeatable 4xx/5xx, missing routes/anchors, or timeouts. Exclude expected auth redirects and resource/API requests.
 - 0 broken → 100
 - Each broken link → -15 (minimum 0)
 
 ### Per-Category Scoring (Visual, Functional, UX, Content, Performance, Accessibility)
-Each category starts at 100. Deduct per finding:
+Start at 100; deduct per finding:
 - Critical issue → -25
 - High issue → -15
 - Medium issue → -8
 - Low issue → -3
-Minimum 0 per category.
+Floor: 0.
+
+Use the highest applicable severity; record impact/workaround:
+- **Critical:** data loss, security/privacy exposure, or core app unusable for all users.
+- **High:** core/major task blocked without a workaround.
+- **Medium:** task impaired but a workaround exists.
+- **Low:** cosmetic/copy/friction issue without lost task completion.
+Console/Links use counts instead.
 
 ### Weights
 | Category | Weight |
@@ -318,74 +325,52 @@ Minimum 0 per category.
 | Accessibility | 15% |
 
 ### Final Score
-\`score = Σ (category_score × weight)\`
+Use decimal weights (15% = 0.15): \`score = Σ (category_score × weight) / Σ tested weights\`. Round only the final score to the nearest integer (0.5 rounds up).
 
 ---
 
 ## Framework-Specific Guidance
 
-### Next.js
-- Check console for hydration errors (\`Hydration failed\`, \`Text content did not match\`)
-- Monitor \`_next/data\` requests in network — 404s indicate broken data fetching
-- Test client-side navigation (click links, don't just \`goto\`) — catches routing issues
-- Check for CLS (Cumulative Layout Shift) on pages with dynamic content
-
-### Rails
-- Check for N+1 query warnings in console (if development mode)
-- Verify CSRF token presence in forms
-- Test Turbo/Stimulus integration — do page transitions work smoothly?
-- Check for flash messages appearing and dismissing correctly
-
-### WordPress
-- Check for plugin conflicts (JS errors from different plugins)
-- Verify admin bar visibility for logged-in users
-- Test REST API endpoints (\`/wp-json/\`)
-- Check for mixed content warnings (common with WP)
-
-### General SPA (React, Vue, Angular)
-- Use \`snapshot -i\` for navigation — \`links\` command misses client-side routes
-- Check for stale state (navigate away and back — does data refresh?)
-- Test browser back/forward — does the app handle history correctly?
-- Check for memory leaks (monitor console after extended use)
-
----
+- **Next.js:** hydration errors (\`Hydration failed\`, \`Text content did not match\`), \`_next/data\` 404s, link-click routing (not just \`goto\`), dynamic-content CLS.
+- **Rails:** dev N+1 warnings, form CSRF, Turbo/Stimulus transitions, flash appearance/dismissal.
+- **WordPress:** plugin JS conflicts, signed-in admin bar, \`/wp-json/\`, mixed content.
+- **SPA:** snapshot navigation, stale state on return, back/forward history, console signs of leaks after extended use.
 
 ## Important Rules
 
-1. **Repro is everything.** Every issue needs at least one screenshot. No exceptions.
-2. **Verify before documenting.** Retry the issue once to confirm it's reproducible, not a fluke.
-3. **Never include credentials.** Write \`[REDACTED]\` for passwords in repro steps.
-4. **Write incrementally.** Append each issue to the report as you find it. Don't batch.
-5. **Never read source code.** Test as a user, not a developer.
-6. **Check console after every interaction.** JS errors that don't surface visually are still bugs.
-7. **Test like a user.** Use realistic data. Walk through complete workflows end-to-end.
-8. **Depth over breadth.** 5-10 well-documented issues with evidence > 20 vague descriptions.
-9. **Never delete output files.** Screenshots and reports accumulate — that's intentional.
-10. **Use \`snapshot -C\` for tricky UIs.** Finds clickable divs that the accessibility tree misses.
-11. **Show screenshots to the user.** After every \`$B screenshot\`, \`$B snapshot -a -o\`, or \`$B responsive\` command, use the Read tool on the output file(s) so the user can see them inline. For \`responsive\` (3 files), Read all three. This is critical — without it, screenshots are invisible to the user.
-12. **Never refuse to use the browser.** When the user invokes /qa or /qa-only, they are requesting browser-based testing. Never suggest evals, unit tests, or other alternatives as a substitute. Even if the diff appears to have no UI changes, backend changes affect app behavior — always open the browser and test.`;
+**Never read source code during browser discovery.** Use realistic end-to-end flows; check console after every interaction. For missing click targets, use annotated labels, then ref/CSS clicks.
+
+Use \`[REDACTED]\` for credentials. Follow BROWSER SETUP safety/sentinel rules: one AskUserQuestion listing non-LOCAL mutations per run, BEFORE acting. LOOK is not ACT.
+
+**Never refuse to use the browser for a selected browser surface**, even backend-only app changes. Tests/curl cannot replace it. API/CLI/job/worker/webhook targets do not select it.`;
 }
 
 export function generateCoAuthorTrailer(ctx: TemplateContext): string {
   const { getHostConfig } = require('../../hosts/index');
   const hostConfig = getHostConfig(ctx.host);
-  return hostConfig.coAuthorTrailer || 'Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>';
+  return hostConfig.coAuthorTrailer || 'Co-Authored-By: Claude <noreply@anthropic.com>';
 }
 
-export function generateChangelogWorkflow(_ctx: TemplateContext): string {
+export function generateSetupCommand(ctx: TemplateContext): string {
+  // Every non-claude host must reinstall ITSELF on upgrade — bare `./setup`
+  // defaults to the claude host and would leave the invoking host stale.
+  return ctx.host === 'claude' ? './setup' : `./setup --host ${ctx.host}`;
+}
+
+export function generateChangelogWorkflow(ctx: TemplateContext): string {
   return `## Step 13: CHANGELOG (auto-generate)
 
 1. Read \`CHANGELOG.md\` header to know the format.
 
 2. **First, enumerate every commit on the branch:**
    \`\`\`bash
-   git log <base>..HEAD --oneline
+   git log ${ctx.skillName === 'ship' ? 'origin/<base>' : '<base>'}..HEAD --oneline
    \`\`\`
    Copy the full list. Count the commits. You will use this as a checklist.
 
 3. **Read the full diff** to understand what each commit actually changed:
    \`\`\`bash
-   git diff <base>...HEAD
+   git diff ${ctx.skillName === 'ship' ? 'origin/<base>' : '<base>...HEAD'}
    \`\`\`
 
 4. **Group commits by theme** before writing anything. Common themes:
@@ -404,14 +389,14 @@ export function generateChangelogWorkflow(_ctx: TemplateContext): string {
      - \`### Fixed\` — bug fixes
      - \`### Removed\` — removed features
    - Write concise, descriptive bullet points
-   - Insert after the file header (line 5), dated today
+   - ${ctx.skillName === 'ship' ? 'Insert after the observed file header, before the first release entry, dated today' : 'Insert after the file header (line 5), dated today'}
    - Format: \`## [X.Y.Z.W] - YYYY-MM-DD\`
    - **Voice:** Lead with what the user can now **do** that they couldn't before. Use plain language, not implementation details. Never mention TODOS.md, internal tracking, or contributor-facing details.
 
 6. **Cross-check:** Compare your CHANGELOG entry against the commit list from step 2.
-   Every commit must map to at least one bullet point. If any commit is unrepresented,
-   add it now. If the branch has N commits spanning K themes, the CHANGELOG must
-   reflect all K themes.
+   Every user-facing change in that list must be represented; add any that is missing.
+   Commits with no user-facing effect (merges, version bumps, fixes to work introduced
+   earlier on this branch) need no bullet. The entry must reflect every user-facing theme.
 
 **Do NOT ask the user to describe changes.** Infer from the diff and commit history.`;
 }

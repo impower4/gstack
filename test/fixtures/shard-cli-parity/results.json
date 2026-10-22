@@ -1,0 +1,866 @@
+{
+  "recordedFrom": "96764e80 (pre-engine base runners); paid lane re-recorded at v1.91.12.0 for the marathon tier and the --slice-budget, --max-parallel, --case and --trials flags (PR 2999); free lane re-recorded for the --attribute-home flag (PR 3014) and the --files-from flag (fix wave 3, W2-A3)",
+  "free": [
+    {
+      "argv": [],
+      "result": {
+        "ok": {
+          "dryRun": false,
+          "filesFrom": null,
+          "listOnly": false,
+          "recordDurations": false,
+          "windowsOnly": false,
+          "verbose": false,
+          "shardCount": 20,
+          "shardIndex": null,
+          "wallTimeoutMs": 360000,
+          "wallTimeoutExplicit": false,
+          "quick": false,
+          "attributeHome": false,
+          "ciPlan": null,
+          "ciRun": null,
+          "ciVerify": null,
+          "result": null,
+          "results": null
+        }
+      }
+    },
+    {
+      "argv": [
+        "--dry-run",
+        "--list",
+        "--verbose"
+      ],
+      "result": {
+        "ok": {
+          "dryRun": true,
+          "filesFrom": null,
+          "listOnly": true,
+          "recordDurations": false,
+          "windowsOnly": false,
+          "verbose": true,
+          "shardCount": 20,
+          "shardIndex": null,
+          "wallTimeoutMs": 360000,
+          "wallTimeoutExplicit": false,
+          "quick": false,
+          "attributeHome": false,
+          "ciPlan": null,
+          "ciRun": null,
+          "ciVerify": null,
+          "result": null,
+          "results": null
+        }
+      }
+    },
+    {
+      "argv": [
+        "--windows-only",
+        "--list"
+      ],
+      "result": {
+        "ok": {
+          "dryRun": false,
+          "filesFrom": null,
+          "listOnly": true,
+          "recordDurations": false,
+          "windowsOnly": true,
+          "verbose": false,
+          "shardCount": 20,
+          "shardIndex": null,
+          "wallTimeoutMs": 360000,
+          "wallTimeoutExplicit": false,
+          "quick": false,
+          "attributeHome": false,
+          "ciPlan": null,
+          "ciRun": null,
+          "ciVerify": null,
+          "result": null,
+          "results": null
+        }
+      }
+    },
+    {
+      "argv": [
+        "--record-durations"
+      ],
+      "result": {
+        "ok": {
+          "dryRun": false,
+          "filesFrom": null,
+          "listOnly": false,
+          "recordDurations": true,
+          "windowsOnly": false,
+          "verbose": false,
+          "shardCount": 20,
+          "shardIndex": null,
+          "wallTimeoutMs": 360000,
+          "wallTimeoutExplicit": false,
+          "quick": false,
+          "attributeHome": false,
+          "ciPlan": null,
+          "ciRun": null,
+          "ciVerify": null,
+          "result": null,
+          "results": null
+        }
+      }
+    },
+    {
+      "argv": [
+        "--quick"
+      ],
+      "result": {
+        "ok": {
+          "dryRun": false,
+          "filesFrom": null,
+          "listOnly": false,
+          "recordDurations": false,
+          "windowsOnly": false,
+          "verbose": false,
+          "shardCount": 20,
+          "shardIndex": null,
+          "wallTimeoutMs": 360000,
+          "wallTimeoutExplicit": false,
+          "quick": true,
+          "attributeHome": false,
+          "ciPlan": null,
+          "ciRun": null,
+          "ciVerify": null,
+          "result": null,
+          "results": null
+        }
+      }
+    },
+    {
+      "argv": [
+        "--shards",
+        "4",
+        "--shard",
+        "2"
+      ],
+      "result": {
+        "ok": {
+          "dryRun": false,
+          "filesFrom": null,
+          "listOnly": false,
+          "recordDurations": false,
+          "windowsOnly": false,
+          "verbose": false,
+          "shardCount": 4,
+          "shardIndex": 2,
+          "wallTimeoutMs": 360000,
+          "wallTimeoutExplicit": false,
+          "quick": false,
+          "attributeHome": false,
+          "ciPlan": null,
+          "ciRun": null,
+          "ciVerify": null,
+          "result": null,
+          "results": null
+        }
+      }
+    },
+    {
+      "argv": [
+        "--wall-timeout",
+        "600"
+      ],
+      "result": {
+        "ok": {
+          "dryRun": false,
+          "filesFrom": null,
+          "listOnly": false,
+          "recordDurations": false,
+          "windowsOnly": false,
+          "verbose": false,
+          "shardCount": 20,
+          "shardIndex": null,
+          "wallTimeoutMs": 600000,
+          "wallTimeoutExplicit": true,
+          "quick": false,
+          "attributeHome": false,
+          "ciPlan": null,
+          "ciRun": null,
+          "ciVerify": null,
+          "result": null,
+          "results": null
+        }
+      }
+    },
+    {
+      "argv": [
+        "--ci-plan",
+        "plan.json",
+        "--shards",
+        "20"
+      ],
+      "result": {
+        "ok": {
+          "dryRun": false,
+          "filesFrom": null,
+          "listOnly": false,
+          "recordDurations": false,
+          "windowsOnly": false,
+          "verbose": false,
+          "shardCount": 20,
+          "shardIndex": null,
+          "wallTimeoutMs": 360000,
+          "wallTimeoutExplicit": false,
+          "quick": false,
+          "attributeHome": false,
+          "ciPlan": "plan.json",
+          "ciRun": null,
+          "ciVerify": null,
+          "result": null,
+          "results": null
+        }
+      }
+    },
+    {
+      "argv": [
+        "--ci-run",
+        "plan.json",
+        "--shard",
+        "1",
+        "--result",
+        "result.json"
+      ],
+      "result": {
+        "ok": {
+          "dryRun": false,
+          "filesFrom": null,
+          "listOnly": false,
+          "recordDurations": false,
+          "windowsOnly": false,
+          "verbose": false,
+          "shardCount": 20,
+          "shardIndex": 1,
+          "wallTimeoutMs": 360000,
+          "wallTimeoutExplicit": false,
+          "quick": false,
+          "attributeHome": false,
+          "ciPlan": null,
+          "ciRun": "plan.json",
+          "ciVerify": null,
+          "result": "result.json",
+          "results": null
+        }
+      }
+    },
+    {
+      "argv": [
+        "--ci-verify",
+        "plan.json",
+        "--results",
+        "results"
+      ],
+      "result": {
+        "ok": {
+          "dryRun": false,
+          "filesFrom": null,
+          "listOnly": false,
+          "recordDurations": false,
+          "windowsOnly": false,
+          "verbose": false,
+          "shardCount": 20,
+          "shardIndex": null,
+          "wallTimeoutMs": 360000,
+          "wallTimeoutExplicit": false,
+          "quick": false,
+          "attributeHome": false,
+          "ciPlan": null,
+          "ciRun": null,
+          "ciVerify": "plan.json",
+          "result": null,
+          "results": "results"
+        }
+      }
+    },
+    {
+      "argv": [
+        "--bogus"
+      ],
+      "result": {
+        "error": "Unknown argument: --bogus"
+      }
+    },
+    {
+      "argv": [
+        "--list",
+        "--bogus"
+      ],
+      "result": {
+        "error": "Unknown argument: --bogus"
+      }
+    },
+    {
+      "argv": [
+        "--shards"
+      ],
+      "result": {
+        "error": "Missing value for --shards"
+      }
+    },
+    {
+      "argv": [
+        "--shard"
+      ],
+      "result": {
+        "error": "Missing value for --shard"
+      }
+    },
+    {
+      "argv": [
+        "--wall-timeout",
+        "0"
+      ],
+      "result": {
+        "error": "--wall-timeout needs a positive integer (seconds)"
+      }
+    },
+    {
+      "argv": [
+        "--wall-timeout"
+      ],
+      "result": {
+        "error": "--wall-timeout needs a positive integer (seconds)"
+      }
+    },
+    {
+      "argv": [
+        "--ci-plan"
+      ],
+      "result": {
+        "error": "Missing path for --ci-plan"
+      }
+    },
+    {
+      "argv": [
+        "--ci-plan",
+        "--list"
+      ],
+      "result": {
+        "error": "Missing path for --ci-plan"
+      }
+    },
+    {
+      "argv": [
+        "--ci-plan",
+        "a.json",
+        "--ci-run",
+        "b.json"
+      ],
+      "result": {
+        "error": "CI modes cannot be combined with other selection modes"
+      }
+    },
+    {
+      "argv": [
+        "--ci-plan",
+        "a.json",
+        "--quick"
+      ],
+      "result": {
+        "error": "CI modes cannot be combined with other selection modes"
+      }
+    },
+    {
+      "argv": [
+        "--ci-run",
+        "plan.json"
+      ],
+      "result": {
+        "error": "--ci-run requires --shard and --result"
+      }
+    },
+    {
+      "argv": [
+        "--ci-verify",
+        "plan.json"
+      ],
+      "result": {
+        "error": "--ci-verify requires --results"
+      }
+    },
+    {
+      "argv": [
+        "--quick",
+        "--shard",
+        "1"
+      ],
+      "result": {
+        "error": "--quick cannot change recording, Windows or shard selection"
+      }
+    },
+    {
+      "argv": [
+        "--quick",
+        "--windows-only"
+      ],
+      "result": {
+        "error": "--quick cannot change recording, Windows or shard selection"
+      }
+    },
+    {
+      "argv": [
+        "--attribute-home"
+      ],
+      "result": {
+        "ok": {
+          "dryRun": false,
+          "filesFrom": null,
+          "listOnly": false,
+          "recordDurations": false,
+          "windowsOnly": false,
+          "verbose": false,
+          "shardCount": 20,
+          "shardIndex": null,
+          "wallTimeoutMs": 360000,
+          "wallTimeoutExplicit": false,
+          "quick": false,
+          "attributeHome": true,
+          "ciPlan": null,
+          "ciRun": null,
+          "ciVerify": null,
+          "result": null,
+          "results": null
+        }
+      }
+    },
+    {
+      "argv": [
+        "--ci-plan",
+        "a.json",
+        "--attribute-home"
+      ],
+      "result": {
+        "error": "CI modes cannot be combined with other selection modes"
+      }
+    }
+  ],
+  "paid": [
+    {
+      "argv": [],
+      "result": {
+        "ok": {
+          "tier": "gate",
+          "profile": "full",
+          "profileExplicit": false,
+          "listOnly": false,
+          "skipJudges": false,
+          "timeoutExplicit": false,
+          "timeoutMs": 1800000,
+          "jobs": 8,
+          "withinShardConcurrency": 2,
+          "maxFilesPerShard": 1,
+          "emitPlanPath": null,
+          "slices": 1,
+          "sliceBudgetMs": null,
+          "jobsExplicit": false,
+          "planPath": null,
+          "sliceIndex": null,
+          "reportDir": null,
+          "rerunPlanDir": null,
+          "writeDurations": false,
+          "maxParallel": null,
+          "caseId": null,
+          "trials": null
+        }
+      }
+    },
+    {
+      "argv": [
+        "--list",
+        "--tier",
+        "periodic",
+        "--profile",
+        "full"
+      ],
+      "result": {
+        "ok": {
+          "tier": "periodic",
+          "profile": "full",
+          "profileExplicit": true,
+          "listOnly": true,
+          "skipJudges": false,
+          "timeoutExplicit": false,
+          "timeoutMs": 1800000,
+          "jobs": 8,
+          "withinShardConcurrency": 2,
+          "maxFilesPerShard": 1,
+          "emitPlanPath": null,
+          "slices": 1,
+          "sliceBudgetMs": null,
+          "jobsExplicit": false,
+          "planPath": null,
+          "sliceIndex": null,
+          "reportDir": null,
+          "rerunPlanDir": null,
+          "writeDurations": false,
+          "maxParallel": null,
+          "caseId": null,
+          "trials": null
+        }
+      }
+    },
+    {
+      "argv": [
+        "--tier",
+        "gate",
+        "--profile",
+        "pr",
+        "--list"
+      ],
+      "result": {
+        "ok": {
+          "tier": "gate",
+          "profile": "pr",
+          "profileExplicit": true,
+          "listOnly": true,
+          "skipJudges": false,
+          "timeoutExplicit": false,
+          "timeoutMs": 1800000,
+          "jobs": 8,
+          "withinShardConcurrency": 2,
+          "maxFilesPerShard": 1,
+          "emitPlanPath": null,
+          "slices": 1,
+          "sliceBudgetMs": null,
+          "jobsExplicit": false,
+          "planPath": null,
+          "sliceIndex": null,
+          "reportDir": null,
+          "rerunPlanDir": null,
+          "writeDurations": false,
+          "maxParallel": null,
+          "caseId": null,
+          "trials": null
+        }
+      }
+    },
+    {
+      "argv": [
+        "--timeout",
+        "600",
+        "--jobs",
+        "2",
+        "--files-per-shard",
+        "3"
+      ],
+      "result": {
+        "ok": {
+          "tier": "gate",
+          "profile": "full",
+          "profileExplicit": false,
+          "listOnly": false,
+          "skipJudges": false,
+          "timeoutExplicit": true,
+          "timeoutMs": 600000,
+          "jobs": 2,
+          "withinShardConcurrency": 2,
+          "maxFilesPerShard": 3,
+          "emitPlanPath": null,
+          "slices": 1,
+          "sliceBudgetMs": null,
+          "jobsExplicit": true,
+          "planPath": null,
+          "sliceIndex": null,
+          "reportDir": null,
+          "rerunPlanDir": null,
+          "writeDurations": false,
+          "maxParallel": null,
+          "caseId": null,
+          "trials": null
+        }
+      }
+    },
+    {
+      "argv": [
+        "--emit-plan",
+        "manifest.json",
+        "--slices",
+        "4",
+        "--skip-judges"
+      ],
+      "result": {
+        "ok": {
+          "tier": "gate",
+          "profile": "full",
+          "profileExplicit": false,
+          "listOnly": false,
+          "skipJudges": true,
+          "timeoutExplicit": false,
+          "timeoutMs": 1800000,
+          "jobs": 8,
+          "withinShardConcurrency": 2,
+          "maxFilesPerShard": 1,
+          "emitPlanPath": "manifest.json",
+          "slices": 4,
+          "sliceBudgetMs": null,
+          "jobsExplicit": false,
+          "planPath": null,
+          "sliceIndex": null,
+          "reportDir": null,
+          "rerunPlanDir": null,
+          "writeDurations": false,
+          "maxParallel": null,
+          "caseId": null,
+          "trials": null
+        }
+      }
+    },
+    {
+      "argv": [
+        "--plan",
+        "manifest.json",
+        "--slice",
+        "2"
+      ],
+      "result": {
+        "ok": {
+          "tier": "gate",
+          "profile": "full",
+          "profileExplicit": false,
+          "listOnly": false,
+          "skipJudges": false,
+          "timeoutExplicit": false,
+          "timeoutMs": 1800000,
+          "jobs": 8,
+          "withinShardConcurrency": 2,
+          "maxFilesPerShard": 1,
+          "emitPlanPath": null,
+          "slices": 1,
+          "sliceBudgetMs": null,
+          "jobsExplicit": false,
+          "planPath": "manifest.json",
+          "sliceIndex": 2,
+          "reportDir": null,
+          "rerunPlanDir": null,
+          "writeDurations": false,
+          "maxParallel": null,
+          "caseId": null,
+          "trials": null
+        }
+      }
+    },
+    {
+      "argv": [
+        "--report",
+        "reports",
+        "--write-durations"
+      ],
+      "result": {
+        "ok": {
+          "tier": "gate",
+          "profile": "full",
+          "profileExplicit": false,
+          "listOnly": false,
+          "skipJudges": false,
+          "timeoutExplicit": false,
+          "timeoutMs": 1800000,
+          "jobs": 8,
+          "withinShardConcurrency": 2,
+          "maxFilesPerShard": 1,
+          "emitPlanPath": null,
+          "slices": 1,
+          "sliceBudgetMs": null,
+          "jobsExplicit": false,
+          "planPath": null,
+          "sliceIndex": null,
+          "reportDir": "reports",
+          "rerunPlanDir": null,
+          "writeDurations": true,
+          "maxParallel": null,
+          "caseId": null,
+          "trials": null
+        }
+      }
+    },
+    {
+      "argv": [],
+      "env": {
+        "EVALS_TIER": "periodic",
+        "EVALS_JOBS": "3",
+        "EVALS_CONCURRENCY": "5",
+        "EVALS_SHARD_TIMEOUT_MS": "1000",
+        "EVALS_PROFILE": "full"
+      },
+      "result": {
+        "ok": {
+          "tier": "periodic",
+          "profile": "full",
+          "profileExplicit": true,
+          "listOnly": false,
+          "skipJudges": false,
+          "timeoutExplicit": true,
+          "timeoutMs": 1000,
+          "jobs": 3,
+          "withinShardConcurrency": 5,
+          "maxFilesPerShard": 1,
+          "emitPlanPath": null,
+          "slices": 1,
+          "sliceBudgetMs": null,
+          "jobsExplicit": true,
+          "planPath": null,
+          "sliceIndex": null,
+          "reportDir": null,
+          "rerunPlanDir": null,
+          "writeDurations": false,
+          "maxParallel": null,
+          "caseId": null,
+          "trials": null
+        }
+      }
+    },
+    {
+      "argv": [
+        "--bogus"
+      ],
+      "result": {
+        "error": "Unknown argument: --bogus"
+      }
+    },
+    {
+      "argv": [
+        "--list",
+        "--bogus"
+      ],
+      "result": {
+        "error": "Unknown argument: --bogus"
+      }
+    },
+    {
+      "argv": [
+        "--tier",
+        "e2e"
+      ],
+      "result": {
+        "error": "--tier must be gate, periodic or marathon. Received: e2e"
+      }
+    },
+    {
+      "argv": [
+        "--tier"
+      ],
+      "result": {
+        "error": "--tier must be gate, periodic or marathon. Received: -"
+      }
+    },
+    {
+      "argv": [
+        "--profile"
+      ],
+      "result": {
+        "error": "--profile needs pr or full"
+      }
+    },
+    {
+      "argv": [
+        "--profile",
+        "fast"
+      ],
+      "result": {
+        "error": "--profile must be pr or full. Received: fast"
+      }
+    },
+    {
+      "argv": [
+        "--timeout",
+        "0"
+      ],
+      "result": {
+        "error": "--timeout needs a positive integer. Received: 0"
+      }
+    },
+    {
+      "argv": [
+        "--jobs"
+      ],
+      "result": {
+        "error": "--jobs needs a positive integer. Received: undefined"
+      }
+    },
+    {
+      "argv": [
+        "--emit-plan"
+      ],
+      "result": {
+        "error": "--emit-plan needs a file path"
+      }
+    },
+    {
+      "argv": [
+        "--plan"
+      ],
+      "result": {
+        "error": "--plan needs a manifest path"
+      }
+    },
+    {
+      "argv": [
+        "--report"
+      ],
+      "result": {
+        "error": "--report needs a directory"
+      }
+    },
+    {
+      "argv": [
+        "--write-durations"
+      ],
+      "result": {
+        "error": "--write-durations requires --report"
+      }
+    },
+    {
+      "argv": [
+        "--skip-judges"
+      ],
+      "result": {
+        "error": "--skip-judges applies only to an emitted gate census plan"
+      }
+    },
+    {
+      "argv": [
+        "--profile",
+        "pr",
+        "--tier",
+        "periodic"
+      ],
+      "result": {
+        "error": "PR profile requires gate tier"
+      }
+    },
+    {
+      "argv": [
+        "--profile",
+        "pr",
+        "--files-per-shard",
+        "2"
+      ],
+      "result": {
+        "error": "PR profile requires one file per shard to preserve case accounting"
+      }
+    },
+    {
+      "argv": [],
+      "env": {
+        "EVALS_TIER": "e2e"
+      },
+      "result": {
+        "error": "EVALS_TIER must be gate, periodic or marathon. Received: e2e"
+      }
+    }
+  ],
+  "unknownArgumentCli": {
+    "free": {
+      "status": 1,
+      "stderr": "[test:free] Unknown argument: --bogus"
+    },
+    "paid": {
+      "status": 1,
+      "stderr": "[test:paid] Unknown argument: --bogus"
+    }
+  }
+}

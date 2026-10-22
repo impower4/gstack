@@ -1,7 +1,8 @@
-import { describe, test, expect, beforeEach } from 'bun:test';
+import { describe, test, expect, beforeEach, beforeAll, afterAll, mock } from 'bun:test';
 import {
   resolveConfigFromEnv,
   buildFetchHandler,
+  __testInternals__,
   type ServerConfig,
   type ServerHandle,
   type Surface,
@@ -11,6 +12,22 @@ import { __resetRegistry, initRegistry } from '../src/token-registry';
 import { BrowserManager } from '../src/browser-manager';
 import { resolveConfig } from '../src/config';
 import * as crypto from 'crypto';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import { usePrivateStateRoot } from '../../test/helpers/private-state-root';
+
+usePrivateStateRoot();
+
+const fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gstack-server-factory-'));
+const fixtureConfig = resolveConfig({ BROWSE_STATE_FILE: path.join(fixtureDir, 'state/browse.json') });
+const savedChromiumProfile = process.env.CHROMIUM_PROFILE;
+beforeAll(() => { process.env.CHROMIUM_PROFILE = path.join(fixtureDir, 'chromium-profile'); });
+afterAll(() => {
+  if (savedChromiumProfile === undefined) delete process.env.CHROMIUM_PROFILE;
+  else process.env.CHROMIUM_PROFILE = savedChromiumProfile;
+  fs.rmSync(fixtureDir, { recursive: true, force: true });
+});
 
 /**
  * Tests for the factory-export API surface added so gbrowser (phoenix) can
@@ -117,22 +134,11 @@ describe('server.ts factory API surface', () => {
       }
     });
 
-    test('reads BROWSE_IDLE_TIMEOUT from env, defaults to 30 min (1800000ms)', () => {
-      const orig = process.env.BROWSE_IDLE_TIMEOUT;
-      delete process.env.BROWSE_IDLE_TIMEOUT;
-      try {
-        expect(resolveConfigFromEnv().idleTimeoutMs).toBe(1800000);
-      } finally {
-        if (orig !== undefined) process.env.BROWSE_IDLE_TIMEOUT = orig;
-      }
-    });
-
     test('returns a populated config object with the expected shape', () => {
       const cfg = resolveConfigFromEnv();
       expect(cfg).toMatchObject({
         authToken: expect.any(String),
         browsePort: expect.any(Number),
-        idleTimeoutMs: expect.any(Number),
         config: expect.objectContaining({
           stateDir: expect.any(String),
           stateFile: expect.any(String),
@@ -175,7 +181,6 @@ describe('server.ts factory API surface', () => {
       const minimalConfigShape = {
         authToken: 'tok',
         browsePort: 0,
-        idleTimeoutMs: 1800000,
         config: { stateDir: '', stateFile: '', consoleLog: '', networkLog: '', dialogLog: '', auditLog: '', projectDir: '' },
         browserManager: {} as any,
         startTime: Date.now(),
@@ -214,9 +219,9 @@ function makeMinimalConfig(overrides: Partial<ServerConfig> = {}): ServerConfig 
   return {
     authToken: token,
     browsePort: 34567,
-    idleTimeoutMs: 1_800_000,
-    config: resolveConfig(),
+    config: fixtureConfig,
     browserManager: new BrowserManager(),
+    ownsTerminalAgent: false,
     startTime: Date.now(),
     ...overrides,
   };
@@ -233,6 +238,82 @@ describe('buildFetchHandler factory contract', () => {
     expect(typeof handle.fetchTunnel).toBe('function');
     expect(typeof handle.shutdown).toBe('function');
     expect(typeof handle.stopListeners).toBe('function');
+  });
+
+  test('shutdown removes its instance state while preserving unrelated global state', () => {
+    // Import in a child so module-level config resolves to a private decoy,
+    // independent of this Bun process's cached imports and any real daemon.
+    const globalState = path.join(fixtureDir, 'global/browse.json');
+    const instanceState = path.join(fixtureDir, 'instance/browse.json');
+    const closedMarker = path.join(fixtureDir, 'instance-closed');
+    fs.mkdirSync(path.dirname(globalState), { recursive: true });
+    fs.mkdirSync(path.dirname(instanceState), { recursive: true });
+    fs.writeFileSync(globalState, 'unrelated daemon state');
+    const script = `
+      import fs from 'node:fs';
+      import { buildFetchHandler, __testInternals__ } from ${JSON.stringify(path.resolve(__dirname, '../src/server.ts'))};
+      import { resolveConfig } from ${JSON.stringify(path.resolve(__dirname, '../src/config.ts'))};
+      fs.writeFileSync(${JSON.stringify(instanceState)}, JSON.stringify({ pid: process.pid, instanceId: __testInternals__.serverInstanceId }));
+      const handle = buildFetchHandler({
+        authToken: 'factory-shutdown-ownership-test', browsePort: 34567,
+        config: resolveConfig({ BROWSE_STATE_FILE: ${JSON.stringify(instanceState)} }),
+        browserManager: {
+          getConnectionMode: () => 'launched', isWatching: () => false,
+          close: async () => fs.writeFileSync(${JSON.stringify(closedMarker)}, 'closed'),
+          onDisconnect: null,
+        },
+        ownsTerminalAgent: false, startTime: Date.now(),
+      });
+      await handle.shutdown(0);
+    `;
+    const result = Bun.spawnSync([process.execPath, '--eval', script], {
+      env: { ...process.env, BROWSE_STATE_FILE: globalState },
+      stdout: 'pipe', stderr: 'pipe', timeout: 5000,
+    });
+    expect(result.exitCode, result.stderr.toString()).toBe(0);
+    expect(fs.readFileSync(closedMarker, 'utf8')).toBe('closed');
+    expect(fs.existsSync(instanceState)).toBe(false);
+    expect(fs.readFileSync(globalState, 'utf8')).toBe('unrelated daemon state');
+  });
+
+  test('headed promotion persists the factory instance state and preserves global state', () => {
+    const globalState = path.join(fixtureDir, 'promotion-global/browse.json');
+    const instanceState = path.join(fixtureDir, 'promotion-instance/browse.json');
+    fs.mkdirSync(path.dirname(globalState), { recursive: true });
+    fs.mkdirSync(path.dirname(instanceState), { recursive: true });
+    const script = `
+      import fs from 'node:fs';
+      import { buildFetchHandler, resolveConfigFromEnv, __testInternals__ } from ${JSON.stringify(path.resolve(__dirname, '../src/server.ts'))};
+      import { resolveConfig } from ${JSON.stringify(path.resolve(__dirname, '../src/config.ts'))};
+      const original = { pid: process.pid, instanceId: __testInternals__.serverInstanceId,
+        mode: 'launched', chromiumPid: 471, chromiumStartTime: 'old-start' };
+      fs.writeFileSync(${JSON.stringify(globalState)}, JSON.stringify(original));
+      fs.writeFileSync(${JSON.stringify(instanceState)}, JSON.stringify(original));
+      const manager = {
+        getConnectionMode: () => 'headed', isWatching: () => false,
+        getXvfbHandle: () => ({ pid: 8123, startTime: 'new-start', display: ':110' }),
+        onDisconnect: null,
+      };
+      buildFetchHandler({
+        ...resolveConfigFromEnv(), browsePort: 34567,
+        config: resolveConfig({ BROWSE_STATE_FILE: ${JSON.stringify(instanceState)} }),
+        browserManager: manager, ownsTerminalAgent: false, startTime: Date.now(),
+      });
+      manager.onHeadedPromotion();
+      process.exit(0);
+    `;
+    const result = Bun.spawnSync([process.execPath, '--eval', script], {
+      env: { ...process.env, BROWSE_STATE_FILE: globalState },
+      stdout: 'pipe', stderr: 'pipe', timeout: 5000,
+    });
+    expect(result.exitCode, result.stderr.toString()).toBe(0);
+    expect(JSON.parse(fs.readFileSync(instanceState, 'utf8'))).toMatchObject({
+      mode: 'headed', xvfbPid: 8123, xvfbStartTime: 'new-start', xvfbDisplay: ':110',
+    });
+    expect(JSON.parse(fs.readFileSync(instanceState, 'utf8')).chromiumPid).toBeUndefined();
+    expect(JSON.parse(fs.readFileSync(globalState, 'utf8'))).toMatchObject({
+      mode: 'launched', chromiumPid: 471, chromiumStartTime: 'old-start',
+    });
   });
 
   test('2a. cfg.authToken authenticates /health (positive — bearer accepted)', async () => {
@@ -379,5 +460,181 @@ describe('buildFetchHandler factory contract', () => {
     __resetRegistry();
     initRegistry('first-token-pad-to-16-chars');
     expect(() => initRegistry('second-token-pad-to-16-chars')).toThrow(/already initialized/i);
+  });
+
+  // D3 handler gating: tab ownership outlives token expiry, so DELETE /token
+  // must release tabs and 200 even when no token remains (revoked=0, tabs>0).
+  // Drives the handler into that exact state — HTTP e2e can't (headless-skip
+  // owns no real tabs), so the revoke-gated-release regression would pass there.
+  test('13. DELETE /token releases orphaned tabs and 200s when no token remains', async () => {
+    const cfg = makeMinimalConfig();
+    (cfg.browserManager as any).tabOwnership.set(7, 'ghost'); // owned, no token
+    const handle = buildFetchHandler(cfg);
+    const req = new Request('http://127.0.0.1/token/ghost', {
+      method: 'DELETE', headers: { Authorization: `Bearer ${cfg.authToken}` },
+    });
+    const resp = await handle.fetchLocal(req, null);
+    expect(resp.status).toBe(200);
+    const body = await resp.json() as { tokens_deleted: number; tabs_released: number };
+    expect(body.tokens_deleted).toBe(0);
+    expect(body.tabs_released).toBe(1);
+    expect(cfg.browserManager.getTabOwner(7)).toBeNull();
+  });
+
+  // D1 F2: a re-pair with no LIVE session must release tabs orphaned by an
+  // expired incarnation, or the new session inherits its authenticated pages.
+  test('14. /pair releases tabs orphaned by an expired session (no inheritance)', async () => {
+    const cfg = makeMinimalConfig();
+    (cfg.browserManager as any).tabOwnership.set(9, 'ghost'); // orphaned, no live session
+    const handle = buildFetchHandler(cfg);
+    const req = new Request('http://127.0.0.1/pair', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${cfg.authToken}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ clientId: 'ghost', scopes: ['read'] }),
+    });
+    const resp = await handle.fetchLocal(req, null);
+    expect(resp.status).toBe(200);
+    expect(cfg.browserManager.getTabOwner(9)).toBeNull();
+  });
+});
+
+// ─── Idle timer + onDisconnect dual-instance fix (v1.42.3.0) ──────────
+//
+// Before this fix, module-level handlers (idleCheckTick, parent watchdog,
+// SIGTERM, onDisconnect default wire) all read the module-level
+// BrowserManager directly. For embedders (gbrowser) that pass their own
+// BrowserManager into buildFetchHandler, the module-level instance never
+// has launchHeaded() called on it — so connectionMode stays 'launched'
+// forever and headed mode never short-circuits idle-shutdown. Result:
+// 30-min auto-shutdown of overlay sessions.
+//
+// Fix: introduce `let activeBrowserManager` indirection (symmetric with
+// the existing `let activeShutdown` pattern). buildFetchHandler retargets
+// it at cfg.browserManager AND chains cfg.browserManager.onDisconnect to
+// activeShutdown (without clobbering any caller-provided handler).
+
+function makeMockBrowserManager(mode: 'launched' | 'headed') {
+  return {
+    getConnectionMode: () => mode,
+    isWatching: () => false,
+    stopWatch: () => {},
+    close: async () => {},
+    onDisconnect: null as ((code?: number) => void | Promise<void>) | null,
+  };
+}
+
+describe('idle timer + onDisconnect dual-instance fix', () => {
+  beforeEach(() => {
+    __resetRegistry();
+    // Reset module state every test. Bun memoizes the server.ts module
+    // import for the whole test process, so `lastActivity`, `tunnelActive`,
+    // `activeShutdown`, `activeBrowserManager`, and `isShuttingDown` leak
+    // between tests. We reset what we touch here; the rest is fresh
+    // because each test calls buildFetchHandler with a new mock instance.
+    __testInternals__.setTunnelActive(false);
+    __testInternals__.setLastActivity(Date.now());
+    __testInternals__.resetShutdownState();
+  });
+
+  test('CRITICAL — REGRESSION: headed embedder does not auto-shutdown at idle', () => {
+    const exitMock = mock((_code?: number) => { throw new Error('process.exit called'); });
+    const originalExit = process.exit;
+    (process as any).exit = exitMock;
+    try {
+      const mockBM = makeMockBrowserManager('headed');
+      buildFetchHandler(makeMinimalConfig({ browserManager: mockBM as any }));
+      // Drive lastActivity past the idle threshold via the test seam instead
+      // of mutating Date.now — the leaked module-level setInterval would
+      // see fake-time and could fire shutdown if the timing aligned.
+      __testInternals__.setLastActivity(Date.now() - (31 * 60 * 1000));
+      __testInternals__.idleCheckTick();
+      expect(exitMock).not.toHaveBeenCalled();
+    } finally {
+      (process as any).exit = originalExit;
+    }
+  });
+
+  test('headless still auto-shuts down at idle (paired defensive)', async () => {
+    // Non-throwing mock: idleCheckTick fires shutdown as a fire-and-forget
+    // async call. Throwing from process.exit becomes an unhandled rejection
+    // that the test runner catches. Recording the call is enough.
+    const exitMock = mock((_code?: number) => {});
+    const originalExit = process.exit;
+    (process as any).exit = exitMock;
+    try {
+      const mockBM = makeMockBrowserManager('launched');
+      buildFetchHandler(makeMinimalConfig({ browserManager: mockBM as any }));
+      __testInternals__.setLastActivity(Date.now() - (31 * 60 * 1000));
+      __testInternals__.idleCheckTick();
+      // Drain microtasks: shutdown awaits flushBuffers + cfgBrowserManager.close
+      // before reaching process.exit.
+      await Promise.resolve();
+      await Promise.resolve();
+      await new Promise<void>(r => setImmediate(r));
+      await new Promise<void>(r => setImmediate(r));
+      expect(exitMock).toHaveBeenCalled();
+    } finally {
+      (process as any).exit = originalExit;
+    }
+  });
+
+  test('buildFetchHandler chains cfgBrowserManager.onDisconnect, preserving caller-set handler', async () => {
+    const mockBM = makeMockBrowserManager('headed');
+    const callerCb = mock(async (_code?: number) => {});
+    mockBM.onDisconnect = callerCb;
+    buildFetchHandler(makeMinimalConfig({ browserManager: mockBM as any }));
+    // gstack should have wrapped the caller-installed handler instead of
+    // clobbering it (Codex finding: BrowserManager.onDisconnect is a public
+    // field; gbrowser may set it before calling buildFetchHandler).
+    expect(typeof mockBM.onDisconnect).toBe('function');
+    expect(mockBM.onDisconnect).not.toBe(callerCb);
+    // Verify the chain: invoking the wrapped handler runs the caller
+    // callback AND reaches activeShutdown (which calls process.exit at the
+    // very end of its async path). Stubbing process.exit to throw aborts
+    // the chain before isShuttingDown can leak into later tests.
+    const exitMock = mock((_code?: number) => { throw new Error('process.exit called'); });
+    const originalExit = process.exit;
+    (process as any).exit = exitMock;
+    try {
+      await expect((mockBM.onDisconnect as any)(0)).rejects.toThrow('process.exit called');
+      expect(callerCb).toHaveBeenCalledWith(0);
+      expect(exitMock).toHaveBeenCalledWith(0);
+    } finally {
+      (process as any).exit = originalExit;
+    }
+  });
+
+  test('tunnelActive blocks idle-shutdown even in headless mode', () => {
+    const exitMock = mock((_code?: number) => { throw new Error('process.exit called'); });
+    const originalExit = process.exit;
+    (process as any).exit = exitMock;
+    try {
+      const mockBM = makeMockBrowserManager('launched');
+      buildFetchHandler(makeMinimalConfig({ browserManager: mockBM as any }));
+      __testInternals__.setTunnelActive(true);
+      __testInternals__.setLastActivity(Date.now() - (31 * 60 * 1000));
+      __testInternals__.idleCheckTick();
+      expect(exitMock).not.toHaveBeenCalled();
+    } finally {
+      (process as any).exit = originalExit;
+    }
+  });
+
+  test('lifecycle handlers (idleCheckTick + parent watchdog + SIGTERM) read activeBrowserManager, not module-level browserManager', () => {
+    // Static guard against a future refactor reintroducing a stale read.
+    // The 4 lifecycle sites all call getConnectionMode via
+    // the indirection. Other module-level browserManager reads inside
+    // handleCommandInternalImpl (informational mode reporting in response
+    // payloads) are out of scope and intentionally untouched.
+    const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'server.ts'), 'utf-8');
+    const factoryStart = src.indexOf('export function buildFetchHandler');
+    expect(factoryStart).toBeGreaterThan(0);
+    const moduleLevel = src.slice(0, factoryStart);
+    const activeCount = (moduleLevel.match(/activeBrowserManager\.getConnectionMode\(\)/g) || []).length;
+    // idleCheckTick, parent watchdog, SIGTERM, and emergencyCleanup.
+    expect(activeCount).toBe(4);
+    const emergencyStart = src.indexOf('function emergencyCleanup()');
+    expect(emergencyStart).toBeGreaterThan(0);
+    expect(src.slice(emergencyStart, factoryStart)).toContain("activeBrowserManager.getConnectionMode() === 'headed'");
   });
 });

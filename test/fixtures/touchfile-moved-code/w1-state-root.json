@@ -1,0 +1,94 @@
+{
+  "workstream": "W1 state-root owners",
+  "recordedAt": "96764e80",
+  "sources": {
+    "browse/src/config.ts": {
+      "e2e": [
+        "aside-browse-basic",
+        "aside-browse-flow",
+        "benchmark-workflow",
+        "browse-basic",
+        "browse-snapshot",
+        "canary-workflow",
+        "carve-section-loading-browse",
+        "design-review-detector-shim-dom",
+        "design-review-fix",
+        "diagram-authoring-quality",
+        "diagram-triplet",
+        "qa-b6-static",
+        "qa-b7-spa",
+        "qa-b8-checkout",
+        "qa-fix-loop",
+        "qa-only-no-fix",
+        "qa-quick"
+      ],
+      "llmJudge": [
+        "browse/SKILL.md reference"
+      ]
+    },
+    "lib/cso/state.ts": {
+      "e2e": [
+        "cso-diff-mode",
+        "cso-full-audit",
+        "cso-infra-scope"
+      ],
+      "llmJudge": []
+    },
+    "bin/gstack-paths": {
+      "e2e": [
+        "plan-design-with-ui-scope"
+      ],
+      "llmJudge": []
+    },
+    "careful/bin/hook-extract.sh": {
+      "e2e": [
+        "investigate-owned-abort",
+        "investigate-owned-completion",
+        "investigate-owned-ending-error"
+      ],
+      "llmJudge": []
+    },
+    "hosts/claude/hooks/question-log-hook.ts": {
+      "e2e": [],
+      "llmJudge": []
+    },
+    "hosts/claude/hooks/question-preference-hook.ts": {
+      "e2e": [
+        "auto-decide-preserved",
+        "docsync-spawned"
+      ],
+      "llmJudge": []
+    },
+    "hosts/claude/hooks/auq-error-fallback-hook.ts": {
+      "e2e": [
+        "docsync-spawned"
+      ],
+      "llmJudge": []
+    },
+    "hosts/claude/hooks/timeline-stop-hook.ts": {
+      "e2e": [],
+      "llmJudge": []
+    },
+    "hosts/claude/hooks/memorable-user-prompt-hook.ts": {
+      "e2e": [],
+      "llmJudge": []
+    }
+  },
+  "modules": {
+    "lib/state-root.ts": [
+      "browse/src/config.ts",
+      "lib/cso/state.ts"
+    ],
+    "bin/gstack-state-root.sh": [
+      "bin/gstack-paths",
+      "careful/bin/hook-extract.sh"
+    ],
+    "hosts/claude/hooks/hook-log.ts": [
+      "hosts/claude/hooks/question-log-hook.ts",
+      "hosts/claude/hooks/question-preference-hook.ts",
+      "hosts/claude/hooks/auq-error-fallback-hook.ts",
+      "hosts/claude/hooks/timeline-stop-hook.ts",
+      "hosts/claude/hooks/memorable-user-prompt-hook.ts"
+    ]
+  }
+}

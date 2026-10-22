@@ -1,0 +1,55 @@
+diff --git a/internal/server/health.go b/internal/server/health.go
+index 326cb95..9d4c3f2 100644
+--- a/internal/server/health.go
++++ b/internal/server/health.go
+@@ -5,6 +5,13 @@ import "net/http"
+ // Healthz reports that the process is up. It deliberately checks no
+ // dependencies; readiness lives in /readyz.
+ func Healthz(w http.ResponseWriter, r *http.Request) {
++	switch r.Method {
++	case http.MethodGet, http.MethodHead:
++	default:
++		w.Header().Set("Allow", "GET, HEAD")
++		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
++		return
++	}
+ 	w.Header().Set("Content-Type", "application/json")
+ 	w.WriteHeader(http.StatusOK)
+ 	_, _ = w.Write([]byte(`{"status":"ok"}`))
+diff --git a/internal/server/health_test.go b/internal/server/health_test.go
+new file mode 100644
+index 0000000..1933d40
+--- /dev/null
++++ b/internal/server/health_test.go
+@@ -0,0 +1,31 @@
++package server
++
++import (
++	"net/http"
++	"net/http/httptest"
++	"testing"
++)
++
++func TestHealthzMethods(t *testing.T) {
++	cases := []struct {
++		method string
++		want   int
++	}{
++		{http.MethodGet, http.StatusOK},
++		{http.MethodHead, http.StatusOK},
++		{http.MethodPost, http.StatusMethodNotAllowed},
++		{http.MethodDelete, http.StatusMethodNotAllowed},
++	}
++	for _, tc := range cases {
++		t.Run(tc.method, func(t *testing.T) {
++			rec := httptest.NewRecorder()
++			Healthz(rec, httptest.NewRequest(tc.method, "/healthz", nil))
++			if rec.Code != tc.want {
++				t.Fatalf("%s /healthz = %d, want %d", tc.method, rec.Code, tc.want)
++			}
++			if tc.want == http.StatusMethodNotAllowed && rec.Header().Get("Allow") != "GET, HEAD" {
++				t.Fatalf("Allow header = %q", rec.Header().Get("Allow"))
++			}
++		})
++	}
++}

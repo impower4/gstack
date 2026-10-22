@@ -1,0 +1,39 @@
+import { describe, expect, test } from 'bun:test';
+import { TakeStore, acceptProposal, dropProposal, propose } from '../src/takes/proposals';
+
+function seeded(): TakeStore {
+  const store = new TakeStore();
+  store.takes.set('t1', { id: 't1', claim: 'the sky is blue', active: true });
+  return store;
+}
+
+describe('take proposals', () => {
+  test('accepting an add proposal creates the take', () => {
+    const store = seeded();
+    propose(store, { id: 'p1', kind: 'takes_add', takeId: 't2', claim: 'water is wet' });
+    acceptProposal(store, 'p1');
+    expect(store.takes.get('t2')).toEqual({ id: 't2', claim: 'water is wet', active: true });
+  });
+
+  test('accepting a remove proposal deletes the take', () => {
+    const store = seeded();
+    propose(store, { id: 'p1', kind: 'takes_remove', takeId: 't1' });
+    acceptProposal(store, 'p1');
+    expect(store.takes.has('t1')).toBe(false);
+  });
+
+  test('dropping a remove proposal keeps the take', () => {
+    const store = seeded();
+    propose(store, { id: 'p1', kind: 'takes_remove', takeId: 't1' });
+    dropProposal(store, 'p1');
+    expect(store.takes.get('t1')).toEqual({ id: 't1', claim: 'the sky is blue', active: true });
+    expect(store.proposals.get('p1')?.status).toBe('dropped');
+  });
+
+  test('accepting a replace proposal with a new claim rewrites the claim', () => {
+    const store = seeded();
+    propose(store, { id: 'p1', kind: 'takes_replace', takeId: 't1', claim: 'the sky is grey' });
+    acceptProposal(store, 'p1');
+    expect(store.takes.get('t1')?.claim).toBe('the sky is grey');
+  });
+});

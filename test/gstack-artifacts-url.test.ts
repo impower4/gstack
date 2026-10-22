@@ -13,7 +13,7 @@ const ROOT = path.resolve(import.meta.dir, '..');
 const URL_BIN = path.join(ROOT, 'bin', 'gstack-artifacts-url');
 
 function run(args: string[]): { code: number; stdout: string; stderr: string } {
-  const r = spawnSync(URL_BIN, args, { encoding: 'utf-8' });
+  const r = spawnSync(URL_BIN, args, { encoding: 'utf-8', timeout: 30_000 });
   return {
     code: r.status ?? -1,
     stdout: (r.stdout || '').trim(),
@@ -22,6 +22,16 @@ function run(args: string[]): { code: number; stdout: string; stderr: string } {
 }
 
 describe('gstack-artifacts-url', () => {
+  test('normalization does not depend on external line readers', () => {
+    for (const url of ['git@github.com:team/repo.git', 'https://github.com/team/repo.git']) {
+      const result = spawnSync(Bun.which('bash')!, [URL_BIN, '--to', 'https', url], {
+        env: { PATH: '' }, encoding: 'utf8', timeout: 30_000,
+      });
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.stdout.trim()).toBe('https://github.com/team/repo');
+    }
+  });
+
   test('--to ssh from canonical https', () => {
     const r = run(['--to', 'ssh', 'https://github.com/garrytan/gstack-artifacts-garrytan']);
     expect(r.code).toBe(0);
@@ -65,6 +75,24 @@ describe('gstack-artifacts-url', () => {
     const r = run(['--to', 'ssh', 'not a url']);
     expect(r.code).toBe(3);
     expect(r.stderr).toContain('unrecognized URL form');
+  });
+
+  test('rejects remotes without both owner and repo path segments', () => {
+    const malformed = [
+      'https://github.com',
+      'https://github.com/owner',
+      'https://github.com/owner/',
+      'https://github.com/owner//repo',
+      'git@github.com:owner',
+      'ssh://git@github.com',
+      'ssh://git@github.com/owner',
+    ];
+
+    for (const url of malformed) {
+      const r = run(['--to', 'ssh', url]);
+      expect(r.code, url).toBe(3);
+      expect(r.stderr, url).toContain('failed to parse host/owner');
+    }
   });
 
   test('rejects missing args with exit 2', () => {

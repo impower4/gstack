@@ -15,6 +15,13 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
+import { spawn } from 'child_process';
+import { StringDecoder } from 'node:string_decoder';
+import { hermeticChildEnv } from './hermetic-env';
+import { extractSkillSections } from './skill-fixture';
+import { killProcessGroup } from '../../scripts/test-strict-output';
+import { CODEX_FRONTIER_MODEL } from '../../scripts/resolvers/constants';
+import { estimateCostUsd, hasPricing } from '../../lib/pricing';
 
 // --- Interfaces ---
 
@@ -28,6 +35,57 @@ export interface CodexResult {
   sessionId: string | null; // Thread ID for session continuity
   rawLines: string[];       // Raw JSONL lines for debugging
   stderr: string;           // Stderr output (skill loading errors, auth failures)
+  usage?: CodexTokenUsage | null; // Summed turn.completed usage; null when no turn completed
+  model?: string;           // The --model this session ran
+}
+
+/**
+ * Token classes of Codex `turn.completed` usage. `cached_input` (cache reads)
+ * and `cache_write_input` are subsets of `input`; `reasoning_output` is a
+ * subset of `output`.
+ */
+export interface CodexTokenUsage {
+  input: number;
+  cached_input: number;
+  cache_write_input: number;
+  output: number;
+  reasoning_output: number;
+}
+
+export const NO_CODEX_USAGE: CodexTokenUsage = Object.freeze({ input: 0, cached_input: 0, cache_write_input: 0, output: 0, reasoning_output: 0 });
+
+const count = (value: unknown) => (typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : 0);
+
+/** Add one `turn.completed` usage object to a running total. */
+export function addCodexTurnUsage(total: CodexTokenUsage, usage: Record<string, unknown> | undefined): CodexTokenUsage {
+  return {
+    input: total.input + count(usage?.input_tokens),
+    cached_input: total.cached_input + count(usage?.cached_input_tokens),
+    cache_write_input: total.cache_write_input + count(usage?.cache_write_input_tokens),
+    output: total.output + count(usage?.output_tokens),
+    reasoning_output: total.reasoning_output + count(usage?.reasoning_output_tokens),
+  };
+}
+
+/**
+ * A session's cost at lib/pricing.ts rates: cache reads at the cached-input
+ * rate, all other input (cache writes included) at the input rate, output at
+ * the output rate. Null when the model has no price row.
+ */
+export function codexUsageCostUsd(usage: CodexTokenUsage, model: string | undefined): number | null {
+  if (!hasPricing(model)) return null;
+  const cached = Math.min(usage.cached_input, usage.input);
+  return estimateCostUsd({ input: usage.input - cached, cached, output: usage.output }, model);
+}
+
+/** Existing pipe-drain allowance, separate from the model's work budget. */
+export const CODEX_DRAIN_GRACE_MS = 5_000;
+
+export class CodexHarnessError extends Error {
+  constructor(message: string, readonly result?: CodexResult) {
+    super(message);
+    this.name = 'CodexHarnessError';
+  }
 }
 
 // --- JSONL parser (ported from Python in codex/SKILL.md.tmpl) ---
@@ -38,6 +96,7 @@ export interface ParsedCodexJSONL {
   toolCalls: string[];
   tokens: number;
   sessionId: string | null;
+  usage: CodexTokenUsage | null;
 }
 
 /**
@@ -55,6 +114,7 @@ export function parseCodexJSONL(lines: string[]): ParsedCodexJSONL {
   const toolCalls: string[] = [];
   let tokens = 0;
   let sessionId: string | null = null;
+  let usage: CodexTokenUsage | null = null;
 
   for (const line of lines) {
     if (!line.trim()) continue;
@@ -79,9 +139,9 @@ export function parseCodexJSONL(lines: string[]): ParsedCodexJSONL {
           if (cmd) toolCalls.push(cmd);
         }
       } else if (t === 'turn.completed') {
-        const usage = obj.usage || {};
-        const turnTokens = (usage.input_tokens || 0) + (usage.output_tokens || 0);
-        tokens += turnTokens;
+        const turn = obj.usage || {};
+        tokens += (turn.input_tokens || 0) + (turn.output_tokens || 0);
+        usage = addCodexTurnUsage(usage ?? NO_CODEX_USAGE, turn);
       }
     } catch { /* skip malformed lines */ }
   }
@@ -92,6 +152,7 @@ export function parseCodexJSONL(lines: string[]): ParsedCodexJSONL {
     toolCalls,
     tokens,
     sessionId,
+    usage,
   };
 }
 
@@ -102,20 +163,42 @@ export function parseCodexJSONL(lines: string[]): ParsedCodexJSONL {
  * Creates ~/.codex/skills/{skillName}/SKILL.md in the temp HOME and copies
  * agents/openai.yaml when present so Codex sees the same metadata as a real install.
  *
+ * When `sections` is provided, the installed SKILL.md is an EXTRACTION
+ * (frontmatter + the named `## <section>` blocks via
+ * test/helpers/skill-fixture.ts) instead of the full 1000-1900-line file —
+ * CLAUDE.md: "E2E test fixtures: extract, don't copy". Omit `sections` only
+ * when the test's purpose is to validate the real generated artifact itself
+ * (e.g., codex-discover-skill asserts the full SKILL.md loads without
+ * "invalid" / "Skipped loading" stderr from Codex).
+ *
  * Returns the temp HOME path. Caller is responsible for cleanup.
  */
 export function installSkillToTempHome(
   skillDir: string,
   skillName: string,
   tempHome?: string,
+  sections?: string[],
+  runtimeRoot?: string,
 ): string {
   const home = tempHome || fs.mkdtempSync(path.join(os.tmpdir(), 'codex-e2e-'));
   const destDir = path.join(home, '.codex', 'skills', skillName);
   fs.mkdirSync(destDir, { recursive: true });
 
   const srcSkill = path.join(skillDir, 'SKILL.md');
-  if (fs.existsSync(srcSkill)) {
+  if (sections && sections.length > 0) {
+    // extractSkillSections throws loudly on a missing file or renamed
+    // section — a fixture is never silently written empty.
+    fs.writeFileSync(path.join(destDir, 'SKILL.md'), extractSkillSections(skillDir, sections));
+  } else {
+    // A missing/unreadable full fixture must fail just like an extraction.
+    // Preserve copyFileSync's filesystem diagnostic; an agent can mention a
+    // nonexistent skill in its response and otherwise pass discovery checks.
     fs.copyFileSync(srcSkill, path.join(destDir, 'SKILL.md'));
+  }
+  if (runtimeRoot) {
+    // The temp HOME has no installed gstack runtime; point runtime helpers at the one under test.
+    const installed = path.join(destDir, 'SKILL.md');
+    fs.writeFileSync(installed, fs.readFileSync(installed, 'utf8').replaceAll('~/.codex/skills/gstack', runtimeRoot));
   }
 
   const srcOpenAIYaml = path.join(skillDir, 'agents', 'openai.yaml');
@@ -126,6 +209,192 @@ export function installSkillToTempHome(
   }
 
   return home;
+}
+
+// --- Spawn core ---
+
+/**
+ * Spawn `codex <args>` in its own process group and collect its JSONL until
+ * exit, the deadline or an abort, with the existing drain grace. Shared by
+ * runCodexSkill and the Codex host (codex-host-runner.ts). `onLine` sees each
+ * JSONL line as it arrives with the elapsed milliseconds since `startTime`.
+ */
+export async function execCodex(args: string[], opts: {
+  cwd: string;
+  env: Record<string, string>;
+  startTime: number;
+  deadline: number;
+  signal?: AbortSignal;
+  onLine?: (line: string, elapsedMs: number) => void;
+  /** Called with the group-owning pid right after spawn; a throw kills the group. */
+  onSpawn?: (pid: number) => void;
+}): Promise<CodexResult> {
+  const { cwd, env, startTime, deadline, signal, onLine } = opts;
+  const proc = spawn('codex', args, {
+    cwd,
+    stdio: ['ignore', 'pipe', 'pipe'],
+    detached: process.platform !== 'win32',
+    env,
+  });
+  if (opts.onSpawn) {
+    try {
+      if (proc.pid === undefined) throw new Error('Codex did not start');
+      opts.onSpawn(proc.pid);
+    } catch (error) {
+      killProcessGroup(proc, 'SIGKILL');
+      proc.stdout!.destroy();
+      proc.stderr!.destroy();
+      throw error;
+    }
+  }
+  const collectedLines: string[] = [];
+  // work --exit--> drain (<=5s) --> result
+  //   \--timeout/abort--> kill group + close pipes --> timeout result
+  // Exit status comes from 'exit'; a forced drain after exit 0 is an error.
+  let stdoutBuffer = '';
+  let stderr = '';
+  let exitCode: number | undefined;
+  let timedOut = false;
+  let drainExpired = false;
+  let streamError: { stream: 'stdout' | 'stderr'; error: Error } | undefined;
+  let spawnError: Error | undefined;
+  let stdoutDone = false;
+  let stderrDone = false;
+  let stdoutEnded = false;
+  let stderrEnded = false;
+  let finalized = false;
+  const stdoutDecoder = new StringDecoder('utf8');
+  const stderrDecoder = new StringDecoder('utf8');
+  let workTimer: ReturnType<typeof setTimeout> | undefined;
+  let drainTimer: ReturnType<typeof setTimeout> | undefined;
+  let finish!: () => void;
+  const finished = new Promise<void>((resolve) => { finish = resolve; });
+
+  const maybeFinish = () => {
+    if (exitCode !== undefined && stdoutDone && stderrDone) finish();
+  };
+  const closePipes = () => {
+    // Destroy both streams: canceling stdout alone cannot release an
+    // inherited stderr pipe held by a descendant in another process group.
+    proc.stdout!.destroy();
+    proc.stderr!.destroy();
+  };
+  const expireDrain = () => {
+    drainExpired = !stdoutDone || !stderrDone;
+    killProcessGroup(proc, 'SIGKILL');
+    closePipes();
+    // Also bound the rare case where a failed group kill produces no exit.
+    finish();
+  };
+  const stopRun = () => {
+    // A real auth/crash exit that preceded a pipe stall stays a real exit.
+    if (exitCode === undefined) timedOut = true;
+    else drainExpired ||= !stdoutDone || !stderrDone;
+    killProcessGroup(proc, 'SIGKILL');
+    closePipes();
+    clearTimeout(drainTimer);
+    drainTimer = setTimeout(expireDrain, CODEX_DRAIN_GRACE_MS);
+    maybeFinish();
+  };
+  const onExit = (code: number | null, exitSignal: NodeJS.Signals | null) => {
+    exitCode = code ?? (exitSignal ? 128 + (os.constants.signals[exitSignal] ?? 0) : 1);
+    clearTimeout(workTimer);
+    clearTimeout(drainTimer);
+    // 'exit' means the child is gone; 'close' also waits for descendant
+    // pipes. Start the drain allowance at actual exit, never at close.
+    drainTimer = setTimeout(expireDrain, CODEX_DRAIN_GRACE_MS);
+    maybeFinish();
+  };
+  const onSpawnError = (error: Error) => {
+    if (finalized) return;
+    spawnError = error;
+    exitCode = 1;
+    closePipes();
+    finish();
+  };
+  // Closure releases lifecycle waits, but only 'end' proves all bytes were
+  // drained. A destroyed pipe can emit 'close' without either EOF or error.
+  const onStdoutDone = () => { if (!finalized) { stdoutDone = true; maybeFinish(); } };
+  const onStderrDone = () => { if (!finalized) { stderrDone = true; maybeFinish(); } };
+  const onStdoutEnd = () => { if (!finalized) { stdoutBuffer += stdoutDecoder.end(); stdoutEnded = true; onStdoutDone(); } };
+  const onStderrEnd = () => { if (!finalized) { stderr += stderrDecoder.end(); stderrEnded = true; onStderrDone(); } };
+  const onStreamError = (stream: 'stdout' | 'stderr', error: Error) => {
+    if (!finalized) streamError ??= { stream, error };
+  };
+  const onStdout = (chunk: Buffer) => {
+    if (finalized) return;
+    stdoutBuffer += stdoutDecoder.write(chunk);
+    const lines = stdoutBuffer.split('\n');
+    stdoutBuffer = lines.pop() || '';
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      collectedLines.push(line);
+      onLine?.(line, Date.now() - startTime);
+      try {
+        const event = JSON.parse(line);
+        if (event.type === 'item.completed' && event.item) {
+          const item = event.item;
+          const elapsed = Math.round((Date.now() - startTime) / 1000);
+          if (item.type === 'command_execution' && item.command) {
+            process.stderr.write(`  [codex ${elapsed}s] ran: ${item.command.slice(0, 100)}\n`);
+          } else if (item.type === 'agent_message' && item.text) {
+            process.stderr.write(`  [codex ${elapsed}s] message: ${item.text.slice(0, 100)}\n`);
+          }
+        }
+      } catch { /* malformed JSONL is ignored by parseCodexJSONL too */ }
+    }
+  };
+  const onStderr = (chunk: Buffer) => { if (!finalized) stderr += stderrDecoder.write(chunk); };
+
+  proc.on('exit', onExit);
+  proc.on('error', onSpawnError);
+  proc.stdout!.on('data', onStdout);
+  proc.stderr!.on('data', onStderr);
+  proc.stdout!.on('end', onStdoutEnd).on('close', onStdoutDone).on('error', error => onStreamError('stdout', error));
+  proc.stderr!.on('end', onStderrEnd).on('close', onStderrDone).on('error', error => onStreamError('stderr', error));
+  signal?.addEventListener('abort', stopRun, { once: true });
+  workTimer = setTimeout(stopRun, Math.max(0, deadline - Date.now()));
+  if (signal?.aborted || Date.now() >= deadline) stopRun();
+
+  try {
+    await finished;
+    if (stdoutBuffer.trim()) collectedLines.push(stdoutBuffer);
+    const parsed = parseCodexJSONL(collectedLines);
+    const result: CodexResult = {
+      ...parsed,
+      exitCode: timedOut ? 124 : exitCode ?? 1,
+      durationMs: Date.now() - startTime,
+      rawLines: collectedLines,
+      stderr,
+    };
+    if (stderr.trim()) process.stderr.write(`  [codex stderr] ${stderr.trim().slice(0, 200)}\n`);
+    if (spawnError) throw new CodexHarnessError(`Could not start Codex: ${spawnError.message}`, result);
+    const incompleteStreams = [!stdoutEnded && 'stdout', !stderrEnded && 'stderr'].filter(Boolean).join(' and ');
+    if (result.exitCode === 0 && (drainExpired || streamError || incompleteStreams)) {
+      throw new CodexHarnessError(
+        drainExpired ? `Codex output drain exceeded ${CODEX_DRAIN_GRACE_MS}ms after exit 0`
+          : streamError ? `Codex ${streamError.stream} stream failed: ${streamError.error.message}`
+          : `Codex ${incompleteStreams} closed before EOF after exit 0`,
+        result,
+      );
+    }
+    return result;
+  } finally {
+    finalized = true;
+    clearTimeout(workTimer);
+    clearTimeout(drainTimer);
+    signal?.removeEventListener('abort', stopRun);
+    // Child exit and closed pipes do not prove its descendants exited:
+    // background tools may redirect both streams. Reap the owned group on
+    // every result, including ordinary success and genuine process failure.
+    killProcessGroup(proc, 'SIGKILL');
+    closePipes();
+    proc.removeListener('exit', onExit);
+    // Retain the harmless error listener through stream teardown so a late
+    // OS spawn error cannot turn into an unhandled event after cleanup.
+    proc.stdout!.removeListener('data', onStdout);
+    proc.stderr!.removeListener('data', onStderr);
+  }
 }
 
 // --- Main runner ---
@@ -143,6 +412,12 @@ export async function runCodexSkill(opts: {
   cwd?: string;             // Working directory
   skillName?: string;       // Skill name for installation (default: dirname)
   sandbox?: string;         // Sandbox mode (default: 'read-only')
+  sections?: string[];      // Install only these `## <section>` blocks (extract, don't copy)
+  model?: string;           // Exact Codex model ID (passed with --model)
+  configOverrides?: string[]; // TOML key=value overrides (passed with -c)
+  ignoreUserConfig?: boolean; // Add --ignore-user-config; auth still comes from CODEX_HOME
+  signal?: AbortSignal;     // Abort the process group when an enclosing eval expires
+  runtimeRoot?: string;     // gstack runtime that ~/.codex/skills/gstack helper paths resolve to
 }): Promise<CodexResult> {
   const {
     skillDir,
@@ -151,25 +426,35 @@ export async function runCodexSkill(opts: {
     cwd,
     skillName,
     sandbox = 'read-only',
+    sections,
+    model,
+    configOverrides = [],
+    ignoreUserConfig = false,
+    signal,
+    runtimeRoot,
   } = opts;
 
   const startTime = Date.now();
+  const deadline = startTime + timeoutMs;
   const name = skillName || path.basename(skillDir) || 'gstack';
 
-  // Check if codex binary exists
-  const whichResult = Bun.spawnSync(['which', 'codex']);
+  const emptyResult = (exitCode: number, output = ''): CodexResult => ({
+    output, reasoning: [], toolCalls: [], tokens: 0, exitCode,
+    durationMs: Date.now() - startTime, sessionId: null, rawLines: [], stderr: '', usage: null,
+  });
+  if (signal?.aborted || Date.now() >= deadline) return emptyResult(124);
+
+  // Preflight and setup are part of the budget, not extra time before it.
+  // Bun's implicit child environment retains the launch-time PATH. Use the
+  // current environment so preflight and the actual spawn see the same shims.
+  const whichResult = Bun.spawnSync(['which', 'codex'], {
+    env: process.env,
+    timeout: Math.max(1, Math.min(30_000, deadline - Date.now())),
+  });
+  if (signal?.aborted || Date.now() >= deadline) return emptyResult(124);
   if (whichResult.exitCode !== 0) {
-    return {
-      output: 'SKIP: codex binary not found',
-      reasoning: [],
-      toolCalls: [],
-      tokens: 0,
-      exitCode: -1,
-      durationMs: Date.now() - startTime,
-      sessionId: null,
-      rawLines: [],
-      stderr: '',
-    };
+    if (whichResult.signalCode) throw new CodexHarnessError('Codex binary lookup did not complete');
+    return emptyResult(-1, 'SKIP: codex binary not found');
   }
 
   // Set up temp HOME with skill installed
@@ -177,115 +462,63 @@ export async function runCodexSkill(opts: {
   const realHome = os.homedir();
 
   try {
-    installSkillToTempHome(skillDir, name, tempHome);
+    installSkillToTempHome(skillDir, name, tempHome, sections, runtimeRoot);
 
-    // Symlink real Codex auth config so codex can authenticate from temp HOME.
-    // Codex stores auth in ~/.codex/ — we need the config but not the skills
-    // (we install our own test skills above).
-    const realCodexConfig = path.join(realHome, '.codex');
+    // Copy authentication only. Copying the whole operator ~/.codex tree leaks
+    // plugins, MCP servers, rules, memories, and skills into a supposedly
+    // hermetic E2E; required private MCPs can then fail before the model starts.
+    const realCodexConfig = process.env.CODEX_HOME || path.join(realHome, '.codex');
     const tempCodexDir = path.join(tempHome, '.codex');
     if (fs.existsSync(realCodexConfig)) {
-      // Copy auth-related files from real ~/.codex/ into temp ~/.codex/
-      // (skills/ is already set up by installSkillToTempHome)
-      const entries = fs.readdirSync(realCodexConfig);
-      for (const entry of entries) {
-        if (entry === 'skills') continue; // don't clobber our test skills
+      for (const entry of ['auth.json']) {
         const src = path.join(realCodexConfig, entry);
         const dst = path.join(tempCodexDir, entry);
-        if (!fs.existsSync(dst)) {
+        if (fs.existsSync(src) && !fs.existsSync(dst)) {
           fs.cpSync(src, dst, { recursive: true });
         }
       }
     }
 
-    // Build codex exec command
-    const args = ['exec', prompt, '--json', '-s', sandbox];
+    if (signal?.aborted || Date.now() >= deadline) return emptyResult(124);
 
-    // Spawn codex with temp HOME so it discovers our installed skill
-    const proc = Bun.spawn(['codex', ...args], {
-      cwd: cwd || skillDir,
-      stdout: 'pipe',
-      stderr: 'pipe',
-      env: {
-        ...process.env,
-        HOME: tempHome,
-      },
+    // Build codex exec command.
+    // --skip-git-repo-check: newer codex CLIs refuse exec in an untrusted
+    // non-git directory ("Not inside a trusted directory and
+    // --skip-git-repo-check was not specified") — our temp skill dirs are
+    // exactly that. Empirically verified against codex on this machine.
+    const args = ['exec', '--json', '-s', sandbox, '--skip-git-repo-check'];
+    if (ignoreUserConfig) args.push('--ignore-user-config');
+    const sessionModel = model ?? process.env.GSTACK_CODEX_MODEL ?? CODEX_FRONTIER_MODEL;
+    args.push('--model', sessionModel);
+    for (const override of configOverrides) args.push('-c', override);
+    args.push(prompt);
+
+    // Spawn codex with temp HOME so it discovers our installed skill.
+    // Hermetic scrub (test/helpers/hermetic-env.ts) with codex's auth surface
+    // re-admitted: codex auths from $HOME/.codex (copied into tempHome above)
+    // plus OPENAI_API_KEY/CODEX_* when present. HOME override merges last.
+    // node:child_process spawn with `detached` (own process group) — mirrors
+    // session-runner.ts. Bun.spawn's bare proc.kill() signalled only codex
+    // itself; command subprocesses codex spawned survived as orphans holding
+    // our pipes open (the same blocked-drain hang the claude runner fixed —
+    // this copy never inherited that fix until now).
+    // Codex refuses to create its PATH aliases (codex-linux-sandbox among
+    // them) when CODEX_HOME sits under its temp dir, so the child gets a temp
+    // dir beside CODEX_HOME instead of the shard TMPDIR that holds tempHome.
+    const tempTmpDir = path.join(tempHome, 'tmp');
+    fs.mkdirSync(tempTmpDir, { recursive: true });
+    const result = await execCodex(args, {
+      cwd: cwd || skillDir, startTime, deadline, signal,
+      env: hermeticChildEnv(
+        { HOME: tempHome, CODEX_HOME: tempCodexDir, TMPDIR: tempTmpDir },
+        { extraAllow: ['OPENAI_API_KEY', 'CODEX_*'] },
+      ),
+    }).catch((error: unknown) => {
+      if (error instanceof CodexHarnessError && error.result) error.result.model = sessionModel;
+      throw error;
     });
+    return { ...result, model: sessionModel };
 
-    // Race against timeout
-    let timedOut = false;
-    const timeoutId = setTimeout(() => {
-      timedOut = true;
-      proc.kill();
-    }, timeoutMs);
-
-    // Stream and collect JSONL from stdout
-    const collectedLines: string[] = [];
-    const stderrPromise = new Response(proc.stderr).text();
-
-    const reader = proc.stdout.getReader();
-    const decoder = new TextDecoder();
-    let buf = '';
-
-    try {
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buf += decoder.decode(value, { stream: true });
-        const lines = buf.split('\n');
-        buf = lines.pop() || '';
-        for (const line of lines) {
-          if (!line.trim()) continue;
-          collectedLines.push(line);
-
-          // Real-time progress to stderr
-          try {
-            const event = JSON.parse(line);
-            if (event.type === 'item.completed' && event.item) {
-              const item = event.item;
-              if (item.type === 'command_execution' && item.command) {
-                const elapsed = Math.round((Date.now() - startTime) / 1000);
-                process.stderr.write(`  [codex ${elapsed}s] ran: ${item.command.slice(0, 100)}\n`);
-              } else if (item.type === 'agent_message' && item.text) {
-                const elapsed = Math.round((Date.now() - startTime) / 1000);
-                process.stderr.write(`  [codex ${elapsed}s] message: ${item.text.slice(0, 100)}\n`);
-              }
-            }
-          } catch { /* skip — parseCodexJSONL will handle it later */ }
-        }
-      }
-    } catch { /* stream read error — fall through to exit code handling */ }
-
-    // Flush remaining buffer
-    if (buf.trim()) {
-      collectedLines.push(buf);
-    }
-
-    const stderr = await stderrPromise;
-    const exitCode = await proc.exited;
-    clearTimeout(timeoutId);
-
-    const durationMs = Date.now() - startTime;
-
-    // Parse all collected JSONL lines
-    const parsed = parseCodexJSONL(collectedLines);
-
-    // Log stderr if non-empty (may contain auth errors, etc.)
-    if (stderr.trim()) {
-      process.stderr.write(`  [codex stderr] ${stderr.trim().slice(0, 200)}\n`);
-    }
-
-    return {
-      output: parsed.output,
-      reasoning: parsed.reasoning,
-      toolCalls: parsed.toolCalls,
-      tokens: parsed.tokens,
-      exitCode: timedOut ? 124 : exitCode,
-      durationMs,
-      sessionId: parsed.sessionId,
-      rawLines: collectedLines,
-      stderr,
-    };
   } finally {
     // Clean up temp HOME
     try { fs.rmSync(tempHome, { recursive: true, force: true }); } catch { /* non-fatal */ }

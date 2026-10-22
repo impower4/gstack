@@ -1,19 +1,51 @@
 #!/usr/bin/env bash
-# gstack-config — read/write ~/.gstack/config.yaml
+# gstack-config — read/write <state root>/config.yaml (default ~/.gstack/config.yaml)
 #
 # Usage:
 #   gstack-config get <key>          — read a config value (falls back to DEFAULTS)
+#   gstack-config get --stored <key> — the stored value or "unset", never DEFAULTS;
+#                                      "unreadable" + exit 2 when config cannot be read
+#                                      or a privacy key holds an unknown value
+#                                      (the outside-review consent check reads
+#                                      codex_reviews this way)
+#   gstack-config has <key>          — exit 0 iff the key is literally present in the
+#                                      config file (get returns DEFAULTS for absent keys,
+#                                      so callers that need provenance use this instead)
 #   gstack-config set <key> <value>  — write a config value
+#   gstack-config unset <key>        — remove a key from the config file
 #   gstack-config list               — show all config (values + defaults)
 #   gstack-config defaults           — show just the defaults table
 #
-# Env overrides (for testing):
-#   GSTACK_HOME       — override ~/.gstack state directory (aligns with writer scripts)
-#   GSTACK_STATE_DIR  — legacy alias for GSTACK_HOME (kept for backwards compat)
+# State root: GSTACK_STATE_ROOT → GSTACK_HOME → GSTACK_STATE_DIR →
+# CLAUDE_PLUGIN_DATA (only when CLAUDE_PLUGIN_ROOT contains "gstack") →
+# ~/.gstack (bin/gstack-state-root.sh). Set GSTACK_HOME to relocate state;
+# GSTACK_STATE_ROOT is gstack-paths' output, also honored as input;
+# GSTACK_STATE_DIR is a legacy alias.
+# Privacy keys (telemetry, memorable_recall, codex_reviews, update_check) take
+# the most restrictive value across the resolved root and ~/.gstack; `set`
+# reports which root received the value and which root still overrides it.
+# Docs: https://github.com/garrytan/gstack/blob/main/docs/state-root.md
 set -euo pipefail
 
-STATE_DIR="${GSTACK_HOME:-${GSTACK_STATE_DIR:-$HOME/.gstack}}"
+[ -r "$(dirname "$0")/gstack-state-root.sh" ] && . "$(dirname "$0")/gstack-state-root.sh" 2>/dev/null || { echo "$0: cannot resolve the gstack state root: $(dirname "$0")/gstack-state-root.sh is missing. fix: reinstall with ./setup or /gstack-upgrade (docs/state-root.md)" >&2; exit 1; }
+gstack_state_root_select
+STATE_DIR="$_gstack_sr_root"
 CONFIG_FILE="$STATE_DIR/config.yaml"
+
+# Swap a freshly-rendered tmp dir into the live render location (#2569
+# hardening). Installed skills SYMLINK into the live dir, so it is only ever
+# replaced AFTER a successful render — a failed render leaves the previous
+# render (and every link into it) fully intact. Keep in sync with setup's
+# _swap_in_render (same contract, both pinned by
+# test/user-render-out-dir-install.test.ts).
+_swap_in_render() {
+  local render_dir="$1" render_tmp="$2"
+  local render_old="$render_dir.old.$$"
+  rm -rf "$render_old"
+  if [ -e "$render_dir" ] || [ -L "$render_dir" ]; then mv "$render_dir" "$render_old"; fi
+  mv "$render_tmp" "$render_dir"
+  rm -rf "$render_old"
+}
 
 # Annotated header for new config files. Written once on first `set`.
 # Default semantics: DEFAULTS table below is the canonical source. Header text
@@ -33,6 +65,17 @@ CONFIG_HEADER='# gstack configuration — edit freely, changes take effect on ne
 #                           #   off       — no data sent, no local analytics (default)
 #                           #   anonymous — counter only, no device ID
 #                           #   community — usage data + stable device ID
+#                           # Opted in, each skill run is also logged locally to
+#                           # analytics/skill-usage.jsonl under this state root
+#                           # with the repo name and branch; those two fields are
+#                           # stripped before upload. Off logs nothing there.
+#
+# ─── Session markers (local functional state, not telemetry) ─────────
+# sessions/<pid>            # One empty file per live agent session, touched at
+#                           #   skill start and deleted after 120 minutes. The
+#                           #   count tells skills when several sessions share a
+#                           #   machine. Never sent anywhere; not gated on
+#                           #   telemetry.
 #
 # ─── Updates ─────────────────────────────────────────────────────────
 # auto_upgrade: false       # true = silently upgrade on session start
@@ -41,16 +84,8 @@ CONFIG_HEADER='# gstack configuration — edit freely, changes take effect on ne
 # ─── Skill naming ────────────────────────────────────────────────────
 # skill_prefix: false       # true = namespace skills as /gstack-qa, /gstack-ship
 #                           # false = short names /qa, /ship
-#
-# ─── Checkpoint ──────────────────────────────────────────────────────
-# checkpoint_mode: explicit # explicit | continuous
-#                           #   explicit   — commit only when you run /ship or /checkpoint
-#                           #   continuous — auto-commit after each significant change
-#                           #                with WIP: prefix + [gstack-context] body
-#
-# checkpoint_push: false    # true = push WIP commits to remote as you go
-#                           # false = keep WIP commits local only (default)
-#                           # Pushing can trigger CI/deploy hooks — opt in carefully.
+# disabled_skills:          # comma-separated skills to leave unregistered,
+#                           # e.g. make-pdf,pair-agent ("" = all enabled)
 #
 # ─── Writing style (V1) ──────────────────────────────────────────────
 # explain_level: default    # default = jargon-glossed, outcome-framed prose
@@ -59,6 +94,13 @@ CONFIG_HEADER='# gstack configuration — edit freely, changes take effect on ne
 #                           #           (for power users who know the terms)
 #                           # Unknown values default to "default" with a warning.
 #                           # See docs/designs/PLAN_TUNING_V1.md for rationale.
+# plan_mode_preamble: on    # on  = every skill carries the plan-mode preamble
+#                           # off = rendered skills omit the "Plan Mode Safe
+#                           #       Operations" and "Skill Invocation During
+#                           #       Plan Mode" sections (~1.8 KB each), for
+#                           #       users who never enter plan mode
+#                           # Applies on the next ./setup run. Unknown values
+#                           # default to "on" with a warning.
 #
 # ─── Artifacts sync (renamed from gbrain_sync_mode in v1.27.0.0) ─────
 # artifacts_sync_mode: off  # off | artifacts-only | full
@@ -73,10 +115,155 @@ CONFIG_HEADER='# gstack configuration — edit freely, changes take effect on ne
 #                           # Set to true once the privacy gate has asked the user.
 #                           # Flip back to false to be re-prompted.
 #
+# artifacts_sync_removals: off  # on | off — on: each sync also publishes the
+#                           #   removal of synced files gone from disk; more than
+#                           #   20 at once is held for gstack-brain-sync
+#                           #   --publish-removals. See docs/gbrain-sync.md.
+#
+# ─── Transcript ingest (gbrain memory) ───────────────────────────────
+# transcript_ingest_mode: off  # recent | all | off | new@<UTC> — consent for
+#                           #   /sync-gbrain to ingest Claude Code and Codex
+#                           #   session transcripts (every project repo policy
+#                           #   allows) into your brain (local or Supabase).
+#                           #   recent — last 90 days
+#                           #   all    — all history
+#                           #   new@2026-10-03T17:00:00Z — only sessions that
+#                           #            start after that UTC time
+#                           #   off    — never (other memory still syncs)
+#                           # A +repos suffix is kept automatically while
+#                           # transcript_repos is set.
+#                           # Absent, legacy (A-E, incremental) or unknown
+#                           # values are not consent: transcripts are skipped
+#                           # and /sync-gbrain asks once. An invalid value is
+#                           # REJECTED and the stored value kept.
+# transcript_repos:         # comma-separated git remotes; only transcripts
+#                           #   from these repos are ingested. Clear it with
+#                           #   `gstack-config unset transcript_repos`.
+#                           # Docs: setup-gbrain/memory.md#transcripts
+#
+# ─── Timeline Stop hook ──────────────────────────────────────────────
+# timeline_stop_hook: yes   # Controls whether ./setup registers the timeline
+#                           #   Stop hook (closes dangling session entries).
+#                           #   yes — register on every setup (default)
+#                           #   no  — never register; setup also removes a
+#                           #         live registration (persistent opt-out;
+#                           #         --no-team stays a one-shot teardown, #2677)
+#
+# ─── Plan-tune hooks ─────────────────────────────────────────────────
+# plan_tune_hooks: prompt   # Controls whether ./setup installs the plan-tune
+#                           #   Claude Code hooks (PostToolUse capture +
+#                           #   PreToolUse preference enforcement).
+#                           #   prompt — ask on a real TTY, skip otherwise (default)
+#                           #   yes    — install non-interactively
+#                           #   no     — skip non-interactively
+#                           # Override per-run: ./setup --plan-tune-hooks /
+#                           #   --no-plan-tune-hooks, or env GSTACK_PLAN_TUNE_HOOKS.
+#
+# ─── Memorable recall bridge (opt-in, third party) ──────────────────
+# memorable_recall: off     # The gstack-side consent gate for the Memorable
+#                           #   UserPromptSubmit bridge (bin/gstack-memorable).
+#                           #   off — the hook does nothing, spawns nothing (default)
+#                           #   on  — the hook hands each prompt to the local
+#                           #         `memorable` CLI, receipted as memorable-recall
+#                           # Written by `gstack-memorable enable|disable`. An
+#                           # invalid value is REJECTED and the stored value kept:
+#                           # a typo must never flip a third-party consent.
+#                           # The vendor capture consent (`memorable enable`)
+#                           # is separate; gstack never sets it.
+#
+# ─── Claude skill overlay ────────────────────────────────────────────
+# claude_overlay_model: claude  # Claude model ID whose skill overlay ./setup
+#                           #   renders (e.g. claude-opus-4-8). Absent = the
+#                           #   generic claude overlay. Set it with
+#                           #   ./setup --claude-model <id>, which validates the
+#                           #   ID and re-renders; ./setup --claude-model claude
+#                           #   returns to the generic overlay.
+#
+# ─── Model policy (gstack-models shows the effective choices) ───────
+# Plan review tier: frontier | smart | host. host delegates to the CLI settings;
+# GSTACK_CLAUDE_MODEL / GSTACK_CODEX_MODEL still win.
+# plan_review_tier: frontier
+# Implementation recommendation: frontier | smart. Never switches your session.
+# implementation_tier: smart
+# Optional pins: model_frontier_claude, model_frontier_openai,
+# model_smart_claude and model_smart_openai. Leave pins absent for catalog defaults;
+# empty pins are invalid. gstack-models list prints copyable set/unset commands.
+# Invalid writes are rejected and preserve the stored value.
+# codex_effort:             # Codex reasoning effort for outside reviews and /codex:
+#                           #   minimal | low | medium | high | xhigh | max | ultra.
+#                           #   Absent = every gate keeps its effort. GSTACK_CODEX_EFFORT
+#                           #   overrides it per run, /codex --effort per request;
+#                           #   /spec keeps medium (120 s budget).
+# Docs: docs/model-policy.md
+#
 # ─── Advanced ────────────────────────────────────────────────────────
-# codex_reviews: enabled    # disabled = skip Codex adversarial reviews in /ship
+# codex_reviews: enabled    # Outside review (Codex or Claude Code by harness): sends
+#                           #   the review prompt and repository content to that model.
+#                           #   enabled (default; the first send prints a notice once):
+#                           #   the outside voice of every workflow may run.
+#                           #   disabled: the send binaries refuse (not_run,
+#                           #   consent_missing) and start no CLI and make no API call;
+#                           #   /review, /ship, /autoplan keep native passes; plan and
+#                           #   document reviews skip the extra step. Covers design
+#                           #   review, /ship design-lite, office hours and /spec.
+#                           #   /codex and /claude-code still run when you ask by name.
+#                           #   An unreadable config counts as disabled.
+#                           #   Invalid values preserve the old value.
+# browse_extension_id:      # Forks and self-built extensions: the 32-letter (a-p)
+#                           #   Chrome extension ID the browse sidebar terminal accepts.
+#                           #   Empty = the gstack extension. "" clears it.
+# design_detector_install_prompted: false
+#                           #   true once you answered the one-time offer from the
+#                           #   design skills to download the impeccable engine with
+#                           #   "never ask again"; flip back to false to be asked again.
+# design_detector: auto     # Deterministic design pre-pass through a user-installed
+#                           #   impeccable engine (/design-review, /review, /ship,
+#                           #   /design-html). auto = use the engine when the probe
+#                           #   finds one (gstack never installs or downloads it);
+#                           #   off = no probe, no scan, no hint, no /impeccable
+#                           #   handoff lines. An invalid value is REJECTED (existing
+#                           #   value preserved) so a typo cannot silently disable it.
 # gstack_contributor: false # true = file field reports when gstack misbehaves
 # skip_eng_review: false    # true = skip eng review gate in /ship (not recommended)
+#
+# ─── Browser extension ───────────────────────────────────────────────
+# browse_extension_id:      # Chrome extension ID the browse daemon trusts for
+#                           #   /extension-token and the terminal-agent /ws
+#                           #   (32 letters a-p). Empty = the published gstack
+#                           #   extension. Set it only for a fork or a
+#                           #   self-built extension; no environment variable
+#                           #   or project .env can change it. An invalid value
+#                           #   is REJECTED and the stored value kept.
+#
+# ─── /ship measure-then-fix loop ─────────────────────────────────────
+# A red eval case is measured alone before the full gate reruns
+# (scripts/ship-measure.ts; docs/TESTING_INTERNALS.md#ship-measure).
+# Bar (scripts/lib/measure-bar.ts): MEETS at 9/10 of the trials, MEETS-qualified
+# at 8/10 with every red qualifying, EXTEND at 7/10 (one more batch, pooled).
+# ship_measure_rule_trials: 10        # rule cases: trials per batch (MEETS 9 of 10)
+# ship_measure_behavior_panels: 4     # behavior cases: panels of 3 per batch
+#                           #   (12 trials; MEETS 11 of 12)
+# ship_measure_judge_outputs: 10      # judge cases: outputs per batch, each scored
+#                           #   by its median 3-sample panel (MEETS 9 of 10)
+# ship_measure_ask_per_trial_usd: 2   # ask first above this estimated cost per trial
+# ship_measure_budget_usd: 25         # estimated admission budget per red case
+#                           #   (baseline, extension, redispatch, repair rounds)
+# ship_measure_max_rounds: 3          # repair rounds before a named-red stop
+# ship_measure_sweep_cases: 5         # weekly off-ship sweep: cases measured (K)
+# ship_measure_sweep_budget_usd: 150  # weekly off-ship sweep: spend cap per 7 days
+# ship_rerun_backend: local # local | ubicloud — where free-suite flake reruns
+#                           #   run; ubicloud also needs UBICLOUD_API_KEY.
+#                           #   Invalid values are REJECTED (value kept).
+# test_backend: local       # local | ubicloud — where the full unit and E2E
+#                           #   tiers run (plan E2). The gstack-doctor cores row
+#                           #   recommends ubicloud under 8 cores; ubicloud
+#                           #   needs UBICLOUD_API_KEY and scripts/ubicloud/.
+#                           #   Invalid values are REJECTED (value kept).
+# ship_greptile_early: true # true | false — when the repo uses Greptile, /ship
+#                           #   pushes and opens a draft PR after its free tests
+#                           #   so Greptile reviews in parallel (a public repo
+#                           #   asks once). false keeps the old order.
+#                           #   Invalid values are REJECTED (value kept).
 #
 # ─── Workspace-aware ship ────────────────────────────────────────────
 # workspace_root: $HOME/conductor/workspaces  # Where /ship looks for sibling
@@ -98,69 +285,738 @@ lookup_default() {
     auto_upgrade) echo "false" ;;
     update_check) echo "true" ;;
     skill_prefix) echo "false" ;;
-    checkpoint_mode) echo "explicit" ;;
-    checkpoint_push) echo "false" ;;
+    explain_level) echo "default" ;;
+    plan_mode_preamble) echo "on" ;; # on | off — off drops the plan-mode preamble on the next ./setup (#3168)
     codex_reviews) echo "enabled" ;;
+    design_detector) echo "auto" ;; # auto | off — impeccable engine pre-pass in the design skills
+    design_detector_install_prompted) echo "false" ;; # true once the user answered the one-time engine install offer with "never ask again"
     gstack_contributor) echo "false" ;;
     skip_eng_review) echo "false" ;;
     workspace_root) echo "$HOME/conductor/workspaces" ;;
     cross_project_learnings) echo "" ;; # intentionally empty → unset triggers first-time prompt
     artifacts_sync_mode) echo "off" ;;
     artifacts_sync_mode_prompted) echo "false" ;;
-    *) echo "" ;;
+    artifacts_sync_removals) echo "off" ;; # on | off — publish removals of synced files gone from disk
+    plan_tune_hooks) echo "prompt" ;; # prompt | yes | no — controls ./setup plan-tune hook install
+    timeline_stop_hook) echo "yes" ;; # yes | no — controls ./setup timeline Stop hook registration (#2677)
+
+    redact_repo_visibility) echo "" ;; # empty → fall through to gh/glab detection
+    redact_prepush_hook) echo "false" ;;
+    pair_agent) echo "off" ;; # remote tunnel consent — fail-closed until /pair-agent asks
+    memorable_recall) echo "off" ;; # on | off — Memorable bridge gate, fail-closed until `gstack-memorable enable`
+    founder_resources) echo "true" ;; # office-hours resource pitch — #538 permanent opt-out sets false
+    browse_extension_id) echo "" ;; # empty → browse trusts gstack's own extension ID (D1)
+    claude_overlay_model) echo "claude" ;; # set only by ./setup --claude-model; presence via `has`
+    # Brain-aware planning (v1.48 / T5+T10+T16). Defaults documented inline:
+    #   brain_trust_policy@<endpoint-id>  — unset on fresh install; setup-gbrain
+    #                                writes 'personal' for local engines,
+    #                                asks the user for remote-ambiguous.
+    #   salience_allowlist          — empty falls through to
+    #                                SALIENCE_DEFAULT_ALLOWLIST (D9).
+    #   user_slug_at_<endpoint-id>  — empty triggers resolve-user-slug
+    #                                fallback chain (D4 A3) on first call.
+    brain_trust_policy*) echo "unset" ;;
+    salience_allowlist) echo "" ;;
+    user_slug_at_*) echo "" ;;
+    # Read by skill preambles but missing from this table, so they fell through
+    # to the catch-all and came back "" with exit 0. Values below are the ones
+    # the callers already assume in their own `|| echo "<default>"` fallback.
+    question_tuning) echo "false" ;;
+    team_mode) echo "false" ;;
+    transcript_ingest_mode) echo "off" ;; # recent | all | off | new@<UTC> [+repos] — transcript consent; absent = not consented (use `has`)
+    transcript_repos) echo "" ;; # empty = every repo; comma-separated canonical remotes narrow transcript ingest
+    # repo_mode: EMPTY is load-bearing — gstack-repo-mode treats any non-empty
+    # answer as a user override and skips its own classification entirely, so
+    # a synthesized "unknown" default turns the classifier into dead code.
+    # Empty + exit 0 = "no override set, go classify".
+    repo_mode) echo "" ;;
+    # /ship measure-then-fix loop (scripts/ship-measure.ts reads these).
+    ship_measure_rule_trials) echo "10" ;;
+    ship_measure_behavior_panels) echo "4" ;;
+    ship_measure_judge_outputs) echo "10" ;;
+    ship_measure_ask_per_trial_usd) echo "2" ;;
+    ship_measure_budget_usd) echo "25" ;;
+    ship_measure_max_rounds) echo "3" ;;
+    ship_measure_sweep_cases) echo "5" ;;
+    ship_measure_sweep_budget_usd) echo "150" ;;
+    ship_rerun_backend) echo "local" ;; # local | ubicloud (Ubicloud spend is opt-in)
+    test_backend) echo "local" ;; # local | ubicloud — full unit/E2E tiers (plan E2)
+    plan_review_tier) echo "frontier" ;; # frontier | smart | host — lib/model-policy.ts reads it strictly
+    implementation_tier) echo "smart" ;; # frontier | smart
+    model_frontier_claude|model_frontier_openai|model_smart_claude|model_smart_openai) echo "" ;; # empty = shipped catalog ID (gstack-models list)
+    codex_effort) echo "" ;; # empty = each gate's own effort; /codex --effort, then GSTACK_CODEX_EFFORT, win (gstack-codex-probe run-with-timeout --effort)
+    ship_greptile_early) echo "true" ;; # true | false — /ship's early Greptile PR
+    # Unknown key: exit non-zero instead of printing "". The fallback pattern
+    # the preambles use,
+    #   VAR=$(gstack-config get <key> 2>/dev/null || echo "<default>")
+    # only fires on a non-zero exit, so a catch-all echoing "" with exit 0 left
+    # VAR empty and the written default unreachable.
+    # Deliberately *only* the unknown-key path: the keys above whose default is
+    # intentionally empty (cross_project_learnings, salience_allowlist,
+    # user_slug_at_*, redact_repo_visibility) keep exit 0, because "" is their
+    # real answer and their callers rely on it.
+    *) return 1 ;;
   esac
+}
+
+# ──────────────────────────────────────────────────────────────────────
+# Brain-integration helpers (T5+T10+T16)
+# ──────────────────────────────────────────────────────────────────────
+
+# Compute sha8 of a string. Used for endpoint hashing.
+# shasum is macOS/perl; most Linux distros ship only coreutils sha256sum —
+# resolve whichever exists (same fallback chain as the codex-probe timeout
+# wrapper). Without this, any Linux user with a git email hit exit 127 in
+# resolve-user-slug's Layer-3 fallback.
+sha8_of() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    printf '%s' "$1" | sha256sum | cut -c1-8
+  else
+    printf '%s' "$1" | shasum -a 256 | cut -c1-8
+  fi
+}
+
+# Detect the active brain endpoint hash. Reads ~/.claude.json for the gbrain
+# MCP server URL. Falls back to the literal 'local' when no MCP is configured.
+endpoint_hash() {
+  _claude_json="$HOME/.claude.json"
+  if [ -f "$_claude_json" ] && command -v jq >/dev/null 2>&1; then
+    _url=$(jq -r '.mcpServers.gbrain.url // .mcpServers.gbrain.transport.url // empty' "$_claude_json" 2>/dev/null)
+    if [ -n "$_url" ] && [ "$_url" != "null" ]; then
+      sha8_of "$_url"
+      return 0
+    fi
+  fi
+  printf '%s' "local"
+}
+
+# Detect endpoint hash collisions. When two distinct endpoints share the same
+# sha8 prefix (rare but possible), escalate to sha16 by emitting the longer
+# hash. Detection: scan config file for existing brain_trust_policy@<hash> or
+# user_slug_at_<hash> keys; if any non-active hash equals the active sha8 but
+# would differ at sha16, the active endpoint needs sha16.
+endpoint_hash_with_collision_check() {
+  _active=$(endpoint_hash)
+  if [ "$_active" = "local" ]; then
+    printf '%s' "$_active"
+    return 0
+  fi
+  # If a different endpoint (different URL) shares this sha8, escalate.
+  # We only catch this when the config has another endpoint recorded.
+  _matching=$(grep -E "^(brain_trust_policy|user_slug_at)@${_active}" "$CONFIG_FILE" 2>/dev/null | head -1 || true)
+  _claude_json="$HOME/.claude.json"
+  if [ -n "$_matching" ] && [ -f "$_claude_json" ] && command -v jq >/dev/null 2>&1; then
+    _url=$(jq -r '.mcpServers.gbrain.url // .mcpServers.gbrain.transport.url // empty' "$_claude_json" 2>/dev/null)
+    if command -v sha256sum >/dev/null 2>&1; then
+      _sha16=$(printf '%s' "$_url" | sha256sum | cut -c1-16)
+    else
+      _sha16=$(printf '%s' "$_url" | shasum -a 256 | cut -c1-16)
+    fi
+    # Look for any sha16-namespaced key that conflicts. If a stored sha16 exists
+    # and differs from current sha16, that's the collision evidence; emit sha16.
+    _stored16=$(grep -E "^(brain_trust_policy|user_slug_at)@${_sha16}" "$CONFIG_FILE" 2>/dev/null | head -1 || true)
+    if [ -n "$_stored16" ]; then
+      printf '%s' "$_sha16"
+      return 0
+    fi
+  fi
+  printf '%s' "$_active"
+}
+
+# Resolve the user-slug per D4 A3 chain:
+#   1. mcp__gbrain__whoami.client_name (best effort via gbrain CLI shell-out)
+#   2. $USER env
+#   3. sha8($(git config user.email))
+#   4. anonymous-<sha8(hostname)>
+# Persists result via gstack-config set user_slug_at_<endpoint-hash> on first call.
+resolve_user_slug() {
+  _hash=$(endpoint_hash_with_collision_check)
+  _stored=$(grep -E "^user_slug_at_${_hash}:" "$CONFIG_FILE" 2>/dev/null | tail -1 | awk '{print $2}' | tr -d '[:space:]' || true)
+  if [ -n "$_stored" ]; then
+    printf '%s' "$_stored"
+    return 0
+  fi
+
+  _slug=""
+
+  # Layer 1: gbrain whoami
+  if command -v gbrain >/dev/null 2>&1; then
+    _whoami=$(gbrain whoami --json 2>/dev/null || true)
+    if [ -n "$_whoami" ] && command -v jq >/dev/null 2>&1; then
+      _client_name=$(printf '%s' "$_whoami" | jq -r '.client_name // .token_name // empty' 2>/dev/null || true)
+      if [ -n "$_client_name" ] && [ "$_client_name" != "null" ]; then
+        _slug=$(printf '%s' "$_client_name" | tr '[:upper:] ' '[:lower:]-' | tr -dc '[:alnum:]-')
+      fi
+    fi
+  fi
+
+  # Layer 2: $USER
+  if [ -z "$_slug" ] && [ -n "${USER:-}" ]; then
+    _slug=$(printf '%s' "$USER" | tr '[:upper:] ' '[:lower:]-' | tr -dc '[:alnum:]-')
+  fi
+
+  # Layer 3: sha8 of git email
+  if [ -z "$_slug" ]; then
+    _email=$(git config user.email 2>/dev/null || true)
+    if [ -n "$_email" ]; then
+      _slug="email-$(sha8_of "$_email")"
+    fi
+  fi
+
+  # Layer 4: anonymous-<sha8(hostname)>
+  if [ -z "$_slug" ]; then
+    _slug="anonymous-$(sha8_of "$(hostname 2>/dev/null || echo unknown)")"
+  fi
+
+  # Persist via the locked read-modify-write (no recursion into `set`).
+  config_lock
+  config_edit_begin
+  if [ -z "$(_cfg_get "user_slug_at_${_hash}")" ]; then
+    _cfg_put "user_slug_at_${_hash}" "$_slug"
+    config_edit_commit
+  else
+    rm -f "$_cfg_tmp"
+  fi
+  config_unlock
+
+  printf '%s' "$_slug"
+}
+
+# The one reader (bin/gstack-state-root.sh): last `key:` line in the resolved
+# root, except privacy keys, which take the most restrictive value across roots.
+read_config_value() {
+  gstack_read_config_key "$1"
+}
+
+# ── Config writes: one lock, one read-modify-write rename ──────────────────
+# Every mutation of config.yaml (set, unset, the transcript_repos pair, the
+# user-slug writer) holds an atomic mkdir lock and replaces the file with one
+# rename, so concurrent writers never lose each other's keys and an
+# interrupted write leaves the old file. The pid file holds "<pid> <epoch>";
+# a lock whose holder is dead or older than 10 s is taken over. No flock(1):
+# stock macOS does not ship it.
+CONFIG_LOCK="$STATE_DIR/.config-yaml.lock"
+_config_locked=""
+
+config_lock() {
+  mkdir -p "$STATE_DIR"
+  local waited=0 held pid ts stale
+  while ! mkdir "$CONFIG_LOCK" 2>/dev/null; do
+    if [ ! -w "$STATE_DIR" ]; then
+      echo "Error: cannot write to $STATE_DIR (its config lock could not be created). Existing value left unchanged." >&2
+      exit 1
+    fi
+    waited=$(( waited + 1 ))
+    if [ "$waited" -gt 400 ]; then
+      echo "Error: $CONFIG_FILE is locked by another gstack-config ($(cat "$CONFIG_LOCK/pid" 2>/dev/null || echo 'unknown holder')). Existing value left unchanged. fix: retry, or remove $CONFIG_LOCK if no gstack-config is running." >&2
+      exit 1
+    fi
+    held=$(cat "$CONFIG_LOCK/pid" 2>/dev/null || true)
+    pid=""; ts=""; stale=""
+    case "$held" in *" "*) pid="${held%% *}"; ts="${held#* }"; ts="${ts%%[!0-9]*}" ;; esac
+    if [ -n "$pid" ]; then
+      if ! kill -0 "$pid" 2>/dev/null; then stale=1
+      elif [ -n "$ts" ] && [ $(( $(date +%s) - ts )) -gt 10 ]; then stale=1; fi
+    elif [ "$waited" -gt 200 ]; then
+      stale=1
+    fi
+    # Take over only the lock we judged: a holder that changed meanwhile is live.
+    if [ -n "$stale" ] && [ "$(cat "$CONFIG_LOCK/pid" 2>/dev/null || true)" = "$held" ]; then
+      rm -rf "$CONFIG_LOCK" 2>/dev/null || true
+      continue
+    fi
+    sleep 0.05
+  done
+  printf '%s %s\n' "$$" "$(date +%s)" > "$CONFIG_LOCK/pid"
+  _config_locked=1
+  trap 'config_unlock' EXIT
+}
+
+config_unlock() {
+  [ -n "$_config_locked" ] || return 0
+  rm -rf "$CONFIG_LOCK" 2>/dev/null || true
+  _config_locked=""
+}
+
+# config_edit_begin — copy config.yaml (or the annotated header for a new
+# file) to a temp file beside it; edits go there until config_edit_commit.
+config_edit_begin() {
+  _cfg_tmp="$(mktemp "$STATE_DIR/.config.yaml.XXXXXX")"
+  if [ -f "$CONFIG_FILE" ]; then cat "$CONFIG_FILE" > "$_cfg_tmp"; else printf '%s' "$CONFIG_HEADER" > "$_cfg_tmp"; fi
+}
+
+config_edit_commit() {
+  mv "$_cfg_tmp" "$CONFIG_FILE"
+}
+
+# _cfg_get KEY — last value of KEY in the temp file ("" when absent).
+_cfg_get() {
+  awk -v k="$1" 'BEGIN { n = length(k) + 1 } substr($0, 1, n) == k ":" { v = substr($0, n + 1) } END { sub(/^[ \t]+/, "", v); sub(/[ \t\r]+$/, "", v); print v }' "$_cfg_tmp"
+}
+
+# _cfg_put KEY VALUE — replace every KEY line in the temp file, or append one.
+# The value travels through ENVIRON so awk applies no escape processing.
+_cfg_put() {
+  _CFG_V="$2" awk -v k="$1" 'BEGIN { n = length(k) + 1; v = ENVIRON["_CFG_V"] } substr($0, 1, n) == k ":" { print k ": " v; done = 1; next } { print } END { if (!done) print k ": " v }' "$_cfg_tmp" > "$_cfg_tmp.n"
+  mv "$_cfg_tmp.n" "$_cfg_tmp"
+}
+
+_cfg_del() {
+  awk -v k="$1" 'BEGIN { n = length(k) + 1 } substr($0, 1, n) != k ":"' "$_cfg_tmp" > "$_cfg_tmp.n"
+  mv "$_cfg_tmp.n" "$_cfg_tmp"
+}
+
+# ── Transcript consent grammar ─────────────────────────────────────────────
+# transcript_ingest_mode = <base>[@<YYYY-MM-DDTHH:MM:SSZ>][+repos]; base is
+# recent, all, off or new. `@` is required for new and invalid otherwise; off
+# never carries +repos. `set` takes the canonical lowercase form (readers in
+# lib/transcript-consent.ts are case-insensitive).
+valid_utc_second() {
+  [[ "$1" =~ ^([0-9]{4})-([0-9]{2})-([0-9]{2})T([0-9]{2}):([0-9]{2}):([0-9]{2})Z$ ]] || return 1
+  local y=$((10#${BASH_REMATCH[1]})) m=$((10#${BASH_REMATCH[2]})) d=$((10#${BASH_REMATCH[3]}))
+  local hh=$((10#${BASH_REMATCH[4]})) mm=$((10#${BASH_REMATCH[5]})) ss=$((10#${BASH_REMATCH[6]})) dim=31
+  [ "$m" -ge 1 ] && [ "$m" -le 12 ] && [ "$hh" -le 23 ] && [ "$mm" -le 59 ] && [ "$ss" -le 59 ] || return 1
+  case "$m" in
+    4|6|9|11) dim=30 ;;
+    2) dim=28; if [ $((y % 4)) -eq 0 ] && { [ $((y % 100)) -ne 0 ] || [ $((y % 400)) -eq 0 ]; }; then dim=29; fi ;;
+  esac
+  [ "$d" -ge 1 ] && [ "$d" -le "$dim" ]
+}
+
+# valid_transcript_mode VALUE — canonical grammar check (exit 0 = valid).
+valid_transcript_mode() {
+  local v="$1" base
+  base="${v%+repos}"
+  case "$base" in
+    recent|all) ;;
+    off) [ "$base" = "$v" ] || return 1 ;;
+    new@*) valid_utc_second "${base#new@}" || return 1 ;;
+    *) return 1 ;;
+  esac
+}
+
+# canonical_remote URL — same rules as canonicalizeRemote in
+# lib/gstack-memory-helpers.ts (test/transcript-consent.test.ts keeps them equal).
+canonical_remote() {
+  local s="$1"
+  s="${s#"${s%%[![:space:]]*}"}"; s="${s%"${s##*[![:space:]]}"}"
+  s="${s#[\"\']}"; s="${s%[\"\']}"
+  if [[ "$s" =~ ^[^@[:space:]]+@([^:]+):(.+)$ ]]; then
+    s="${BASH_REMATCH[1]}/${BASH_REMATCH[2]}"
+  else
+    s=$(printf '%s' "$s" | sed -E 's#^[a-zA-Z][a-zA-Z0-9+.-]*://##; s#^[^@/]+@##')
+  fi
+  printf '%s' "$s" | sed -E 's#/+$##; s#\.[gG][iI][tT]$##; s#/+$##; s#/{2,}#/#g' | tr '[:upper:]' '[:lower:]'
+}
+
+# transcript_marker_sync — keep the +repos marker on transcript_ingest_mode in
+# step with transcript_repos inside the temp file: present while an allowlist
+# exists and the base consents, absent otherwise. Unrecognized values are
+# left untouched (they are not consent either way).
+transcript_marker_sync() {
+  local mode list base
+  mode=$(_cfg_get transcript_ingest_mode)
+  [ -n "$mode" ] || return 0
+  valid_transcript_mode "$mode" || return 0
+  list=$(_cfg_get transcript_repos)
+  base="${mode%+repos}"
+  if [ -n "$list" ] && [ "$base" != "off" ]; then _cfg_put transcript_ingest_mode "$base+repos"
+  else _cfg_put transcript_ingest_mode "$base"; fi
+}
+
+_STATE_DOC="https://github.com/garrytan/gstack/blob/main/docs/state-root.md"
+_SELF="$(cd "$(dirname "$0")" && pwd)/gstack-config"
+
+# One line when the root-selecting variables name different directories.
+report_root_disagreement() {
+  local _v _val _set="" _first="" _disagrees=0
+  for _v in GSTACK_STATE_ROOT GSTACK_HOME GSTACK_STATE_DIR; do
+    eval "_val=\${$_v:-}"
+    [ -n "$_val" ] || continue
+    _set="$_set $_v=$_val"
+    if [ -z "$_first" ]; then _first="$_val"; elif [ "$_val" != "$_first" ]; then _disagrees=1; fi
+  done
+  [ "$_disagrees" -eq 1 ] || return 0
+  echo "# note: root-selecting variables disagree:$_set; using $STATE_DIR ($_gstack_sr_var wins). Explain: $(dirname "$_SELF")/gstack-paths --explain ($_STATE_DOC)"
 }
 
 case "${1:-}" in
   get)
+    if [ "${2:-}" = "--stored" ]; then
+      KEY="${3:-}"
+      [ -n "$KEY" ] || { echo "Usage: gstack-config get --stored <key>" >&2; exit 1; }
+      if ! printf '%s' "$KEY" | LC_ALL=C grep -qE '^[a-zA-Z0-9_]+(@[a-zA-Z0-9]+)?$'; then
+        echo "Error: key must contain only alphanumeric characters, underscores, and an optional @<endpoint-id> suffix" >&2
+        exit 1
+      fi
+      # Provenance without DEFAULTS: the stored value, or "unset". A config
+      # file that exists but cannot be read prints "unreadable" (exit 2), and
+      # a privacy key holding an unknown value is refused the same way, so a
+      # consent check never turns an unreadable file into the default.
+      _stored_roots="$STATE_DIR"
+      _gstack_config_rank "$KEY" x
+      if [ -n "$_gstack_cfg_rank" ]; then
+        gstack_legacy_root_select
+        [ -n "$_gstack_legacy_root" ] && _stored_roots="$_stored_roots
+$_gstack_legacy_root"
+      fi
+      while IFS= read -r _stored_root; do
+        if [ -e "$_stored_root/config.yaml" ] && { [ ! -f "$_stored_root/config.yaml" ] || [ ! -r "$_stored_root/config.yaml" ]; }; then
+          echo "gstack-config: cannot read $_stored_root/config.yaml, so $KEY is unknown. fix: make it a readable file, then re-run (https://github.com/garrytan/gstack/blob/main/docs/troubleshooting.md#outside-review-consent-missing)" >&2
+          printf 'unreadable'; exit 2
+        fi
+      done <<< "$_stored_roots"
+      gstack_config_select "$KEY" || true
+      VALUE="$_gstack_cfg_value"
+      if [ -z "$VALUE" ]; then printf 'unset'; exit 0; fi
+      _gstack_config_rank "$KEY" "$VALUE"
+      if [ "$_gstack_cfg_rank" = "-1" ]; then
+        echo "gstack-config: $KEY is '$VALUE' in ${_gstack_cfg_root:+$_gstack_cfg_root/}config.yaml, which is not a recognized value. fix: gstack-config set $KEY <value> (or remove that line) (https://github.com/garrytan/gstack/blob/main/docs/troubleshooting.md#outside-review-consent-missing)" >&2
+        printf 'unreadable'; exit 2
+      fi
+      printf '%s' "$VALUE"
+      exit 0
+    fi
     KEY="${2:?Usage: gstack-config get <key>}"
-    # Validate key (alphanumeric + underscore only)
-    if ! printf '%s' "$KEY" | grep -qE '^[a-zA-Z0-9_]+$'; then
-      echo "Error: key must contain only alphanumeric characters and underscores" >&2
+    # Validate key (alphanumeric + underscore + optional @<endpoint-id> suffix for
+    # endpoint-namespaced keys introduced by the brain-aware planning layer).
+    # Endpoint ids are sha8/sha16 hex for remote MCP URLs, or the literal
+    # "local" for stdio/PGLite engines (see endpoint_hash).
+    if ! printf '%s' "$KEY" | LC_ALL=C grep -qE '^[a-zA-Z0-9_]+(@[a-zA-Z0-9]+)?$'; then
+      echo "Error: key must contain only alphanumeric characters, underscores, and an optional @<endpoint-id> suffix" >&2
       exit 1
     fi
-    VALUE=$(grep -E "^${KEY}:" "$CONFIG_FILE" 2>/dev/null | tail -1 | awk '{print $2}' | tr -d '[:space:]' || true)
+    VALUE=$(read_config_value "$KEY" || true)
     if [ -z "$VALUE" ]; then
-      VALUE=$(lookup_default "$KEY")
+      # lookup_default exits non-zero for a key it does not know. Propagate
+      # that, so the caller's `|| echo "<default>"` can fire. A known key whose
+      # default is empty still exits 0 and prints "".
+      if ! VALUE=$(lookup_default "$KEY"); then
+        exit 1
+      fi
     fi
     printf '%s' "$VALUE"
     ;;
+  has)
+    KEY="${2:?Usage: gstack-config has <key>}"
+    if ! printf '%s' "$KEY" | LC_ALL=C grep -qE '^[a-zA-Z0-9_]+(@[a-zA-Z0-9]+)?$'; then
+      echo "Error: key must contain only alphanumeric characters, underscores, and an optional @<endpoint-id> suffix" >&2
+      exit 1
+    fi
+    grep -qE "^${KEY}:" "$CONFIG_FILE" 2>/dev/null
+    ;;
   set)
     KEY="${2:?Usage: gstack-config set <key> <value>}"
-    VALUE="${3:?Usage: gstack-config set <key> <value>}"
-    # Validate key (alphanumeric + underscore only)
-    if ! printf '%s' "$KEY" | grep -qE '^[a-zA-Z0-9_]+$'; then
-      echo "Error: key must contain only alphanumeric characters and underscores" >&2
+    if [ "$#" -lt 3 ]; then
+      echo "Usage: gstack-config set <key> <value>" >&2
       exit 1
+    fi
+    VALUE="$3"
+    # A config value is one non-empty line (disabled_skills may be empty: it
+    # clears the list). Reject rather than truncate, so a bad value never
+    # replaces the stored one.
+    if [ -z "$VALUE" ] && [ "$KEY" != "disabled_skills" ] && [ "$KEY" != "browse_extension_id" ]; then
+      echo "Error: $KEY value is empty. Existing value left unchanged." >&2
+      exit 1
+    fi
+    case "$VALUE" in
+      *$'\n'*)
+        echo "Error: $KEY value contains a newline. Existing value left unchanged." >&2
+        exit 1
+        ;;
+    esac
+    # Validate key (alphanumeric + underscore + optional @<endpoint-id> suffix).
+    # Accepts hex hashes and the literal "local" from endpoint_hash.
+    if ! printf '%s' "$KEY" | LC_ALL=C grep -qE '^[a-zA-Z0-9_]+(@[a-zA-Z0-9]+)?$'; then
+      echo "Error: key must contain only alphanumeric characters, underscores, and an optional @<endpoint-id> suffix" >&2
+      exit 1
+    fi
+    # Validate brain_trust_policy value domain (D4 / D11)
+    if printf '%s' "$KEY" | grep -qE '^brain_trust_policy(@|$)' && \
+       [ "$VALUE" != "personal" ] && [ "$VALUE" != "shared" ] && [ "$VALUE" != "unset" ]; then
+      echo "Warning: brain_trust_policy '$VALUE' not recognized. Valid values: personal, shared, unset. Using unset." >&2
+      VALUE="unset"
     fi
     # V1: whitelist values for keys with closed value domains. Unknown values warn + default.
     if [ "$KEY" = "explain_level" ] && [ "$VALUE" != "default" ] && [ "$VALUE" != "terse" ]; then
       echo "Warning: explain_level '$VALUE' not recognized. Valid values: default, terse. Using default." >&2
       VALUE="default"
     fi
+    if [ "$KEY" = "plan_mode_preamble" ] && [ "$VALUE" != "on" ] && [ "$VALUE" != "off" ]; then
+      echo "Warning: plan_mode_preamble '$VALUE' not recognized. Valid values: on, off. Using on." >&2
+      VALUE="on"
+    fi
     if [ "$KEY" = "artifacts_sync_mode" ] && [ "$VALUE" != "off" ] && [ "$VALUE" != "artifacts-only" ] && [ "$VALUE" != "full" ]; then
       echo "Warning: artifacts_sync_mode '$VALUE' not recognized. Valid values: off, artifacts-only, full. Using off." >&2
       VALUE="off"
     fi
-    mkdir -p "$STATE_DIR"
-    # Write annotated header on first creation
-    if [ ! -f "$CONFIG_FILE" ]; then
-      printf '%s' "$CONFIG_HEADER" > "$CONFIG_FILE"
+    if [ "$KEY" = "artifacts_sync_removals" ] && [ "$VALUE" != "on" ] && [ "$VALUE" != "off" ]; then
+      echo "Warning: artifacts_sync_removals '$VALUE' not recognized. Valid values: on, off. Using off." >&2
+      VALUE="off"
     fi
-    # Escape sed special chars in value and drop embedded newlines
-    ESC_VALUE="$(printf '%s' "$VALUE" | head -1 | sed 's/[&/\]/\\&/g')"
-    if grep -qE "^${KEY}:" "$CONFIG_FILE" 2>/dev/null; then
-      # Portable in-place edit (BSD sed uses -i '', GNU sed uses -i without arg)
-      _tmpfile="$(mktemp "${CONFIG_FILE}.XXXXXX")"
-      sed "/^${KEY}:/s/.*/${KEY}: ${ESC_VALUE}/" "$CONFIG_FILE" > "$_tmpfile" && mv "$_tmpfile" "$CONFIG_FILE"
-    else
-      echo "${KEY}: ${VALUE}" >> "$CONFIG_FILE"
+    # redact_repo_visibility: a LOCAL override for repos gh/glab can't read (e.g.
+    # self-hosted GitLab). It lives in ~/.gstack/config.yaml (never committed), so
+    # it can't be used to weaken the gate repo-wide for other contributors.
+    if [ "$KEY" = "redact_repo_visibility" ] && [ "$VALUE" != "public" ] && [ "$VALUE" != "private" ] && [ "$VALUE" != "unknown" ]; then
+      echo "Warning: redact_repo_visibility '$VALUE' not recognized. Valid values: public, private, unknown. Using unknown." >&2
+      VALUE="unknown"
+    fi
+    if [ "$KEY" = "redact_prepush_hook" ] && [ "$VALUE" != "true" ] && [ "$VALUE" != "false" ]; then
+      echo "Warning: redact_prepush_hook '$VALUE' not recognized. Valid values: true, false. Using false." >&2
+      VALUE="false"
+    fi
+    if [ "$KEY" = "pair_agent" ] && [ "$VALUE" != "on" ] && [ "$VALUE" != "off" ]; then
+      echo "Warning: pair_agent '$VALUE' not recognized. Valid values: on, off. Using off." >&2
+      VALUE="off"
+    fi
+    if [ "$KEY" = "founder_resources" ] && [ "$VALUE" != "true" ] && [ "$VALUE" != "false" ]; then
+      echo "Warning: founder_resources '$VALUE' not recognized. Valid values: true, false. Using true." >&2
+      VALUE="true"
+    fi
+    if [ "$KEY" = "plan_tune_hooks" ] && [ "$VALUE" != "prompt" ] && [ "$VALUE" != "yes" ] && [ "$VALUE" != "no" ]; then
+      echo "Warning: plan_tune_hooks '$VALUE' not recognized. Valid values: prompt, yes, no. Using prompt." >&2
+      VALUE="prompt"
+    fi
+    if [ "$KEY" = "timeline_stop_hook" ] && [ "$VALUE" != "yes" ] && [ "$VALUE" != "no" ]; then
+      echo "Warning: timeline_stop_hook '$VALUE' not recognized. Valid values: yes, no. Using yes." >&2
+      VALUE="yes"
+    fi
+    # codex_reviews controls workflow outside CLI calls. Unlike the warn-and-default keys above,
+    # an invalid value is REJECTED and the existing setting is left unchanged — a typo
+    # must never silently flip the switch and turn paid Codex calls on or off.
+    if [ "$KEY" = "codex_reviews" ] && [ "$VALUE" != "enabled" ] && [ "$VALUE" != "disabled" ]; then
+      echo "Error: codex_reviews '$VALUE' not recognized. Valid values: enabled, disabled. Existing value left unchanged." >&2
+      exit 1
+    fi
+    # codex_effort feeds model_reasoning_effort on paid Codex calls: reject a
+    # typo instead of coercing it (the probe refuses an invalid stored value too).
+    if [ "$KEY" = "codex_effort" ]; then
+      case "$VALUE" in
+        minimal|low|medium|high|xhigh|max|ultra) ;;
+        *) echo "Error: codex_effort '$VALUE' not recognized. Valid values: minimal, low, medium, high, xhigh, max, ultra. Existing value left unchanged. fix: gstack-config unset codex_effort restores each gate's own effort (https://github.com/garrytan/gstack/blob/main/docs/model-policy.md#reasoning-effort)" >&2
+           exit 1 ;;
+      esac
+    fi
+    case "$KEY" in
+      plan_review_tier|implementation_tier|model_frontier_claude|model_frontier_openai|model_smart_claude|model_smart_openai)
+        _mp_doc="https://github.com/garrytan/gstack/blob/main/docs/troubleshooting.md#model-policy-config"
+        VALUE="${VALUE#"${VALUE%%[![:space:]]*}"}"
+        VALUE="${VALUE%"${VALUE##*[![:space:]]}"}"
+        _mp_valid=1
+        case "$KEY" in
+          plan_review_tier) case "$VALUE" in frontier|smart|host) ;; *) _mp_valid="" ; _mp_rule="Valid values: frontier, smart, host." ;; esac ;;
+          implementation_tier) case "$VALUE" in frontier|smart) ;; *) _mp_valid="" ; _mp_rule="Valid values: frontier, smart." ;; esac ;;
+          *_claude) { [ "${#VALUE}" -le 512 ] && printf '%s' "$VALUE" | LC_ALL=C grep -qE '^[][A-Za-z0-9._:/@+-]+$'; } || { _mp_valid=""; _mp_rule="An Anthropic model ID is 1-512 characters from A-Z a-z 0-9 . _ : / @ + [ ] -."; } ;;
+          *_openai) printf '%s' "$VALUE" | LC_ALL=C grep -qE '^[A-Za-z0-9._:/-]{1,100}$' || { _mp_valid=""; _mp_rule="An OpenAI model ID is 1-100 characters from A-Z a-z 0-9 . _ : / -."; } ;;
+        esac
+        if [ -z "$VALUE" ]; then
+          echo "Error: $KEY value is empty. Existing value left unchanged. fix: gstack-config unset $KEY restores the default ($_mp_doc)" >&2
+          exit 1
+        fi
+        if [ -z "$_mp_valid" ]; then
+          echo "Error: $KEY '$VALUE' not recognized. $_mp_rule Existing value left unchanged. fix: gstack-config unset $KEY restores the default ($_mp_doc)" >&2
+          exit 1
+        fi ;;
+    esac
+    # The measure-loop controls bound paid spend: reject a typo instead of
+    # coercing it, so a bad value never changes how much /ship may spend.
+    case "$KEY" in
+      ship_measure_rule_trials|ship_measure_behavior_panels|ship_measure_judge_outputs|ship_measure_max_rounds|ship_measure_sweep_cases)
+        if ! printf '%s' "$VALUE" | LC_ALL=C grep -qE '^[1-9][0-9]*$'; then
+          echo "Error: $KEY '$VALUE' is not a positive integer. Existing value left unchanged." >&2
+          exit 1
+        fi ;;
+      ship_measure_ask_per_trial_usd|ship_measure_budget_usd|ship_measure_sweep_budget_usd)
+        if ! printf '%s' "$VALUE" | LC_ALL=C grep -qE '^([0-9]+(\.[0-9]+)?|\.[0-9]+)$' || ! printf '%s' "$VALUE" | LC_ALL=C grep -qE '[1-9]'; then
+          echo "Error: $KEY '$VALUE' is not a positive amount in USD (e.g. 25 or 2.50). Existing value left unchanged." >&2
+          exit 1
+        fi ;;
+      ship_greptile_early)
+        if [ "$VALUE" != "true" ] && [ "$VALUE" != "false" ]; then
+          echo "Error: ship_greptile_early '$VALUE' not recognized. Valid values: true, false. Existing value left unchanged." >&2
+          exit 1
+        fi ;;
+      ship_rerun_backend|test_backend)
+        if [ "$VALUE" != "local" ] && [ "$VALUE" != "ubicloud" ]; then
+          echo "Error: $KEY '$VALUE' not recognized. Valid values: local, ubicloud. Existing value left unchanged." >&2
+          exit 1
+        fi ;;
+    esac
+    # design_detector_install_prompted records "never ask again" for the one-time
+    # engine install offer. Rejecting a typo keeps the offer from silently coming
+    # back (or never coming back) because of a mistyped value.
+    if [ "$KEY" = "design_detector_install_prompted" ] && [ "$VALUE" != "true" ] && [ "$VALUE" != "false" ]; then
+      echo "Error: design_detector_install_prompted '$VALUE' not recognized. Valid values: true, false. Existing value left unchanged." >&2
+      exit 1
+    fi
+    # design_detector gates a third-party binary the user installed. Reject a typo
+    # rather than coerce it: "of" must not silently re-enable or disable the scan.
+    if [ "$KEY" = "design_detector" ] && [ "$VALUE" != "auto" ] && [ "$VALUE" != "off" ]; then
+      echo "Error: design_detector '$VALUE' not recognized. Valid values: auto, off. Existing value left unchanged." >&2
+      exit 1
+    fi
+    # cross_project_learnings: empty get is the first-run prompt sentinel.
+    # Skills enable only on the literal "true". A typo must not persist — that
+    # keeps the feature off and suppresses the prompt. Reject, like
+    # codex_reviews; do not coerce (a stored default still kills the sentinel).
+    if [ "$KEY" = "cross_project_learnings" ] && [ "$VALUE" != "true" ] && [ "$VALUE" != "false" ]; then
+      echo "Error: cross_project_learnings '$VALUE' not recognized. Valid values: true, false. Existing value left unchanged." >&2
+      exit 1
+    fi
+    # transcript_ingest_mode is a CONSENT key: recent/all/new@ let /sync-gbrain
+    # ingest coding-agent transcripts. Reject a typo; never coerce or store it.
+    if [ "$KEY" = "transcript_ingest_mode" ] && ! valid_transcript_mode "$VALUE"; then
+      echo "Error: transcript_ingest_mode '$VALUE' not recognized. Valid values: recent, all, off. Existing value left unchanged." >&2
+      echo "Also valid: new@<YYYY-MM-DDTHH:MM:SSZ> (only sessions that start after that UTC time, e.g. new@$(date -u +%Y-%m-%dT%H:%M:%SZ)). The +repos suffix follows transcript_repos; off never carries it. Docs: setup-gbrain/memory.md#transcripts" >&2
+      exit 1
+    fi
+    # transcript_repos narrows transcript consent to these repos. Each entry is
+    # stored as its canonical remote (host/owner/repo); an empty list would
+    # deny every repo, so it is rejected: `unset` clears the allowlist.
+    if [ "$KEY" = "transcript_repos" ]; then
+      _clean=""
+      _ifs="$IFS"; IFS=','
+      for _x in $VALUE; do
+        _x="$(canonical_remote "$_x")"
+        [ -n "$_x" ] || continue
+        case ",$_clean," in *",$_x,"*) ;; *) _clean="${_clean:+$_clean,}$_x" ;; esac
+      done
+      IFS="$_ifs"
+      if [ -z "$_clean" ]; then
+        echo "Error: transcript_repos '$VALUE' names no repo. Valid values: comma-separated git remotes (e.g. github.com/owner/repo). Existing value left unchanged. To allow every repo: gstack-config unset transcript_repos" >&2
+        exit 1
+      fi
+      VALUE="$_clean"
+    fi
+    # memorable_recall is a CONSENT key: `on` lets a Claude Code hook hand every
+    # prompt to a third-party binary. Reject like codex_reviews -- a typo must
+    # never flip consent in either direction, so nothing is coerced or stored.
+    if [ "$KEY" = "memorable_recall" ] && [ "$VALUE" != "on" ] && [ "$VALUE" != "off" ]; then
+      echo "Error: memorable_recall '$VALUE' not recognized. Valid values: on, off. Existing value left unchanged." >&2
+      exit 1
+    fi
+    # browse_extension_id (D1) decides which Chrome extension may reach the
+    # browse daemon's token route and terminal socket. Reject anything that is
+    # not a Chrome extension ID; "" clears the override.
+    if [ "$KEY" = "browse_extension_id" ] && [ -n "$VALUE" ] && ! printf '%s' "$VALUE" | LC_ALL=C grep -qE '^[a-p]{32}$'; then
+      echo "Error: browse_extension_id '$VALUE' is not a Chrome extension ID (32 letters a-p, shown on chrome://extensions). Existing value left unchanged." >&2
+      exit 1
+    fi
+    # disabled_skills (#1206): comma-separated skill names, one value for the
+    # key. Every name must be a real skill (typos get the closest name);
+    # gstack and gstack-upgrade can never be disabled; "" re-enables all.
+    # Rejected values leave the existing setting unchanged.
+    if [ "$KEY" = "disabled_skills" ]; then
+      _GSTACK_ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+      _known=" "
+      for _md in "$_GSTACK_ROOT_DIR"/*/SKILL.md.tmpl "$_GSTACK_ROOT_DIR"/*/SKILL.md; do
+        [ -f "$_md" ] || continue
+        _d="$(basename "$(dirname "$_md")")"
+        _n="$(sed -n '2,/^---$/ s/^name:[[:space:]]*//p' "$_md" | head -1 | tr -d '[:space:]')"
+        for _x in "$_d" "${_n:-$_d}"; do
+          case "$_known" in *" $_x "*) ;; *) _known="$_known$_x " ;; esac
+        done
+      done
+      _clean=""
+      for _x in $(printf '%s' "$VALUE" | tr ',' ' ' | tr -d "\"'"); do
+        _x="${_x#/}"
+        case "$_x" in
+          gstack|gstack-upgrade)
+            echo "Error: $_x cannot be disabled (it is how gstack upgrades and routes). Existing value left unchanged." >&2
+            exit 1 ;;
+        esac
+        _bare="${_x#gstack-}"
+        case "$_known" in
+          *" $_bare "*|*" $_x "*) ;;
+          *)
+            _best="$(for _k in $_known; do printf '%s\n' "$_k"; done | awk -v a="$_bare" '
+              function lev(s, t,   i, j, n, m, c, d, v) {
+                n = length(s); m = length(t)
+                for (i = 0; i <= n; i++) d[i, 0] = i
+                for (j = 0; j <= m; j++) d[0, j] = j
+                for (i = 1; i <= n; i++) for (j = 1; j <= m; j++) {
+                  c = (substr(s, i, 1) == substr(t, j, 1)) ? 0 : 1
+                  v = d[i-1, j] + 1; if (d[i, j-1] + 1 < v) v = d[i, j-1] + 1; if (d[i-1, j-1] + c < v) v = d[i-1, j-1] + c
+                  d[i, j] = v
+                }
+                return d[n, m]
+              }
+              { x = lev(a, $0); if (best == "" || x < bd) { bd = x; best = $0 } }
+              END { print best }')"
+            echo "Error: unknown skill '$_x' in disabled_skills. Did you mean '$_best'? Existing value left unchanged." >&2
+            exit 1 ;;
+        esac
+        case ",$_clean," in *",$_bare,"*) ;; *) _clean="${_clean:+$_clean,}$_bare" ;; esac
+      done
+      VALUE="$_clean"
+      for _x in $(printf '%s' "$_clean" | tr ',' ' '); do
+        for _tmpl in "$_GSTACK_ROOT_DIR"/*/SKILL.md.tmpl; do
+          [ -f "$_tmpl" ] || continue
+          _caller="$(basename "$(dirname "$_tmpl")")"
+          [ "$_caller" = "$_x" ] && continue
+          case ",$_clean," in *",$_caller,"*) continue ;; esac
+          if grep -qE "INVOKE_SKILL:$_x([^a-z-]|\$)|skills/gstack/$_x/(SKILL\.md|sections)" "$_tmpl" 2>/dev/null; then
+            echo "Warning: /$_caller uses /$_x. /$_x is no longer registered as a skill, but its files stay installed so /$_caller keeps working." >&2
+          fi
+        done
+      done
+    fi
+    # Locked read-modify-write; the annotated header is written on first creation.
+    config_lock
+    config_edit_begin
+    if [ "$KEY" = "transcript_ingest_mode" ] && [ "${VALUE%+repos}" != "$VALUE" ] && [ -z "$(_cfg_get transcript_repos)" ]; then
+      rm -f "$_cfg_tmp"
+      echo "Error: transcript_ingest_mode '$VALUE' needs a repo allowlist, but transcript_repos is not set. Existing value left unchanged. fix: gstack-config set transcript_repos <remotes>, then set transcript_ingest_mode ${VALUE%+repos}" >&2
+      exit 1
+    fi
+    _cfg_put "$KEY" "$VALUE"
+    # The allowlist and its +repos marker change together, in this one rename.
+    if [ "$KEY" = "transcript_ingest_mode" ] || [ "$KEY" = "transcript_repos" ]; then
+      transcript_marker_sync
+      if [ "$KEY" = "transcript_ingest_mode" ]; then VALUE="$(_cfg_get transcript_ingest_mode)"; fi
+    fi
+    config_edit_commit
+    config_unlock
+    SAFE_VALUE="$VALUE"
+    # Report only when another root still overrides the value just written.
+    gstack_config_select "$KEY"
+    if [ -n "$_gstack_cfg_root" ] && [ "$_gstack_cfg_root" != "$STATE_DIR" ] && [ "$_gstack_cfg_value" != "$SAFE_VALUE" ]; then
+      echo "gstack-config: set $KEY in $CONFIG_FILE, but $KEY is still '$_gstack_cfg_value': $_gstack_cfg_root/config.yaml sets that more restrictive value, and for privacy keys the most restrictive value across state roots wins." >&2
+      printf 'fix: GSTACK_STATE_ROOT=%q %q set %q %q (%s)\n' "$_gstack_cfg_root" "$_SELF" "$KEY" "$SAFE_VALUE" "$_STATE_DOC" >&2
     fi
     # Auto-relink skills when prefix setting changes (skip during setup to avoid recursive call)
-    if [ "$KEY" = "skill_prefix" ] && [ -z "${GSTACK_SETUP_RUNNING:-}" ]; then
+    if { [ "$KEY" = "skill_prefix" ] || [ "$KEY" = "disabled_skills" ]; } && [ -z "${GSTACK_SETUP_RUNNING:-}" ]; then
       GSTACK_RELINK="$(dirname "$0")/gstack-relink"
-      [ -x "$GSTACK_RELINK" ] && "$GSTACK_RELINK" || true
+      if [ -x "$GSTACK_RELINK" ] && ! "$GSTACK_RELINK"; then
+        echo "gstack-config: $KEY saved, but relinking the installed skills failed (see above), so skill names may not match yet. Retry: $GSTACK_RELINK" >&2
+      fi
+      # gstack-relink covers Claude installs; every other registered host
+      # applies the change on its next setup run.
+      if [ "$KEY" = "disabled_skills" ] && [ -f "$(dirname "$0")/gstack-install-registry.sh" ]; then
+        ( GSTACK_STATE_ROOT="$STATE_DIR"; . "$(dirname "$0")/gstack-install-registry.sh"
+          gstack_install_registry_rows | awk -F '\t' '$1 != "claude" { print "  apply to " $1 " (" $4 "): cd " $6 " && ./setup --host " $1 }' )
+      fi
     fi
+    # Installed skills are rendered by ./setup, so the preamble choice lands
+    # on its next run (every registered host).
+    if [ "$KEY" = "plan_mode_preamble" ] && [ -z "${GSTACK_SETUP_RUNNING:-}" ]; then
+      printf 'gstack-config: plan_mode_preamble=%s applies on the next ./setup run. Apply now: cd %q && ./setup --refresh-registered\n' "$VALUE" "$(cd "$(dirname "$0")/.." && pwd)"
+    fi
+    ;;
+  unset)
+    KEY="${2:?Usage: gstack-config unset <key>}"
+    if ! printf '%s' "$KEY" | LC_ALL=C grep -qE '^[a-zA-Z0-9_]+(@[a-zA-Z0-9]+)?$'; then
+      echo "Error: key must contain only alphanumeric characters, underscores, and an optional @<endpoint-id> suffix" >&2
+      exit 1
+    fi
+    [ -f "$CONFIG_FILE" ] || exit 0
+    config_lock
+    config_edit_begin
+    _cfg_del "$KEY"
+    # Clearing the allowlist drops the +repos marker in the same write.
+    if [ "$KEY" = "transcript_repos" ]; then transcript_marker_sync; fi
+    config_edit_commit
+    config_unlock
     ;;
   list)
     if [ -f "$CONFIG_FILE" ]; then
@@ -168,14 +1024,24 @@ case "${1:-}" in
     fi
     echo ""
     echo "# ─── Active values (including defaults for unset keys) ───"
+    report_root_disagreement
     for KEY in proactive routing_declined telemetry auto_upgrade update_check \
-               skill_prefix checkpoint_mode checkpoint_push codex_reviews \
-               gstack_contributor skip_eng_review workspace_root \
-               artifacts_sync_mode artifacts_sync_mode_prompted; do
-      VALUE=$(grep -E "^${KEY}:" "$CONFIG_FILE" 2>/dev/null | tail -1 | awk '{print $2}' | tr -d '[:space:]' || true)
+               skill_prefix explain_level plan_mode_preamble \
+               codex_reviews gstack_contributor skip_eng_review workspace_root \
+               artifacts_sync_mode artifacts_sync_mode_prompted artifacts_sync_removals plan_tune_hooks \
+               timeline_stop_hook design_detector design_detector_install_prompted memorable_recall \
+               browse_extension_id ship_measure_rule_trials ship_measure_behavior_panels \
+               ship_measure_judge_outputs ship_measure_ask_per_trial_usd ship_measure_budget_usd \
+               ship_measure_max_rounds ship_measure_sweep_cases ship_measure_sweep_budget_usd ship_rerun_backend test_backend \
+               plan_review_tier implementation_tier model_frontier_claude model_frontier_openai \
+               model_smart_claude model_smart_openai codex_effort; do
+      gstack_config_select "$KEY"
+      VALUE="$_gstack_cfg_value"
       SOURCE="default"
       if [ -n "$VALUE" ]; then
         SOURCE="set"
+        _gstack_config_rank "$KEY" x
+        [ -n "$_gstack_cfg_rank" ] && SOURCE="set, $_gstack_cfg_root"
       else
         VALUE=$(lookup_default "$KEY")
       fi
@@ -185,14 +1051,161 @@ case "${1:-}" in
   defaults)
     echo "# gstack-config defaults"
     for KEY in proactive routing_declined telemetry auto_upgrade update_check \
-               skill_prefix checkpoint_mode checkpoint_push codex_reviews \
-               gstack_contributor skip_eng_review workspace_root \
-               artifacts_sync_mode artifacts_sync_mode_prompted; do
+               skill_prefix explain_level plan_mode_preamble \
+               codex_reviews gstack_contributor skip_eng_review workspace_root \
+               artifacts_sync_mode artifacts_sync_mode_prompted artifacts_sync_removals plan_tune_hooks \
+               timeline_stop_hook design_detector design_detector_install_prompted memorable_recall \
+               browse_extension_id ship_measure_rule_trials ship_measure_behavior_panels \
+               ship_measure_judge_outputs ship_measure_ask_per_trial_usd ship_measure_budget_usd \
+               ship_measure_max_rounds ship_measure_sweep_cases ship_measure_sweep_budget_usd ship_rerun_backend test_backend \
+               plan_review_tier implementation_tier model_frontier_claude model_frontier_openai \
+               model_smart_claude model_smart_openai codex_effort; do
       printf '  %-24s %s\n' "$KEY:" "$(lookup_default "$KEY")"
     done
     ;;
+  endpoint-hash)
+    # Brain integration helper (T10): print active brain endpoint sha8
+    endpoint_hash_with_collision_check
+    ;;
+  resolve-user-slug)
+    # Brain integration helper (T16 / D4 A3): resolve + persist user-slug
+    resolve_user_slug
+    ;;
+  gbrain-refresh)
+    # Brain integration helper: re-detect gbrain installation state and
+    # persist to ~/.gstack/gbrain-detection.json. gen-skill-docs reads this
+    # file (when invoked with --respect-detection) to decide whether to
+    # render GBRAIN_CONTEXT_LOAD and GBRAIN_SAVE_RESULTS blocks in
+    # generated SKILL.md files.
+    #
+    # Run this after installing or uninstalling gbrain so your locally
+    # generated SKILL.md files match your installation state.
+    SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+    . "$SCRIPT_DIR/gstack-render-claude.sh" 2>/dev/null || { echo "$0: $SCRIPT_DIR/gstack-render-claude.sh is missing. fix: reinstall with ./setup or /gstack-upgrade" >&2; exit 1; }
+    _PLAN_MODE_ARG=""
+    [ "$("$0" get plan_mode_preamble 2>/dev/null || true)" != off ] || _PLAN_MODE_ARG="--plan-mode=off"
+    DETECT_BIN="$SCRIPT_DIR/gstack-gbrain-detect"
+    DETECTION_FILE="$STATE_DIR/gbrain-detection.json"
+    mkdir -p "$STATE_DIR"
+    if [ ! -x "$DETECT_BIN" ]; then
+      echo "gstack-gbrain-detect not found at $DETECT_BIN" >&2
+      exit 1
+    fi
+    if ! "$DETECT_BIN" > "$DETECTION_FILE.tmp.$$" 2>/dev/null; then
+      printf '{"gbrain_on_path":false,"gbrain_local_status":"no-cli"}\n' > "$DETECTION_FILE.tmp.$$"
+    fi
+    mv "$DETECTION_FILE.tmp.$$" "$DETECTION_FILE"
+
+    # Summarize for the user. Use python (already required elsewhere) to
+    # parse the JSON portably; fall back to grep if python is unavailable.
+    # The file goes in on stdin (E6, #1967): bash opens the path, so a native
+    # Windows Python under Git Bash never has to resolve an MSYS /c/... path.
+    PYTHON_CMD=$(command -v python3 || command -v python || true)
+    if [ -n "$PYTHON_CMD" ]; then
+      STATUS=$("$PYTHON_CMD" -c "import json,sys; d=json.load(sys.stdin); print(d.get('gbrain_local_status','unknown'))" < "$DETECTION_FILE" 2>/dev/null || echo unknown)
+      VERSION=$("$PYTHON_CMD" -c "import json,sys; d=json.load(sys.stdin); print(d.get('gbrain_version') or 'unknown')" < "$DETECTION_FILE" 2>/dev/null || echo unknown)
+    else
+      STATUS=$(grep -o '"gbrain_local_status":[[:space:]]*"[^"]*"' "$DETECTION_FILE" | sed 's/.*"\([^"]*\)"$/\1/')
+      VERSION=$(grep -o '"gbrain_version":[[:space:]]*"[^"]*"' "$DETECTION_FILE" | sed 's/.*"\([^"]*\)"$/\1/')
+      [ -z "$STATUS" ] && STATUS=unknown
+      [ -z "$VERSION" ] && VERSION=unknown
+    fi
+
+    case "$STATUS" in
+      ok|timeout|db-unreachable|thin-client|engine-locked)
+        # "timeout" = slow-but-healthy engine (#1964); "db-unreachable" =
+        # network/DNS failure with an intact config, transient like timeout
+        # (A2); "thin-client" =
+        # remote-HTTP MCP brain, no local engine by design (#2051);
+        # "engine-locked" = same class (#2456): PGLite is single-writer, so a
+        # live `gbrain serve` (typically an MCP server) holds the embedded DB.
+        # gbrain is installed and healthy; a transient lock must not strip
+        # brain blocks out of every SKILL.md. All get the same treatment as
+        # "ok", matching gstack-gbrain-detect --is-ok and gen-skill-docs.
+        echo "Detected gbrain v$VERSION (local-status: $STATUS)."
+        # Render brain-aware blocks into an UNTRACKED out-dir (#2569) and
+        # repoint the installed skills at it — the old in-place render wrote
+        # into TRACKED files of the global install checkout, so the checkout
+        # stayed permanently dirty and every upgrade grew a redundant stash.
+        # Guards (never mutate an arbitrary directory): the install must
+        # exist, not be a symlink (a symlinked install points at a dev
+        # worktree — bin/dev-setup owns that flow), and look like a real
+        # gstack clone.
+        INSTALL_DIR="$HOME/.claude/skills/gstack"
+        RENDER_DIR="${GSTACK_USER_RENDER_DIR:-$STATE_DIR/render/claude}"
+        if [ ! -d "$INSTALL_DIR" ]; then
+          echo "No global install at $INSTALL_DIR — nothing to render. (Dev workspaces get blocks via bin/dev-setup.)"
+        elif [ -L "$INSTALL_DIR" ]; then
+          echo "Skip: $INSTALL_DIR is a symlink (likely a dev worktree). Run bin/dev-setup in that worktree instead."
+        elif [ ! -f "$INSTALL_DIR/VERSION" ] || [ ! -f "$INSTALL_DIR/package.json" ]; then
+          echo "Skip: $INSTALL_DIR doesn't look like a gstack clone (missing VERSION/package.json) — refusing to modify it."
+        elif ! command -v bun >/dev/null 2>&1; then
+          echo "Skip: bun not on PATH — can't render. Install bun, then re-run 'gstack-config gbrain-refresh'."
+        else
+          # Render into a tmp dir and swap it in only on SUCCESS. Installed
+          # skills SYMLINK into $RENDER_DIR (gstack-relink prefers it), so
+          # wiping it before the render meant one transient failure (bun
+          # error, disk full, broken template) left every brain-aware
+          # SKILL.md link dangling — the whole skill set vanished from
+          # Claude Code until a successful re-render. A failed render now
+          # leaves the previous render fully intact.
+          gstack_claude_overlay "$INSTALL_DIR" "$0"
+          RENDER_TMP="$RENDER_DIR.tmp.$$"
+          rm -rf "$RENDER_TMP"
+          if ( cd "$INSTALL_DIR" && bun run gen:skill-docs:user --host claude --out-dir "$RENDER_TMP" --link-root "$RENDER_DIR" --model "$_GSTACK_OVERLAY" ${_PLAN_MODE_ARG:+"$_PLAN_MODE_ARG"} >/dev/null 2>&1 ); then
+            gstack_render_lock "$RENDER_DIR"
+            _swap_in_render "$RENDER_DIR" "$RENDER_TMP"
+            gstack_render_unlock "$RENDER_DIR"
+            gstack_claude_render_settle "$INSTALL_DIR" "$RENDER_DIR" ok rendered
+            # Repoint installed skills at the render — gstack-relink prefers
+            # the render dir when present.
+            "$INSTALL_DIR/bin/gstack-relink" >/dev/null 2>&1 || true
+            echo "Rendered brain-aware blocks into $RENDER_DIR — now live across all your projects' Claude sessions."
+            echo "The install checkout stays clean: upgrades no longer stash generated render dirt (#2569)."
+          else
+            rm -rf "$RENDER_TMP"
+            echo "Warning: render failed — previous render (if any) left in place, links stay valid."
+            echo "Run 'cd $INSTALL_DIR && bun run gen:skill-docs:user --host claude --out-dir $RENDER_DIR' manually to see the error."
+            gstack_claude_render_settle "$INSTALL_DIR" "$RENDER_DIR" ok failed
+            "$INSTALL_DIR/bin/gstack-relink" >/dev/null 2>&1 || true
+          fi
+        fi
+        ;;
+      *)
+        echo "gbrain not detected (local-status: $STATUS) → brain-aware blocks will be suppressed in planning-skill SKILL.md files."
+        echo "Install gbrain (see /setup-gbrain) and re-run 'gstack-config gbrain-refresh' once it's configured."
+        # Drop a brain-aware render, or re-render a pinned overlay without
+        # brain blocks, so removing gbrain keeps the chosen overlay.
+        INSTALL_DIR="$HOME/.claude/skills/gstack"
+        RENDER_DIR="${GSTACK_USER_RENDER_DIR:-$STATE_DIR/render/claude}"
+        if { [ -d "$RENDER_DIR" ] || "$0" has claude_overlay_model || [ -n "$_PLAN_MODE_ARG" ]; } \
+          && [ -d "$INSTALL_DIR" ] && [ ! -L "$INSTALL_DIR" ] && [ -f "$INSTALL_DIR/VERSION" ] && [ -f "$INSTALL_DIR/package.json" ]; then
+          if ! command -v bun >/dev/null 2>&1; then
+            echo "Skip: bun not on PATH — the Claude render at $RENDER_DIR was not refreshed. Install bun, then re-run 'gstack-config gbrain-refresh'."
+          else
+            gstack_claude_overlay "$INSTALL_DIR" "$0"
+            gstack_claude_render_action "$RENDER_DIR" absent
+            if [ "$_GSTACK_RENDER_ACTION" = plain ]; then
+              if gstack_claude_render_plain "$INSTALL_DIR" "$RENDER_DIR"; then
+                gstack_claude_render_settle "$INSTALL_DIR" "$RENDER_DIR" absent rendered
+              else
+                gstack_claude_render_settle "$INSTALL_DIR" "$RENDER_DIR" absent failed
+              fi
+            else
+              if [ -d "$RENDER_DIR" ]; then
+                rm -rf "$RENDER_DIR"
+                echo "Removed the brain-aware render at $RENDER_DIR; Claude skills serve the committed files."
+              fi
+              gstack_claude_render_settle "$INSTALL_DIR" "$RENDER_DIR" absent removed
+            fi
+            "$INSTALL_DIR/bin/gstack-relink" >/dev/null 2>&1 || true
+          fi
+        fi
+        ;;
+    esac
+    ;;
   *)
-    echo "Usage: gstack-config {get|set|list|defaults} [key] [value]"
+    echo "Usage: gstack-config {get|has|set|unset|list|defaults|endpoint-hash|resolve-user-slug|gbrain-refresh} [key] [value]"
     exit 1
     ;;
 esac

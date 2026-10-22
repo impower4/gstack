@@ -1,0 +1,20 @@
+diff --git a/backup.sh b/backup.sh
+index a9aae9f..bffe645 100644
+--- a/backup.sh
++++ b/backup.sh
+@@ -6,6 +6,15 @@ set -euo pipefail
+ SRC="${1:?usage: backup.sh SRC DEST}"
+ DEST="${2:?usage: backup.sh SRC DEST}"
+ 
++if [[ ! -d "$SRC" ]]; then
++  echo "backup.sh: source '$SRC' is not a directory" >&2
++  exit 1
++fi
++if [[ ! -d "$DEST" ]]; then
++  echo "backup.sh: destination '$DEST' does not exist (is the NAS mounted?)" >&2
++  exit 1
++fi
++
+ stamp=$(date +%Y%m%d-%H%M)
+ out="$DEST/backup-$stamp.tar.gz"
+ 

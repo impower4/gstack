@@ -1,0 +1,202 @@
+#!/usr/bin/env -S bun --no-env-file --config=/dev/null
+/**
+ * gstack-issue-links — issue links by intent for /ship Step 18 (plan C6).
+ *
+ *   gstack-issue-links [--base <ref>] [--issue <n>]... [--ci-run <id>]... [--supersedes <pr>]... [--credit <pr>]...
+ *                      [--no-auto-links] [--author <login>] [--repo <owner/repo>] [--out <issues.json>] [--json]
+ *
+ * Reads `git log origin/<base>..HEAD` and classifies every issue mention:
+ * `Fixes #N` only on explicit closure intent (a Fixes/Closes/Resolves trailer
+ * or --issue), `Refs #N` for everything else (bare mentions, partial fixes,
+ * deferred asks, cross-repo ids). Each closure issue is read through
+ * gstack-issue-guard; unreadable ones are downgraded to Refs
+ * (ISSUE_UNREADABLE). Same-repo references are listed as promotion
+ * candidates (`fix #N` → --issue N). Each --ci-run id is searched among open
+ * issues whose body names it and kept only for bot flake issues of this repo
+ * naming that run and a test: `Flake: #N (run <id>)`. Open PRs by other
+ * authors closing a fixed issue are `Related: #N (@author)` unless
+ * --no-auto-links; --supersedes / --credit record the owner's confirmation.
+ * Prints the `## Issues` lines; --json / --out emit the receipt's `issues`
+ * object for `gstack-ship-receipt write --issues @file`, which refuses a body
+ * missing any of its lines (ISSUE_LINKS_MISSING).
+ * Logic: lib/issue-links.ts.
+ */
+import { spawnSync } from 'node:child_process';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import { EXIT, exitTableHelp } from '../lib/headless-artifacts';
+import { lineSources, mentionsIn, promotionCandidates, receiptIssues, relatedPrs, renderIssueLines, resolveLinks, selectFlakes, type ClosingPr, type FlakeLink, type IssueMention, type IssueRow } from '../lib/issue-links';
+import { resultLine, resultLineWithDocs } from '../lib/result-codes';
+import { resolveBaseBranch } from '../lib/ship-policy';
+
+const HELP = `gstack-issue-links — Fixes only on explicit closure intent; everything else is Refs (docs/pregate.md#issue-links)
+
+  --base <ref>        base branch (default: origin/HEAD, else main); commits origin/<base>..HEAD are read
+  --issue <n>         explicit closure intent (repeatable); still read through gstack-issue-guard
+  --ci-run <id>       a failing CI run id (repeatable); bot flake issues of this repo naming it and a test become Flake: #N (run <id>)
+  --supersedes <pr>   owner confirmed this PR supersedes a Related PR: Supersedes #N (repeatable)
+  --credit <pr>       owner confirmed crediting a Related PR's author: Contributed by @author (repeatable)
+  --no-auto-links     no Related lookup (open PRs by other authors closing a fixed issue)
+  --author <login>    this PR's author for that lookup (default: the gh viewer; for an app viewer, the HEAD commit's
+                      GitHub user, else a user-owned repository's owner)
+  --repo <owner/repo> repository for gh (default: the current remote)
+  --out <file>        write the issues object (fixes, refs, flakes, related) for gstack-ship-receipt write --issues @file
+  --json              JSON only on stdout
+
+Same-repo references print as promotion candidates; the owner's \`fix #N\` reply reruns with --issue N.
+Exit 0 with links or none (a failed lookup prints ISSUE_LOOKUP_FAILED); 1 when a closure issue was unreadable (its link is Refs); 2 usage.
+${exitTableHelp()}`;
+
+const MAX_PAGES = 10;
+const CLOSING_QUERY = 'query($owner:String!,$name:String!,$number:Int!,$after:String){viewer{login} repository(owner:$owner,name:$name){issue(number:$number){closedByPullRequestsReferences(first:50,after:$after,includeClosedPrs:false){nodes{number state headRefName author{login} repository{nameWithOwner}} pageInfo{hasNextPage endCursor}}}}}';
+
+function flags(args: string[], name: string): string[] {
+  const out: string[] = [];
+  for (let i = 0; i < args.length; i++) if (args[i] === name && args[i + 1] !== undefined) out.push(args[++i]!);
+  return out;
+}
+function git(args: string[], cwd: string): string | undefined {
+  const r = spawnSync('git', args, { cwd, encoding: 'utf8', timeout: 30_000, maxBuffer: 64 * 1024 * 1024 });
+  return r.status === 0 ? r.stdout : undefined;
+}
+
+/** gh calls whose failures are reported once as ISSUE_LOOKUP_FAILED and collected for --json. */
+function ghLookups(cwd: string) {
+  const unavailable: string[] = [];
+  const failed = (what: string, why: string) => {
+    unavailable.push(`${what}: ${why}`);
+    process.stderr.write(resultLineWithDocs('gstack-issue-links', 'ISSUE_LOOKUP_FAILED', `${what}: ${why}`) + '\n');
+  };
+  function json<T>(what: string, args: string[]): T | undefined {
+    const r = spawnSync('gh', args, { cwd, encoding: 'utf8', timeout: 60_000, maxBuffer: 64 * 1024 * 1024 });
+    if (r.status !== 0) { failed(what, (r.stderr ?? '').trim().split('\n')[0] || `gh exited ${r.status}`); return undefined; }
+    try { return JSON.parse(r.stdout) as T; } catch { failed(what, 'gh returned no JSON'); return undefined; }
+  }
+  return { unavailable, failed, json };
+}
+
+type ClosingPage = { data?: { viewer?: { login?: string }; repository?: { issue?: { closedByPullRequestsReferences?: { nodes?: ClosingPr[]; pageInfo?: { hasNextPage?: boolean; endCursor?: string } } } } } };
+
+/** Every open PR closing each fixed issue, page by page; undefined when any page fails. */
+function closingPrs(gh: ReturnType<typeof ghLookups>, repo: string, fixes: number[]): { closing: Map<number, ClosingPr[]>; viewer: string } | undefined {
+  const [owner, name] = repo.split('/');
+  const closing = new Map<number, ClosingPr[]>();
+  let viewer = '';
+  for (const issue of fixes) {
+    const what = `open PRs closing #${issue}`;
+    const prs: ClosingPr[] = [];
+    let after: string | undefined;
+    for (let page = 1; ; page++) {
+      if (page > MAX_PAGES) { gh.failed(what, `more than ${MAX_PAGES} pages`); return undefined; }
+      const res = gh.json<ClosingPage>(what, ['api', 'graphql', '-f', `query=${CLOSING_QUERY}`, '-f', `owner=${owner}`, '-f', `name=${name}`, '-F', `number=${issue}`, ...(after ? ['-f', `after=${after}`] : [])]);
+      if (!res) return undefined;
+      const conn = res.data?.repository?.issue?.closedByPullRequestsReferences;
+      if (!conn) { gh.failed(what, 'the reply has no closedByPullRequestsReferences'); return undefined; }
+      viewer ||= res.data?.viewer?.login ?? '';
+      prs.push(...(conn.nodes ?? []));
+      if (!conn.pageInfo?.hasNextPage || !conn.pageInfo.endCursor) break;
+      after = conn.pageInfo.endCursor;
+    }
+    closing.set(issue, prs);
+  }
+  return { closing, viewer };
+}
+
+const AUTHOR_QUERY = 'query($owner:String!,$name:String!,$head:String!){repository(owner:$owner,name:$name){owner{__typename login} object(expression:$head){... on Commit{author{user{login}}}}}}';
+type AuthorReply = { data?: { repository?: { owner?: { __typename?: string; login?: string }; object?: { author?: { user?: { login?: string } | null } } | null } } };
+
+/**
+ * Whose PRs are not "other authors": --author, else the gh viewer unless it is
+ * an app (`…[bot]`), in which case the HEAD commit's GitHub user, else the
+ * owner of a user-owned repository. With none, the app viewer stays and the
+ * gap is reported, since the owner's own PRs would then be listed as Related.
+ */
+function prAuthor(gh: ReturnType<typeof ghLookups>, repo: string, viewer: string, explicit: string | undefined, head: string | undefined): { login: string; source: string } {
+  if (explicit) return { login: explicit, source: '--author' };
+  if (!/\[bot\]$/.test(viewer)) return { login: viewer, source: 'gh viewer' };
+  const [owner, name] = repo.split('/');
+  const res = head ? gh.json<AuthorReply>('this PR\'s author', ['api', 'graphql', '-f', `query=${AUTHOR_QUERY}`, '-f', `owner=${owner}`, '-f', `name=${name}`, '-f', `head=${head}`]) : undefined;
+  const commitUser = res?.data?.repository?.object?.author?.user?.login;
+  if (commitUser) return { login: commitUser, source: 'HEAD commit author' };
+  const repoOwner = res?.data?.repository?.owner;
+  if (repoOwner?.__typename === 'User' && repoOwner.login) return { login: repoOwner.login, source: 'repository owner' };
+  if (res) gh.failed('this PR\'s author', `gh runs as ${viewer} and neither the HEAD commit nor the repository owner names a user; pass --author <login>`);
+  return { login: viewer, source: 'gh viewer' };
+}
+
+function main(argv: string[]): number {
+  if (argv.includes('--help') || argv.includes('-h')) { process.stdout.write(HELP + '\n'); return EXIT.ok; }
+  const json = argv.includes('--json');
+  const repoRoot = git(['rev-parse', '--show-toplevel'], process.cwd())?.trim() ?? process.cwd();
+  const base = flags(argv, '--base')[0] ?? resolveBaseBranch(repoRoot);
+  const explicit: number[] = [];
+  for (const raw of flags(argv, '--issue')) {
+    if (!/^\d+$/.test(raw)) { process.stderr.write(`gstack-issue-links: --issue must be a positive integer, got ${JSON.stringify(raw)}\n`); return EXIT.usage; }
+    explicit.push(Number(raw));
+  }
+  const runs = flags(argv, '--ci-run');
+  if (runs.some(r => !/^[A-Za-z0-9_.-]{1,64}$/.test(r))) { process.stderr.write('gstack-issue-links: --ci-run ids are alphanumeric\n'); return EXIT.usage; }
+  const confirmed = { supersedes: flags(argv, '--supersedes'), credit: flags(argv, '--credit') };
+  if ([...confirmed.supersedes, ...confirmed.credit].some(r => !/^\d+$/.test(r))) { process.stderr.write('gstack-issue-links: --supersedes and --credit take a PR number\n'); return EXIT.usage; }
+  const autoLinks = !argv.includes('--no-auto-links');
+  const binDir = path.dirname(Bun.fileURLToPath(import.meta.url));
+
+  const log = git(['log', '--format=%H%n%B%x00', `origin/${base}..HEAD`], repoRoot) ?? git(['log', '--format=%H%n%B%x00', `${base}..HEAD`], repoRoot);
+  if (log === undefined) { process.stderr.write(`gstack-issue-links: cannot read commits ${base}..HEAD (fetch origin/${base} first)\n`); return EXIT.usage; }
+  const mentions: IssueMention[] = [];
+  for (const entry of log.split('\0')) {
+    const nl = entry.indexOf('\n');
+    if (nl < 0) continue;
+    mentions.push(...mentionsIn(entry.slice(nl + 1), `commit ${entry.slice(0, nl).trim().slice(0, 12)}`));
+  }
+  const readable = (issue: number): boolean => {
+    const r = spawnSync(path.join(binDir, 'gstack-issue-guard'), ['issue', String(issue)], { cwd: repoRoot, encoding: 'utf8', timeout: 60_000, maxBuffer: 16 * 1024 * 1024 });
+    return r.status === 0 && r.stdout.length > 0;
+  };
+  const gh = ghLookups(repoRoot);
+  const needRepo = runs.length > 0 || explicit.length > 0 || (autoLinks && mentions.some(m => m.intent === 'fixes'));
+  const repo = flags(argv, '--repo')[0] ?? (needRepo ? gh.json<{ nameWithOwner?: string }>('repository', ['repo', 'view', '--json', 'nameWithOwner'])?.nameWithOwner : undefined);
+
+  const flakes: FlakeLink[] = [];
+  const rejectedFlakes: Array<{ issue: number; run: string; reason: string }> = [];
+  for (const run of repo ? runs : []) {
+    const rows = gh.json<IssueRow[]>(`flake issues naming run ${run}`, ['issue', 'list', '--repo', repo!, '--state', 'open', '--search', `"${run}" in:body`, '--limit', '100', '--json', 'number,title,body,author']);
+    if (!rows) continue;
+    const picked = selectFlakes(run, repo!, rows);
+    for (const f of picked.flakes) if (!flakes.some(x => x.issue === f.issue)) flakes.push(f);
+    rejectedFlakes.push(...picked.rejected.map(x => ({ ...x, run })));
+  }
+  const links = resolveLinks(mentions, explicit, readable, flakes);
+  const found = autoLinks && repo && links.fixes.length ? closingPrs(gh, repo, links.fixes) : undefined;
+  const author = found ? prAuthor(gh, repo!, found.viewer, flags(argv, '--author')[0], git(['rev-parse', 'HEAD'], repoRoot)?.trim()) : undefined;
+  if (found && author) {
+    const related = relatedPrs(found.closing, { repo: repo!, viewer: author.login, branch: git(['branch', '--show-current'], repoRoot)?.trim() || undefined });
+    if (related.length) links.related = related;
+  }
+  for (const [kind, list] of Object.entries(confirmed)) {
+    for (const raw of list) {
+      const row = links.related?.find(r => !r.repo && r.pr === Number(raw));
+      if (!row) { process.stderr.write(`gstack-issue-links: --${kind} #${raw} is not a Related PR (${(links.related ?? []).map(r => `${r.repo ?? ''}#${r.pr}`).join(', ') || 'none found'})\n`); return EXIT.usage; }
+      if (kind === 'supersedes') row.supersedes = true; else row.credit = true;
+    }
+  }
+  for (const n of links.unreadable) process.stderr.write(resultLine('gstack-issue-links', 'ISSUE_UNREADABLE', `#${n}`) + '\n');
+  const candidates = promotionCandidates(mentions, links);
+  const lines = renderIssueLines(links);
+  const out = flags(argv, '--out')[0];
+  if (out) { fs.mkdirSync(path.dirname(out), { recursive: true }); fs.writeFileSync(out, JSON.stringify(receiptIssues(links), null, 2) + '\n'); }
+  if (json) process.stdout.write(JSON.stringify({ ...receiptIssues(links), cross: links.cross, unreadable: links.unreadable, candidates, flake_tests: links.flakes, rejected_flakes: rejectedFlakes, ...(author ? { author } : {}), unavailable: gh.unavailable, lines }) + '\n');
+  else {
+    process.stdout.write(lines.length ? lines.join('\n') + '\n' : 'ISSUE_LINKS: none\n');
+    for (const m of mentions) {
+      const promote = candidates.some(c => c.issue === m.issue) && m.intent === 'refs' && !m.repo ? ` (promote: fix #${m.issue})` : '';
+      process.stderr.write(`  ${m.intent === 'fixes' ? 'closure' : 'reference'} ${m.repo ? `${m.repo}#` : '#'}${m.issue} ← ${m.source}${promote}\n`);
+    }
+    if (author && author.source !== 'gh viewer') process.stderr.write(`  Related excludes @${author.login} (${author.source})\n`);
+    for (const line of lineSources(links)) process.stderr.write(`  ${line}\n`);
+    for (const r of rejectedFlakes) process.stderr.write(`  not a flake link: #${r.issue} (run ${r.run}) ← ${r.reason}\n`);
+  }
+  return links.unreadable.length ? EXIT.fail : EXIT.ok;
+}
+
+process.exit(main(process.argv.slice(2)));

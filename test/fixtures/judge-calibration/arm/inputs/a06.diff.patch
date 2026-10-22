@@ -1,0 +1,44 @@
+diff --git a/internal/middleware/logging.go b/internal/middleware/logging.go
+index 7bc34e2..cda6f7c 100644
+--- a/internal/middleware/logging.go
++++ b/internal/middleware/logging.go
+@@ -3,12 +3,38 @@ package middleware
+ import (
+ 	"log/slog"
+ 	"net/http"
++	"time"
+ )
+ 
++// Clock abstracts the time source so the middleware can be tested
++// deterministically.
++type Clock interface {
++	Now() time.Time
++	Since(t time.Time) time.Duration
++}
++
++type systemClock struct{}
++
++func (systemClock) Now() time.Time                  { return time.Now() }
++func (systemClock) Since(t time.Time) time.Duration { return time.Since(t) }
++
++// DefaultClock is the wall clock used by Logging.
++var DefaultClock Clock = systemClock{}
++
+ // Logging writes one structured line per request after it completes.
+ func Logging(logger *slog.Logger, next http.Handler) http.Handler {
++	return LoggingWithClock(logger, DefaultClock, next)
++}
++
++// LoggingWithClock is Logging with an injectable time source.
++func LoggingWithClock(logger *slog.Logger, clock Clock, next http.Handler) http.Handler {
+ 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		start := clock.Now()
+ 		next.ServeHTTP(w, r)
+-		logger.Info("request", "method", r.Method, "path", r.URL.Path)
++		logger.Info("request",
++			"method", r.Method,
++			"path", r.URL.Path,
++			"duration_ms", clock.Since(start).Milliseconds(),
++		)
+ 	})
+ }

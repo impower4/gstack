@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterAll } from 'bun:test';
+import { describe, it, expect, beforeAll, beforeEach, afterAll } from 'bun:test';
 import { promises as fs } from 'fs';
 import * as path from 'path';
 import * as os from 'os';
@@ -8,8 +8,21 @@ const TELEMETRY_FILE = path.join(TMP_HOME, 'analytics', 'browse-telemetry.jsonl'
 
 // Use GSTACK_HOME env to redirect telemetry writes (read each call,
 // not cached at module-load).
-process.env.GSTACK_HOME = TMP_HOME;
-process.env.GSTACK_TELEMETRY_OFF = '0';
+// Scoped to this file's execution window — module-scope env assignment
+// leaks into sibling files in the shard process (see
+// test/gstack-home-module-scope.test.ts).
+const ORIGINAL_GSTACK_HOME = process.env.GSTACK_HOME;
+const ORIGINAL_TELEMETRY_OFF = process.env.GSTACK_TELEMETRY_OFF;
+beforeAll(() => {
+  process.env.GSTACK_HOME = TMP_HOME;
+  process.env.GSTACK_TELEMETRY_OFF = '0';
+});
+afterAll(() => {
+  if (ORIGINAL_GSTACK_HOME === undefined) delete process.env.GSTACK_HOME;
+  else process.env.GSTACK_HOME = ORIGINAL_GSTACK_HOME;
+  if (ORIGINAL_TELEMETRY_OFF === undefined) delete process.env.GSTACK_TELEMETRY_OFF;
+  else process.env.GSTACK_TELEMETRY_OFF = ORIGINAL_TELEMETRY_OFF;
+});
 
 beforeEach(async () => {
   await fs.rm(TMP_HOME, { recursive: true, force: true });
@@ -20,8 +33,6 @@ afterAll(async () => {
 });
 
 async function readEvents(): Promise<any[]> {
-  // Wait briefly for fire-and-forget appends to flush.
-  await new Promise((r) => setTimeout(r, 30));
   try {
     const raw = await fs.readFile(TELEMETRY_FILE, 'utf8');
     return raw.trim().split('\n').filter(Boolean).map((l) => JSON.parse(l));
@@ -34,7 +45,7 @@ describe('telemetry: signals fire to ~/.gstack/analytics/browse-telemetry.jsonl'
   it('logTelemetry writes a JSONL line with ts injected', async () => {
     const { logTelemetry, _resetTelemetryCache } = await import('../src/telemetry');
     _resetTelemetryCache();
-    logTelemetry({ event: 'domain_skill_saved', host: 'test.com', scope: 'project', state: 'quarantined', bytes: 42 });
+    await logTelemetry({ event: 'domain_skill_saved', host: 'test.com', scope: 'project', state: 'quarantined', bytes: 42 });
     const events = await readEvents();
     expect(events).toHaveLength(1);
     expect(events[0].event).toBe('domain_skill_saved');
@@ -47,7 +58,7 @@ describe('telemetry: signals fire to ~/.gstack/analytics/browse-telemetry.jsonl'
     process.env.GSTACK_TELEMETRY_OFF = '1';
     const { logTelemetry, _resetTelemetryCache } = await import('../src/telemetry');
     _resetTelemetryCache();
-    logTelemetry({ event: 'cdp_method_called', domain: 'X', method: 'y' });
+    await logTelemetry({ event: 'cdp_method_called', domain: 'X', method: 'y' });
     const events = await readEvents();
     expect(events).toHaveLength(0);
     process.env.GSTACK_TELEMETRY_OFF = '0';
@@ -59,6 +70,8 @@ describe('telemetry: signals fire to ~/.gstack/analytics/browse-telemetry.jsonl'
     // logTelemetry on a missing directory doesn't throw.
     const { logTelemetry, _resetTelemetryCache } = await import('../src/telemetry');
     _resetTelemetryCache();
-    expect(() => logTelemetry({ event: 'noop_test' })).not.toThrow();
+    let completed: Promise<void> | undefined;
+    expect(() => { completed = logTelemetry({ event: 'noop_test' }); }).not.toThrow();
+    await completed;
   });
 });

@@ -4,29 +4,130 @@
 # Output (one line, or nothing):
 #   JUST_UPGRADED <old> <new>       — marker found from recent upgrade
 #   UPGRADE_AVAILABLE <old> <new>   — remote VERSION differs from local
+#   UPGRADE_AVAILABLE <ver> <ver>+<n> <sha>
+#                                   — VERSION is equal but main moved <n>
+#                                     commits past this checkout's HEAD (the
+#                                     GitHub compare API says so); the snooze
+#                                     is keyed by <sha>
+#   CHECK_FAILED <reason>           — the check crashed, or (--force only) the
+#                                     remote version could not be read
 #   (nothing)                       — up to date, snoozed, disabled, or check skipped
+#
+# A remote version that cannot be read is cached as CHECK_FAILED (short TTL),
+# never as UP_TO_DATE (#2786). Skill preambles replay it silently; only
+# --force (/gstack-upgrade) prints it with the failed URL. A diverged or
+# unreadable compare (equal VERSION, different main) is CHECK_FAILED too.
+#
+# Cache: line 1 is the outcome; line 2 is
+#   IDENTITY head=<local HEAD|none> remote=<compared main SHA|none> upstream=<url>
+# A cached outcome is replayed only while this checkout's HEAD and upstream
+# match line 2. A git checkout ignores a cache without line 2 (written before
+# the equal-version compare existed); a non-git install has no HEAD, so its
+# cache keeps the version-only meaning. Never fetches: ls-remote and one
+# compare request are the only network reads.
 #
 # Env overrides (for testing):
 #   GSTACK_DIR          — override auto-detected gstack root
 #   GSTACK_REMOTE_URL   — override remote VERSION URL (branch-pinned fallback)
 #   GSTACK_REMOTE_REPO  — override remote git URL for ls-remote SHA resolution
-#   GSTACK_STATE_DIR    — override ~/.gstack state directory
+#   GSTACK_REMOTE_RAW_BASE — override the SHA-pinned raw VERSION base URL
+#   GSTACK_COMPARE_API  — override the GitHub compare API base URL
+#   GSTACK_HOME     — relocate the state root (chain: bin/gstack-state-root.sh)
 set -euo pipefail
 
+# A crash must not read as "up to date" (#1974). With set -e, any unguarded
+# failure used to exit silently — and silence IS the up-to-date signal, so a
+# broken check was indistinguishable from a current install (observed live as
+# a 45-release silent-staleness incident). -E propagates the trap into
+# functions/subshells; exit 0 keeps callers' `|| true` from eating the line.
+set -E
+trap 'rc=$?; echo "CHECK_FAILED gstack-update-check crashed (line $LINENO, rc=$rc) — update status UNKNOWN, not up-to-date"; exit 0' ERR
+
 GSTACK_DIR="${GSTACK_DIR:-$(cd "$(dirname "$0")/.." && pwd)}"
-STATE_DIR="${GSTACK_STATE_DIR:-$HOME/.gstack}"
+. "$(dirname "$0")/gstack-state-root.sh" 2>/dev/null || { echo "$0: cannot resolve the gstack state root: $(dirname "$0")/gstack-state-root.sh is missing. fix: reinstall with ./setup or /gstack-upgrade (docs/state-root.md)" >&2; exit 1; }
+gstack_state_root_select
+STATE_DIR="$_gstack_sr_root"
+
+# Egress receipt helpers (_receipted_curl / _receipted_git). Update checks
+# are fail-OPEN: a receipt hiccup warns but never blocks the version check.
+. "$GSTACK_DIR/bin/gstack-egress-lib.sh"
+
+# _receipted_version_fetch <url>
+#   Receipted bodyless GET for a VERSION file (fail-open). Local reads
+#   (file://, or a URL with no network host) never leave the machine — they
+#   are not egress, so they get no receipt.
+_receipted_version_fetch() {
+  local url="$1" host scheme
+  scheme="${url%%://*}"
+  host="${url#*://}"; host="${host%%/*}"
+  case "$scheme" in
+    http|https|git|ssh|ftp|ftps)
+      GSTACK_HOME="$STATE_DIR" _receipted_curl open update-check "$host" version-fetch "update_check!=false" --no-payload \
+        curl -sf --max-time 5 "$url" || true
+      ;;
+    *)
+      curl -sf --max-time 5 "$url" 2>/dev/null || true
+      ;;
+  esac
+}
 CACHE_FILE="$STATE_DIR/last-update-check"
 MARKER_FILE="$STATE_DIR/just-upgraded-from"
 SNOOZE_FILE="$STATE_DIR/update-snoozed"
 VERSION_FILE="$GSTACK_DIR/VERSION"
 REMOTE_URL="${GSTACK_REMOTE_URL:-https://raw.githubusercontent.com/garrytan/gstack/main/VERSION}"
 REMOTE_REPO="${GSTACK_REMOTE_REPO:-https://github.com/garrytan/gstack.git}"
+REMOTE_RAW_BASE="${GSTACK_REMOTE_RAW_BASE:-https://raw.githubusercontent.com/garrytan/gstack}"
+COMPARE_API="${GSTACK_COMPARE_API:-https://api.github.com/repos/garrytan/gstack/compare}"
 
 # ─── Force flag (busts cache + snooze for standalone /gstack-upgrade) ──
+FORCE=0
 if [ "${1:-}" = "--force" ]; then
+  FORCE=1
   rm -f "$CACHE_FILE"
   rm -f "$SNOOZE_FILE"
 fi
+
+# _display_url <url> — strip userinfo (user:token@) before a URL is printed or cached.
+_display_url() {
+  printf '%s' "$1" | sed -E 's#^([A-Za-z][A-Za-z0-9+.-]*://)[^/@]*@#\1#'
+}
+
+# ─── Cache identity: this checkout's HEAD and the upstream it compares with ──
+LOCAL_HEAD="none"
+if [ -e "$GSTACK_DIR/.git" ]; then
+  _H="$(git -C "$GSTACK_DIR" rev-parse --verify --quiet HEAD 2>/dev/null || true)"
+  if echo "$_H" | grep -qE '^[0-9a-f]{40}$'; then LOCAL_HEAD="$_H"; fi
+fi
+if [ -n "${GSTACK_REMOTE_URL:-}" ]; then UPSTREAM="$(_display_url "$REMOTE_URL")"; else UPSTREAM="$(_display_url "$REMOTE_REPO")"; fi
+
+# _identity_field <name> — a field of the cache's IDENTITY line (empty when absent).
+_identity_field() {
+  printf '%s\n' "${CACHED_ID:-}" | tr ' ' '\n' | sed -n "s/^$1=//p" | head -1
+}
+
+# _identity_ok — the cached outcome belongs to this HEAD and upstream.
+_identity_ok() {
+  if [ -z "${CACHED_ID:-}" ]; then
+    [ "$LOCAL_HEAD" = "none" ]
+    return
+  fi
+  [ "$(_identity_field head)" = "$LOCAL_HEAD" ] && [ "$(_identity_field upstream)" = "$UPSTREAM" ]
+}
+
+# _write_cache <outcome line> — the outcome plus the identity it was computed for
+# (a non-git install keeps the one-line, version-only cache).
+_write_cache() {
+  if [ "$LOCAL_HEAD" = "none" ]; then
+    printf '%s\n' "$1" > "$CACHE_FILE"
+    return
+  fi
+  printf '%s\nIDENTITY head=%s remote=%s upstream=%s\n' "$1" "$LOCAL_HEAD" "${_REMOTE_SHA:-none}" "$UPSTREAM" > "$CACHE_FILE"
+}
+
+# _snooze_key <UPGRADE_AVAILABLE line> — the SHA for the equal-version form, else the new version.
+_snooze_key() {
+  printf '%s\n' "$1" | awk '{ print (NF >= 4 ? $4 : $3) }'
+}
 
 # ─── Step 0: Check if updates are disabled ────────────────────
 _UC=$("$GSTACK_DIR/bin/gstack-config" get update_check 2>/dev/null || true)
@@ -125,18 +226,26 @@ fi
 # ─── Step 3: Check cache freshness ──────────────────────────
 # UP_TO_DATE: 60 min TTL (detect new releases quickly)
 # UPGRADE_AVAILABLE: 720 min TTL (keep nagging)
+# CHECK_FAILED: 10 min TTL (retry soon, without re-fetching on every skill start)
+CACHED=""
+CACHED_ID=""
 if [ -f "$CACHE_FILE" ]; then
-  CACHED="$(cat "$CACHE_FILE" 2>/dev/null || true)"
+  CACHED="$(head -1 "$CACHE_FILE" 2>/dev/null || true)"
+  CACHED_ID="$(sed -n '2{/^IDENTITY /p;}' "$CACHE_FILE" 2>/dev/null || true)"
   case "$CACHED" in
     UP_TO_DATE*)        CACHE_TTL=60 ;;
     UPGRADE_AVAILABLE*) CACHE_TTL=720 ;;
+    CHECK_FAILED*)      CACHE_TTL=10 ;;
     *)                  CACHE_TTL=0 ;;  # corrupt → force re-fetch
   esac
 
+  _identity_ok || CACHE_TTL=0
   STALE=$(find "$CACHE_FILE" -mmin +$CACHE_TTL 2>/dev/null || true)
   if [ -z "$STALE" ] && [ "$CACHE_TTL" -gt 0 ]; then
     case "$CACHED" in
-      UP_TO_DATE*)
+      UP_TO_DATE*|CHECK_FAILED*)
+        # A cached CHECK_FAILED replays silently: status is unknown, and a
+        # preamble line every skill start for a transient outage is noise.
         CACHED_VER="$(echo "$CACHED" | awk '{print $2}')"
         if [ "$CACHED_VER" = "$LOCAL" ]; then
           exit 0
@@ -145,8 +254,7 @@ if [ -f "$CACHE_FILE" ]; then
       UPGRADE_AVAILABLE*)
         CACHED_OLD="$(echo "$CACHED" | awk '{print $2}')"
         if [ "$CACHED_OLD" = "$LOCAL" ]; then
-          CACHED_NEW="$(echo "$CACHED" | awk '{print $3}')"
-          if check_snooze "$CACHED_NEW"; then
+          if check_snooze "$(_snooze_key "$CACHED")"; then
             exit 0  # snoozed — stay quiet
           fi
           echo "$CACHED"
@@ -172,12 +280,19 @@ _SUPA_KEY="${GSTACK_SUPABASE_ANON_KEY:-}"
 _TEL_TIER="$("$GSTACK_DIR/bin/gstack-config" get telemetry 2>/dev/null || true)"
 if [ -n "$_SUPA_URL" ] && [ -n "$_SUPA_KEY" ] && [ "${_TEL_TIER:-off}" != "off" ]; then
   _OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
-  curl -sf --max-time 5 \
-    -X POST "${_SUPA_URL}/functions/v1/update-check" \
-    -H "Content-Type: application/json" \
-    -H "apikey: ${_SUPA_KEY}" \
-    -d "{\"version\":\"$LOCAL\",\"os\":\"$_OS\"}" \
-    >/dev/null 2>&1 &
+  # Receipted (fail-open) and fully backgrounded: the receipt write happens
+  # inside the background subshell, so it can never block this script's exit.
+  _PING_FILE="$(mktemp "${TMPDIR:-/tmp}/gstack-update-ping-XXXXXX" 2>/dev/null)" || _PING_FILE=""
+  if [ -n "$_PING_FILE" ]; then
+    printf '{"version":"%s","os":"%s"}' "$LOCAL" "$_OS" > "$_PING_FILE"
+    _SUPA_HOST="${_SUPA_URL#*://}"; _SUPA_HOST="${_SUPA_HOST%%/*}"
+    GSTACK_HOME="$STATE_DIR" _receipted_curl open update-check "$_SUPA_HOST" update-check-ping "telemetry=$_TEL_TIER" "$_PING_FILE" \
+      curl -sf --max-time 5 \
+      -X POST "${_SUPA_URL}/functions/v1/update-check" \
+      -H "Content-Type: application/json" \
+      -H "apikey: ${_SUPA_KEY}" \
+      >/dev/null 2>&1 &
+  fi
 fi
 
 # Resolve VERSION via a SHA-pinned raw URL. GitHub's branch-raw CDN
@@ -193,12 +308,29 @@ REMOTE=""
 if [ -z "${GSTACK_REMOTE_URL:-}" ]; then
   # Disable credential prompts and apply a 5-second low-speed timeout so a
   # flaky network or captive portal can't hang every skill preamble.
-  _LSR_LINE="$(GIT_TERMINAL_PROMPT=0 GIT_HTTP_LOW_SPEED_LIMIT=1000 GIT_HTTP_LOW_SPEED_TIME=5 \
-    git ls-remote "$REMOTE_REPO" refs/heads/main 2>/dev/null || true)"
+  _REPO_HOST="${REMOTE_REPO#*://}"; _REPO_HOST="${_REPO_HOST#*@}"; _REPO_HOST="${_REPO_HOST%%[/:]*}"
+  _LSR_LINE="$(GSTACK_HOME="$STATE_DIR" _receipted_git open update-check "${_REPO_HOST:-unknown}" version-ls-remote "update_check!=false" \
+    bash -c 'GIT_TERMINAL_PROMPT=0 GIT_HTTP_LOW_SPEED_LIMIT=1000 GIT_HTTP_LOW_SPEED_TIME=5 \
+      git ls-remote "$1" refs/heads/main 2>/dev/null' _ "$REMOTE_REPO" || true)"
   _REMOTE_SHA="$(echo "$_LSR_LINE" | awk '{print $1}')"
   if echo "$_REMOTE_SHA" | grep -qE '^[0-9a-f]{40}$'; then
-    _SHA_URL="https://raw.githubusercontent.com/garrytan/gstack/${_REMOTE_SHA}/VERSION"
-    REMOTE="$(curl -sf --max-time 5 "$_SHA_URL" 2>/dev/null || true)"
+    # The same main SHA, HEAD and upstream as the cache: its outcome still holds.
+    if [ "$(_identity_field remote)" = "$_REMOTE_SHA" ] && _identity_ok; then
+      case "$CACHED" in
+        UP_TO_DATE*)
+          [ "$(echo "$CACHED" | awk '{print $2}')" = "$LOCAL" ] && { touch "$CACHE_FILE"; exit 0; } ;;
+        UPGRADE_AVAILABLE*)
+          if [ "$(echo "$CACHED" | awk '{print $2}')" = "$LOCAL" ]; then
+            touch "$CACHE_FILE"
+            check_snooze "$(_snooze_key "$CACHED")" || echo "$CACHED"
+            exit 0
+          fi ;;
+      esac
+    fi
+    _SHA_URL="$REMOTE_RAW_BASE/${_REMOTE_SHA}/VERSION"
+    REMOTE="$(_receipted_version_fetch "$_SHA_URL")"
+  else
+    _REMOTE_SHA=""
   fi
 fi
 
@@ -206,35 +338,75 @@ fi
 # network, mirror without refs/heads/main) or when GSTACK_REMOTE_URL was
 # explicitly overridden.
 if [ -z "$REMOTE" ]; then
-  REMOTE="$(curl -sf --max-time 5 "$REMOTE_URL" 2>/dev/null || true)"
+  REMOTE="$(_receipted_version_fetch "$REMOTE_URL")"
 fi
 REMOTE="$(echo "$REMOTE" | tr -d '[:space:]')"
 
 # Validate: must look like a version number (reject HTML error pages)
 if ! echo "$REMOTE" | grep -qE '^[0-9]+\.[0-9.]+$'; then
-  # Invalid or empty response — assume up to date
-  echo "UP_TO_DATE $LOCAL" > "$CACHE_FILE"
+  # Invalid or empty response: the remote version is UNKNOWN, not equal (#2786).
+  # Both fetches were tried when ls-remote resolved a SHA: name both.
+  _FAILED_URL="$(_display_url "$REMOTE_URL")"
+  if [ -n "${_SHA_URL:-}" ]; then
+    _FAILED_URL="$(_display_url "$_SHA_URL") (then $_FAILED_URL)"
+  fi
+  _write_cache "CHECK_FAILED $LOCAL $_FAILED_URL"
+  if [ "$FORCE" = "1" ]; then
+    echo "CHECK_FAILED could not read the remote gstack version from $_FAILED_URL — update status UNKNOWN, not up-to-date"
+  fi
   exit 0
 fi
 
+NEW="$REMOTE"
 if [ "$LOCAL" = "$REMOTE" ]; then
-  echo "UP_TO_DATE $LOCAL" > "$CACHE_FILE"
-  exit 0
+  # Equal VERSION: main may still have moved past this checkout without a
+  # release. Ask GitHub how the two commits relate (status, ahead_by); page 2
+  # of one commit per page carries the counts without the file list.
+  if [ -z "${_REMOTE_SHA:-}" ] || [ "$LOCAL_HEAD" = "none" ] || [ "$_REMOTE_SHA" = "$LOCAL_HEAD" ]; then
+    _write_cache "UP_TO_DATE $LOCAL"
+    exit 0
+  fi
+  _CMP_URL="$COMPARE_API/${LOCAL_HEAD}...${_REMOTE_SHA}?per_page=1&page=2"
+  _CMP="$(_receipted_version_fetch "$_CMP_URL" | tr -s '\n\r\t ' ' ')"
+  _CMP_STATUS="$(printf '%s' "$_CMP" | sed -nE 's/.*"status" ?: ?"([a-z]+)" ?, ?"ahead_by" ?: ?([0-9]+).*/\1 \2/p')"
+  _AHEAD="${_CMP_STATUS#* }"
+  case "${_CMP_STATUS% *}" in
+    identical|behind)
+      _write_cache "UP_TO_DATE $LOCAL"
+      exit 0 ;;
+    ahead)
+      if [ "${_AHEAD:-0}" -gt 0 ] 2>/dev/null; then
+        NEW="$LOCAL+$_AHEAD $(printf '%s' "$_REMOTE_SHA" | cut -c1-7)"
+      fi ;;
+  esac
+  if [ "$NEW" = "$REMOTE" ]; then
+    _WHY="${_CMP_STATUS% *}"
+    _CMP_SHOWN="$(_display_url "$COMPARE_API")/${LOCAL_HEAD:0:12}...${_REMOTE_SHA:0:12}"
+    _write_cache "CHECK_FAILED $LOCAL $_CMP_SHOWN ${_WHY:-unreadable}"
+    if [ "$FORCE" = "1" ]; then
+      if [ "$_WHY" = "diverged" ]; then
+        echo "CHECK_FAILED this checkout (${LOCAL_HEAD:0:12}) has diverged from main (${_REMOTE_SHA:0:12}) at the same VERSION $LOCAL — update status UNKNOWN, not up-to-date"
+      else
+        echo "CHECK_FAILED could not compare this checkout (${LOCAL_HEAD:0:12}) with main (${_REMOTE_SHA:0:12}) at $_CMP_SHOWN — update status UNKNOWN, not up-to-date"
+      fi
+    fi
+    exit 0
+  fi
+else
+  # Semver-order guard: only flag an upgrade when REMOTE sorts higher than
+  # LOCAL. Protects against transient stale-CDN regressions (REMOTE < LOCAL)
+  # and dev installs running ahead of main, both of which would otherwise
+  # emit a backwards UPGRADE_AVAILABLE line.
+  _HIGHER="$(printf '%s\n%s\n' "$LOCAL" "$REMOTE" | sort -V | tail -1)"
+  if [ "$_HIGHER" != "$REMOTE" ]; then
+    _write_cache "UP_TO_DATE $LOCAL"
+    exit 0
+  fi
 fi
 
-# Semver-order guard: only flag an upgrade when REMOTE sorts higher than
-# LOCAL. Protects against transient stale-CDN regressions (REMOTE < LOCAL)
-# and dev installs running ahead of main, both of which would otherwise
-# emit a backwards UPGRADE_AVAILABLE line.
-_HIGHER="$(printf '%s\n%s\n' "$LOCAL" "$REMOTE" | sort -V | tail -1)"
-if [ "$_HIGHER" != "$REMOTE" ]; then
-  echo "UP_TO_DATE $LOCAL" > "$CACHE_FILE"
-  exit 0
-fi
-
-# REMOTE is strictly newer — upgrade available
-echo "UPGRADE_AVAILABLE $LOCAL $REMOTE" > "$CACHE_FILE"
-if check_snooze "$REMOTE"; then
+# REMOTE is strictly newer, or main moved past HEAD at the same VERSION
+_write_cache "UPGRADE_AVAILABLE $LOCAL $NEW"
+if check_snooze "$(_snooze_key "UPGRADE_AVAILABLE $LOCAL $NEW")"; then
   exit 0  # snoozed — stay quiet
 fi
 
@@ -245,4 +417,4 @@ if [ -x "$TEL_CMD" ]; then
     --outcome success --session-id "update-$$-$(date +%s)" 2>/dev/null &
 fi
 
-echo "UPGRADE_AVAILABLE $LOCAL $REMOTE"
+echo "UPGRADE_AVAILABLE $LOCAL $NEW"

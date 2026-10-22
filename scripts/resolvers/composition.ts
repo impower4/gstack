@@ -1,4 +1,58 @@
-import type { TemplateContext } from './types';
+import { toShellPath, type TemplateContext } from './types';
+import * as path from 'path';
+import { getHostConfig } from '../../hosts';
+import { runtimeRootPrelude } from './runtime-root';
+
+/** Claude's scoped hook enforces the parent publication boundary during /autoplan. */
+export function generateAutoplanPublicationHook(ctx: TemplateContext, args?: string[]): string {
+  if (ctx.skillName !== 'autoplan' || args?.length) {
+    throw new Error('AUTOPLAN_PUBLICATION_HOOK is only valid in autoplan without arguments');
+  }
+  if (ctx.host !== 'claude') return '';
+
+  // Use the same installed runtime path as Claude's existing skill hooks.
+  // Emitting this through a host-specific resolver also keeps other hosts free
+  // of the generator's destructive-command advisory for safety hooks.
+  const unavailable = JSON.stringify({ hookSpecificOutput: {
+    hookEventName: 'PreToolUse', permissionDecision: 'deny',
+    permissionDecisionReason: 'Autoplan publication guard is unavailable. Restore the installed autoplan/bin/phase-publication-hook before continuing this skill.',
+  } });
+  const shellWord = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
+  const script = `S="${toShellPath(ctx.paths.skillRoot)}/autoplan/bin/phase-publication-hook"
+if [ -f "$S" ]; then exec bash "$S"; fi
+printf '%s\\n' ${shellWord(unavailable)}`;
+  const command = `bash -c ${shellWord(script)}`;
+  // Keep each tool literal: the early-question launchers admit these hooks
+  // through their existing finite matcher policy.
+  const entries = ['Read', 'Agent'].map(tool => `    - matcher: "${tool}"
+      hooks:
+        - type: command
+          command: ${JSON.stringify(command)}
+          statusMessage: "Checking Autoplan phase publication..."`).join('\n');
+  return `hooks:\n  PreToolUse:\n${entries}`;
+}
+
+/**
+ * {{CEO_MODE_HANDOFF_HOOK}}: /plan-ceo-review's PostToolUse hook that shows the
+ * Step 0E mode handoff line to the user as a system message (Claude only), so
+ * the line is visible even when the model paraphrases it in chat.
+ */
+export function generateCeoModeHandoffHook(ctx: TemplateContext, args?: string[]): string {
+  if (ctx.skillName !== 'plan-ceo-review' || args?.length) {
+    throw new Error('CEO_MODE_HANDOFF_HOOK is only valid in plan-ceo-review without arguments');
+  }
+  if (ctx.host !== 'claude') return '';
+  const shellWord = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
+  const script = `S="${toShellPath(ctx.paths.skillRoot)}/plan-ceo-review/bin/mode-handoff-hook"
+if [ -f "$S" ]; then exec bash "$S"; fi
+exit 0`;
+  return `hooks:
+  PostToolUse:
+    - matcher: "Bash"
+      hooks:
+        - type: command
+          command: ${JSON.stringify(`bash -c ${shellWord(script)}`)}`;
+}
 
 /**
  * {{INVOKE_SKILL:skill-name}} — emits prose instructing Claude to read
@@ -23,7 +77,7 @@ export function generateInvokeSkill(ctx: TemplateContext, args?: string[]): stri
   const DEFAULT_SKIPS = [
     'Preamble (run first)',
     'AskUserQuestion Format',
-    'Completeness Principle — Boil the Lake',
+    'Completeness Principle — Boil the Ocean',
     'Search Before Building',
     'Contributor Mode',
     'Completion Status Protocol',
@@ -41,8 +95,45 @@ export function generateInvokeSkill(ctx: TemplateContext, args?: string[]): stri
 
 **If unreadable:** Skip with "Could not load /${skillName} — skipping." and continue.
 
-Follow its instructions from top to bottom, **skipping these sections** (already handled by the parent skill):
+Follow its instructions from top to bottom, **skipping these sections when present** (already handled by the parent skill):
 ${allSkips.map(s => `- ${s}`).join('\n')}
 
 Execute every other section at full depth. When the loaded skill's instructions are complete, continue with the next step below.`;
+}
+
+/** Autoplan reads methodology from this host's skill registry, not its runtime assets. */
+export function generateAutoplanReviewFile(ctx: TemplateContext, args?: string[]): string {
+  const skill = args?.[0];
+  if (!skill || !['plan-ceo-review', 'plan-design-review', 'plan-devex-review', 'plan-eng-review'].includes(skill)) {
+    throw new Error('AUTOPLAN_REVIEW_FILE requires an autoplan review skill');
+  }
+  const withSections = args?.[1] === 'with-sections';
+  if ((args?.length ?? 0) > 2 || (args?.[1] !== undefined && !withSections)) {
+    throw new Error('AUTOPLAN_REVIEW_FILE only accepts with-sections');
+  }
+  // Every host prepares an explicit bound artifact before create. Inline hosts
+  // supply one complete source file; Claude supplies main plus its carved section.
+  if (withSections) {
+    const phase = skill === 'plan-devex-review' ? 'dx' : skill.split('-')[1]!;
+    return `\`methodologyPath\` from \`bun "<SNAPSHOT_TOOL>" methodology ${phase} "<REVIEW_SKILL>" "<RESTORE_PATH>"\``;
+  }
+  if (ctx.host === 'claude') return `\`${ctx.paths.skillRoot}/${skill}/SKILL.md\``;
+
+  const host = getHostConfig(ctx.host);
+  const file = `gstack-${skill}/SKILL.md`;
+  const local = `${path.posix.dirname(host.localSkillRoot)}/${file}`;
+  const global = `~/${path.posix.dirname(host.globalRoot)}/${file}`;
+  // Resolve from the discovered entrypoint's directory: GSTACK_ROOT is an
+  // independently configurable runtime asset tree, not a skill registry.
+  // This also preserves custom CODEX_HOME installations without guessing HOME.
+  // Other hosts inline the review sections into this full registry file.
+  return `the sibling registry file \`../${file}\`, relative to the installed \`/autoplan\` SKILL.md directory (local: \`${local}\`; global: \`${global}\`${ctx.host === 'codex' ? ', or the corresponding skills directory under CODEX_HOME when configured' : ''})`;
+}
+
+/** Resolve once to a literal path; later phase commands run in fresh shells. */
+export function generateAutoplanSnapshotTool(ctx: TemplateContext): string {
+  return `\`\`\`bash
+${runtimeRootPrelude(ctx)}
+bun --no-env-file --config=/dev/null -e 'console.log(require("fs").realpathSync(process.argv[1]))' "${toShellPath(ctx.paths.binDir)}/gstack-autoplan-snapshot.ts"
+\`\`\``;
 }

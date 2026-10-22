@@ -1,0 +1,182 @@
+{
+ "note": "Every top-level non-guard Bash command from 11 captured qa-only-no-fix attempts; guard calls are omitted because their receipts belong to the original clock.",
+ "attempts": [
+  {
+   "source": "run 39181697029 paid-slice-8-a1 qa-only-no-fix",
+   "passed": true,
+   "commands": [
+    "_gs_d() { if command -v gtimeout >/dev/null; then gtimeout 30 \"$@\"; elif command -v timeout >/dev/null; then timeout 30 \"$@\"\nelif command -v perl >/dev/null; then perl -e 'alarm(shift);exec(@ARGV)' 30 \"$@\"; else return 125; fi; }\n_A=aside; command -v aside >/dev/null || _A=$(command -v ~/.local/bin/aside)\nif [ \"${GSTACK_SKIP_ASIDE:-}\" = \"1\" ] || [ -z \"$_A\" ]; then\n  echo \"NEEDS_ASIDE: ${GSTACK_PLATFORM:-$(uname)}\"\nelse\n  _rc=0; _o=$(_gs_d \"$_A\" repl 'console.log(\"ASIDE_READY \" + pwd)' 2>&1) || _rc=$?\n  case \"$_rc\" in\n    124|142) echo \"ASIDE_TIMEOUT: probe deadline exceeded\" ;;\n    125) echo \"ASIDE_UNAVAILABLE: bounded probe unavailable\" ;;\n    0) if printf '%s\\n' \"$_o\" | grep -q '^ASIDE_READY '; then echo \"READY: $_A\"\n       else echo \"ASIDE_NOT_RUNNING: no readiness marker\"; fi ;;\n    *) echo \"ASIDE_CLI_ERROR: exit $_rc; inspect aside --help locally\" ;;\n  esac\n  unset _o\nfi",
+    "[ -x '__QA_BROWSE__' ] && echo READY || echo NEEDS_SETUP",
+    "ls -la '__QA_FIXTURE__/qa-reports'",
+    "git -C '__QA_FIXTURE__' rev-parse --short HEAD",
+    "date -u +%Y-%m-%dT%H:%M:%SZ",
+    "git -C '__QA_FIXTURE__' log -1 --format=%cI"
+   ],
+   "head": "f0722bc"
+  },
+  {
+   "source": "run 39313931713 paid-slice-8-a1 qa-only-no-fix",
+   "passed": false,
+   "commands": [
+    "wc -l qa-only/SKILL.md; grep -n '^#' qa-only/SKILL.md | head -80",
+    "sed -n 389,603p qa-only/SKILL.md",
+    "cat qa-only/sections/exploratory.md",
+    "cat qa/sections/browser-setup.md",
+    "cat qa/sections/scope.md; echo ======; cat qa/sections/qa-patterns.md",
+    "cat qa/sections/qa-patterns.md",
+    "_gs_d() { if command -v gtimeout >/dev/null; then gtimeout 30 \"$@\"; elif command -v timeout >/dev/null; then timeout 30 \"$@\"\nelif command -v perl >/dev/null; then perl -e 'alarm(shift);exec(@ARGV)' 30 \"$@\"; else return 125; fi; }\n_A=aside; command -v aside >/dev/null || _A=$(command -v ~/.local/bin/aside)\nif [ \"${GSTACK_SKIP_ASIDE:-}\" = \"1\" ] || [ -z \"$_A\" ]; then\n  echo \"NEEDS_ASIDE: ${GSTACK_PLATFORM:-$(uname)}\"\nelse\n  _rc=0; _o=$(_gs_d \"$_A\" repl 'console.log(\"ASIDE_READY \" + pwd)' 2>&1) || _rc=$?\n  case \"$_rc\" in\n    124|142) echo \"ASIDE_TIMEOUT: probe deadline exceeded\" ;;\n    125) echo \"ASIDE_UNAVAILABLE: bounded probe unavailable\" ;;\n    0) if printf '%s\\n' \"$_o\" | grep -q '^ASIDE_READY '; then echo \"READY: $_A\"\n       else echo \"ASIDE_NOT_RUNNING: no readiness marker\"; fi ;;\n    *) echo \"ASIDE_CLI_ERROR: exit $_rc; inspect aside --help locally\" ;;\n  esac\n  unset _o\nfi",
+    "[ -x '__QA_BROWSE__' ] && echo READY || echo NEEDS_SETUP",
+    "ls -la '__QA_FIXTURE__/qa-reports'",
+    "ls -la; cat TODOS.md 2>/dev/null; git -C '__QA_FIXTURE__' rev-parse --short HEAD",
+    "date -u +%Y-%m-%dT%H:%M:%SZ"
+   ],
+   "head": "5186498"
+  },
+  {
+   "source": "run 39313931713 paid-slice-8-a2 qa-only-no-fix",
+   "passed": true,
+   "commands": [
+    "_gs_d() { if command -v gtimeout >/dev/null; then gtimeout 30 \"$@\"; elif command -v timeout >/dev/null; then timeout 30 \"$@\"\nelif command -v perl >/dev/null; then perl -e 'alarm(shift);exec(@ARGV)' 30 \"$@\"; else return 125; fi; }\n_A=aside; command -v aside >/dev/null || _A=$(command -v ~/.local/bin/aside)\nif [ \"${GSTACK_SKIP_ASIDE:-}\" = \"1\" ] || [ -z \"$_A\" ]; then\n  echo \"NEEDS_ASIDE: ${GSTACK_PLATFORM:-$(uname)}\"\nelse\n  _rc=0; _o=$(_gs_d \"$_A\" repl 'console.log(\"ASIDE_READY \" + pwd)' 2>&1) || _rc=$?\n  case \"$_rc\" in\n    124|142) echo \"ASIDE_TIMEOUT: probe deadline exceeded\" ;;\n    125) echo \"ASIDE_UNAVAILABLE: bounded probe unavailable\" ;;\n    0) if printf '%s\\n' \"$_o\" | grep -q '^ASIDE_READY '; then echo \"READY: $_A\"\n       else echo \"ASIDE_NOT_RUNNING: no readiness marker\"; fi ;;\n    *) echo \"ASIDE_CLI_ERROR: exit $_rc; inspect aside --help locally\" ;;\n  esac\n  unset _o\nfi",
+    "[ -x '__QA_BROWSE__' ] && echo READY || echo NEEDS_SETUP",
+    "ls -la '__QA_FIXTURE__/qa-reports'",
+    "ls -la '__QA_FIXTURE__/qa-reports/screenshots'",
+    "git -C '__QA_FIXTURE__' rev-parse --short HEAD",
+    "date -u +%Y-%m-%dT%H:%M:%SZ",
+    "ls -la __QA_FIXTURE__"
+   ],
+   "head": "5186498"
+  },
+  {
+   "source": "run 39320737890 paid-slice-8-a1 qa-only-no-fix",
+   "passed": true,
+   "commands": [
+    "_gs_d() { if command -v gtimeout >/dev/null; then gtimeout 30 \"$@\"; elif command -v timeout >/dev/null; then timeout 30 \"$@\"\nelif command -v perl >/dev/null; then perl -e 'alarm(shift);exec(@ARGV)' 30 \"$@\"; else return 125; fi; }\n_A=aside; command -v aside >/dev/null || _A=$(command -v ~/.local/bin/aside)\nif [ \"${GSTACK_SKIP_ASIDE:-}\" = \"1\" ] || [ -z \"$_A\" ]; then\n  echo \"NEEDS_ASIDE: ${GSTACK_PLATFORM:-$(uname)}\"\nelse\n  _rc=0; _o=$(_gs_d \"$_A\" repl 'console.log(\"ASIDE_READY \" + pwd)' 2>&1) || _rc=$?\n  case \"$_rc\" in\n    124|142) echo \"ASIDE_TIMEOUT: probe deadline exceeded\" ;;\n    125) echo \"ASIDE_UNAVAILABLE: bounded probe unavailable\" ;;\n    0) if printf '%s\\n' \"$_o\" | grep -q '^ASIDE_READY '; then echo \"READY: $_A\"\n       else echo \"ASIDE_NOT_RUNNING: no readiness marker\"; fi ;;\n    *) echo \"ASIDE_CLI_ERROR: exit $_rc; inspect aside --help locally\" ;;\n  esac\n  unset _o\nfi",
+    "[ -x '__QA_BROWSE__' ] && echo READY || echo NEEDS_SETUP",
+    "ls -la '__QA_FIXTURE__/qa-reports'",
+    "ls -la '__QA_FIXTURE__/qa-reports/screenshots'",
+    "git -C '__QA_FIXTURE__' rev-parse --short HEAD",
+    "date -u +%Y-%m-%dT%H:%M:%SZ",
+    "git -C '__QA_FIXTURE__' status --short",
+    "ls -la __QA_FIXTURE__",
+    "git -C '__QA_FIXTURE__' log -1 --format=%cI",
+    "grep -n \"baseline.json\" __QA_FIXTURE__/qa-reports/qa-only-report.md"
+   ],
+   "head": "f278f5b"
+  },
+  {
+   "source": "run 39320737890 paid-slice-8-a2 qa-only-no-fix",
+   "passed": true,
+   "commands": [
+    "wc -l qa-only/SKILL.md; grep -n '^#' qa-only/SKILL.md | head -80",
+    "sed -n 389,603p qa-only/SKILL.md",
+    "cat qa-only/sections/exploratory.md; ls qa/sections qa/templates qa-only/sections",
+    "cat qa/sections/scope.md",
+    "cat qa/sections/qa-patterns.md",
+    "cat qa/sections/browser-setup.md",
+    "_gs_d() { if command -v gtimeout >/dev/null; then gtimeout 30 \"$@\"; elif command -v timeout >/dev/null; then timeout 30 \"$@\"\nelif command -v perl >/dev/null; then perl -e 'alarm(shift);exec(@ARGV)' 30 \"$@\"; else return 125; fi; }\n_A=aside; command -v aside >/dev/null || _A=$(command -v ~/.local/bin/aside)\nif [ \"${GSTACK_SKIP_ASIDE:-}\" = \"1\" ] || [ -z \"$_A\" ]; then\n  echo \"NEEDS_ASIDE: ${GSTACK_PLATFORM:-$(uname)}\"\nelse\n  _rc=0; _o=$(_gs_d \"$_A\" repl 'console.log(\"ASIDE_READY \" + pwd)' 2>&1) || _rc=$?\n  case \"$_rc\" in\n    124|142) echo \"ASIDE_TIMEOUT: probe deadline exceeded\" ;;\n    125) echo \"ASIDE_UNAVAILABLE: bounded probe unavailable\" ;;\n    0) if printf '%s\\n' \"$_o\" | grep -q '^ASIDE_READY '; then echo \"READY: $_A\"\n       else echo \"ASIDE_NOT_RUNNING: no readiness marker\"; fi ;;\n    *) echo \"ASIDE_CLI_ERROR: exit $_rc; inspect aside --help locally\" ;;\n  esac\n  unset _o\nfi",
+    "[ -x '__QA_BROWSE__' ] && echo READY || echo NEEDS_SETUP",
+    "ls -la '__QA_FIXTURE__/qa-reports'",
+    "git -C '__QA_FIXTURE__' rev-parse --short HEAD",
+    "date -u +%Y-%m-%dT%H:%M:%SZ",
+    "ls -la; find . -maxdepth 1 -iname 'TODOS.md' -o -maxdepth 1 -iname 'README*' -o -maxdepth 1 -name package.json",
+    "cat qa-only/sections/reporting.md; echo ======; cat qa/templates/qa-report-template.md"
+   ],
+   "head": "f278f5b"
+  },
+  {
+   "source": "run 39320737890 paid-slice-8-a3 qa-only-no-fix",
+   "passed": true,
+   "commands": [
+    "wc -l qa-only/SKILL.md; grep -n '^#' qa-only/SKILL.md",
+    "_gs_d() { if command -v gtimeout >/dev/null; then gtimeout 30 \"$@\"; elif command -v timeout >/dev/null; then timeout 30 \"$@\"\nelif command -v perl >/dev/null; then perl -e 'alarm(shift);exec(@ARGV)' 30 \"$@\"; else return 125; fi; }\n_A=aside; command -v aside >/dev/null || _A=$(command -v ~/.local/bin/aside)\nif [ \"${GSTACK_SKIP_ASIDE:-}\" = \"1\" ] || [ -z \"$_A\" ]; then\n  echo \"NEEDS_ASIDE: ${GSTACK_PLATFORM:-$(uname)}\"\nelse\n  _rc=0; _o=$(_gs_d \"$_A\" repl 'console.log(\"ASIDE_READY \" + pwd)' 2>&1) || _rc=$?\n  case \"$_rc\" in\n    124|142) echo \"ASIDE_TIMEOUT: probe deadline exceeded\" ;;\n    125) echo \"ASIDE_UNAVAILABLE: bounded probe unavailable\" ;;\n    0) if printf '%s\\n' \"$_o\" | grep -q '^ASIDE_READY '; then echo \"READY: $_A\"\n       else echo \"ASIDE_NOT_RUNNING: no readiness marker\"; fi ;;\n    *) echo \"ASIDE_CLI_ERROR: exit $_rc; inspect aside --help locally\" ;;\n  esac\n  unset _o\nfi",
+    "[ -x '__QA_BROWSE__' ] && echo READY || echo NEEDS_SETUP",
+    "ls -la '__QA_FIXTURE__/qa-reports'",
+    "date -u +%Y-%m-%dT%H:%M:%SZ",
+    "git -C '__QA_FIXTURE__' rev-parse --short HEAD",
+    "git -C '__QA_FIXTURE__' log -1 --format=%cI",
+    "ls -la '__QA_FIXTURE__/qa-reports/screenshots'"
+   ],
+   "head": "f278f5b"
+  },
+  {
+   "source": "run 39332134395 paid-slice-8-a1 qa-only-no-fix",
+   "passed": false,
+   "commands": [
+    "wc -l qa-only/SKILL.md; grep -n '^#' qa-only/SKILL.md | head -80",
+    "sed -n 378,592p qa-only/SKILL.md",
+    "cat qa-only/sections/exploratory.md; echo ======; cat qa/sections/browser-setup.md",
+    "_gs_d() { if command -v gtimeout >/dev/null; then gtimeout 30 \"$@\"; elif command -v timeout >/dev/null; then timeout 30 \"$@\"\nelif command -v perl >/dev/null; then perl -e 'alarm(shift);exec(@ARGV)' 30 \"$@\"; else return 125; fi; }\n_A=aside; command -v aside >/dev/null || _A=$(command -v ~/.local/bin/aside)\nif [ \"${GSTACK_SKIP_ASIDE:-}\" = \"1\" ] || [ -z \"$_A\" ]; then\n  echo \"NEEDS_ASIDE: ${GSTACK_PLATFORM:-$(uname)}\"\nelse\n  _rc=0; _o=$(_gs_d \"$_A\" repl 'console.log(\"ASIDE_READY \" + pwd)' 2>&1) || _rc=$?\n  case \"$_rc\" in\n    124|142) echo \"ASIDE_TIMEOUT: probe deadline exceeded\" ;;\n    125) echo \"ASIDE_UNAVAILABLE: bounded probe unavailable\" ;;\n    0) if printf '%s\\n' \"$_o\" | grep -q '^ASIDE_READY '; then echo \"READY: $_A\"\n       else echo \"ASIDE_NOT_RUNNING: no readiness marker\"; fi ;;\n    *) echo \"ASIDE_CLI_ERROR: exit $_rc; inspect aside --help locally\" ;;\n  esac\n  unset _o\nfi",
+    "[ -x '__QA_BROWSE__' ] && echo READY || echo NEEDS_SETUP",
+    "ls -la '__QA_FIXTURE__/qa-reports'",
+    "ls -la '__QA_FIXTURE__/qa-reports/screenshots'",
+    "git -C '__QA_FIXTURE__' rev-parse --short HEAD",
+    "date -u +%Y-%m-%dT%H:%M:%SZ",
+    "ls -la; git -C '__QA_FIXTURE__' branch --show-current"
+   ],
+   "head": "8802d99"
+  },
+  {
+   "source": "run 39332134395 paid-slice-8-a2 qa-only-no-fix",
+   "passed": true,
+   "commands": [
+    "wc -l qa-only/SKILL.md; ls qa-only qa qa-only/sections qa/sections qa/templates 2>/dev/null",
+    "_gs_d() { if command -v gtimeout >/dev/null; then gtimeout 30 \"$@\"; elif command -v timeout >/dev/null; then timeout 30 \"$@\"\nelif command -v perl >/dev/null; then perl -e 'alarm(shift);exec(@ARGV)' 30 \"$@\"; else return 125; fi; }\n_A=aside; command -v aside >/dev/null || _A=$(command -v ~/.local/bin/aside)\nif [ \"${GSTACK_SKIP_ASIDE:-}\" = \"1\" ] || [ -z \"$_A\" ]; then\n  echo \"NEEDS_ASIDE: ${GSTACK_PLATFORM:-$(uname)}\"\nelse\n  _rc=0; _o=$(_gs_d \"$_A\" repl 'console.log(\"ASIDE_READY \" + pwd)' 2>&1) || _rc=$?\n  case \"$_rc\" in\n    124|142) echo \"ASIDE_TIMEOUT: probe deadline exceeded\" ;;\n    125) echo \"ASIDE_UNAVAILABLE: bounded probe unavailable\" ;;\n    0) if printf '%s\\n' \"$_o\" | grep -q '^ASIDE_READY '; then echo \"READY: $_A\"\n       else echo \"ASIDE_NOT_RUNNING: no readiness marker\"; fi ;;\n    *) echo \"ASIDE_CLI_ERROR: exit $_rc; inspect aside --help locally\" ;;\n  esac\n  unset _o\nfi",
+    "[ -x '__QA_BROWSE__' ] && echo READY || echo NEEDS_SETUP",
+    "ls -la '__QA_FIXTURE__/qa-reports'",
+    "ls -la '__QA_FIXTURE__/qa-reports/screenshots'",
+    "git -C '__QA_FIXTURE__' rev-parse --short HEAD",
+    "git -C '__QA_FIXTURE__' branch --show-current",
+    "date -u +%Y-%m-%dT%H:%M:%SZ",
+    "ls -la; find . -maxdepth 2 -not -path './.git*' -type f | sort | head -50",
+    "cat fixture-browser-probe.ts"
+   ],
+   "head": "8802d99"
+  },
+  {
+   "source": "run 39332134395 paid-slice-8-a3 qa-only-no-fix",
+   "passed": true,
+   "commands": [
+    "_gs_d() { if command -v gtimeout >/dev/null; then gtimeout 30 \"$@\"; elif command -v timeout >/dev/null; then timeout 30 \"$@\"\nelif command -v perl >/dev/null; then perl -e 'alarm(shift);exec(@ARGV)' 30 \"$@\"; else return 125; fi; }\n_A=aside; command -v aside >/dev/null || _A=$(command -v ~/.local/bin/aside)\nif [ \"${GSTACK_SKIP_ASIDE:-}\" = \"1\" ] || [ -z \"$_A\" ]; then\n  echo \"NEEDS_ASIDE: ${GSTACK_PLATFORM:-$(uname)}\"\nelse\n  _rc=0; _o=$(_gs_d \"$_A\" repl 'console.log(\"ASIDE_READY \" + pwd)' 2>&1) || _rc=$?\n  case \"$_rc\" in\n    124|142) echo \"ASIDE_TIMEOUT: probe deadline exceeded\" ;;\n    125) echo \"ASIDE_UNAVAILABLE: bounded probe unavailable\" ;;\n    0) if printf '%s\\n' \"$_o\" | grep -q '^ASIDE_READY '; then echo \"READY: $_A\"\n       else echo \"ASIDE_NOT_RUNNING: no readiness marker\"; fi ;;\n    *) echo \"ASIDE_CLI_ERROR: exit $_rc; inspect aside --help locally\" ;;\n  esac\n  unset _o\nfi",
+    "[ -x '__QA_BROWSE__' ] && echo READY || echo NEEDS_SETUP",
+    "ls -la '__QA_FIXTURE__/qa-reports'",
+    "git -C '__QA_FIXTURE__' rev-parse --short HEAD",
+    "date -u +%Y-%m-%dT%H:%M:%SZ"
+   ],
+   "head": "8802d99"
+  },
+  {
+   "source": "run 39336730429 paid-slice-8-a1 qa-only-no-fix",
+   "passed": false,
+   "commands": [
+    "wc -l qa-only/SKILL.md; grep -n '^#' qa-only/SKILL.md | head -80",
+    "cat qa-only/sections/exploratory.md",
+    "cat qa/sections/browser-setup.md; ls -la qa-reports qa-reports/screenshots; ls qa/sections qa-only/sections qa/templates",
+    "_gs_d() { if command -v gtimeout >/dev/null; then gtimeout 30 \"$@\"; elif command -v timeout >/dev/null; then timeout 30 \"$@\"\nelif command -v perl >/dev/null; then perl -e 'alarm(shift);exec(@ARGV)' 30 \"$@\"; else return 125; fi; }\n_A=aside; command -v aside >/dev/null || _A=$(command -v ~/.local/bin/aside)\nif [ \"${GSTACK_SKIP_ASIDE:-}\" = \"1\" ] || [ -z \"$_A\" ]; then\n  echo \"NEEDS_ASIDE: ${GSTACK_PLATFORM:-$(uname)}\"\nelse\n  _rc=0; _o=$(_gs_d \"$_A\" repl 'console.log(\"ASIDE_READY \" + pwd)' 2>&1) || _rc=$?\n  case \"$_rc\" in\n    124|142) echo \"ASIDE_TIMEOUT: probe deadline exceeded\" ;;\n    125) echo \"ASIDE_UNAVAILABLE: bounded probe unavailable\" ;;\n    0) if printf '%s\\n' \"$_o\" | grep -q '^ASIDE_READY '; then echo \"READY: $_A\"\n       else echo \"ASIDE_NOT_RUNNING: no readiness marker\"; fi ;;\n    *) echo \"ASIDE_CLI_ERROR: exit $_rc; inspect aside --help locally\" ;;\n  esac\n  unset _o\nfi",
+    "[ -x '__QA_BROWSE__' ] && echo READY || echo NEEDS_SETUP",
+    "git -C '__QA_FIXTURE__' rev-parse --short HEAD",
+    "date -u +%Y-%m-%dT%H:%M:%SZ",
+    "ls -la; git -C '__QA_FIXTURE__' branch --show-current",
+    "git -C '__QA_FIXTURE__' log -1 --format=%cI"
+   ],
+   "head": "afa0bbf"
+  },
+  {
+   "source": "run 39336730429 paid-slice-8-a2 qa-only-no-fix",
+   "passed": true,
+   "commands": [
+    "wc -l qa-only/SKILL.md; grep -n '^#' qa-only/SKILL.md | head -80",
+    "sed -n 389,603p qa-only/SKILL.md",
+    "cat qa-only/sections/exploratory.md",
+    "cat qa/sections/browser-setup.md",
+    "cat qa/sections/scope.md; echo ======; cat qa/sections/qa-patterns.md",
+    "_gs_d() { if command -v gtimeout >/dev/null; then gtimeout 30 \"$@\"; elif command -v timeout >/dev/null; then timeout 30 \"$@\"\nelif command -v perl >/dev/null; then perl -e 'alarm(shift);exec(@ARGV)' 30 \"$@\"; else return 125; fi; }\n_A=aside; command -v aside >/dev/null || _A=$(command -v ~/.local/bin/aside)\nif [ \"${GSTACK_SKIP_ASIDE:-}\" = \"1\" ] || [ -z \"$_A\" ]; then\n  echo \"NEEDS_ASIDE: ${GSTACK_PLATFORM:-$(uname)}\"\nelse\n  _rc=0; _o=$(_gs_d \"$_A\" repl 'console.log(\"ASIDE_READY \" + pwd)' 2>&1) || _rc=$?\n  case \"$_rc\" in\n    124|142) echo \"ASIDE_TIMEOUT: probe deadline exceeded\" ;;\n    125) echo \"ASIDE_UNAVAILABLE: bounded probe unavailable\" ;;\n    0) if printf '%s\\n' \"$_o\" | grep -q '^ASIDE_READY '; then echo \"READY: $_A\"\n       else echo \"ASIDE_NOT_RUNNING: no readiness marker\"; fi ;;\n    *) echo \"ASIDE_CLI_ERROR: exit $_rc; inspect aside --help locally\" ;;\n  esac\n  unset _o\nfi",
+    "ls -la '__QA_FIXTURE__/qa-reports'",
+    "[ -x '__QA_BROWSE__' ] && echo READY || echo NEEDS_SETUP",
+    "date -u +%Y-%m-%dT%H:%M:%SZ",
+    "git -C '__QA_FIXTURE__' rev-parse --short HEAD",
+    "ls; ls qa/templates; ls -a screenshots qa-reports/screenshots 2>/dev/null"
+   ],
+   "head": "afa0bbf"
+  }
+ ]
+}

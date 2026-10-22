@@ -14,6 +14,27 @@
  *                                              platform-detect, uninstall
  */
 
+import type { Model } from './models';
+import { validateModel } from './models';
+
+export type HostTier = 'full' | 'experimental' | 'instruction-only';
+export const HOST_TIERS: readonly HostTier[] = ['full', 'experimental', 'instruction-only'];
+
+export interface HostCapabilities {
+  /** Runs shell commands, so bin/ helpers and preambles execute. */
+  toolExecution: boolean;
+  /** 'native': a structured question tool; 'prose': questions are plain text. */
+  questions: 'native' | 'prose';
+  /** Has plan-mode transitions (enter/exit plan mode). */
+  planMode: boolean;
+  /** Can delegate work to sub-agents. */
+  delegation: boolean;
+  /** Can drive gstack's browser (needs toolExecution). */
+  browser: boolean;
+  /** 'enforced': hooks can block a tool call; 'advisory': safety skills only warn. */
+  safetyHooks: 'enforced' | 'advisory';
+}
+
 export interface HostConfig {
   /** Unique host identifier (e.g., 'opencode'). Must match filename in hosts/. */
   name: string;
@@ -23,6 +44,20 @@ export interface HostConfig {
   cliCommand: string;
   /** Alternative binary names (e.g., ['droid'] for factory). */
   cliAliases?: string[];
+
+  /** Model overlay used when generation does not receive an explicit --model. */
+  defaultModel: Model;
+
+  // --- Support Contract (docs/ADDING_A_HOST.md "Host tiers and capabilities") ---
+  /**
+   * full: installs, renders, and has a dated certification record (a real
+   * workflow run plus an upgrade from an existing install).
+   * experimental: installs and renders; not certified by a real run.
+   * instruction-only: no install arm; setup prints instructions and changes nothing.
+   */
+  tier: HostTier;
+  /** What the host runtime offers. Rendering and docs must not claim more. */
+  capabilities: HostCapabilities;
 
   // --- Path Configuration ---
   /** Global install path relative to $HOME (e.g., '.config/opencode/skills/gstack'). */
@@ -48,6 +83,12 @@ export interface HostConfig {
     descriptionLimitBehavior?: 'error' | 'truncate' | 'warn';
     /** Additional frontmatter fields to inject (host-wide). */
     extraFields?: Record<string, unknown>;
+    /**
+     * Write the installed directory name (gstack-<skill>) into `name:`. For
+     * hosts that index and de-duplicate skills by frontmatter name, where a
+     * bare `review` would be shadowed by any other `review` skill (#2825).
+     */
+    nameMatchesDirectory?: boolean;
     /** Rename fields from template (e.g., { 'voice-triggers': 'triggers' }). */
     renameFields?: Record<string, string>;
     /** Conditionally add fields based on template frontmatter values. */
@@ -56,10 +97,8 @@ export interface HostConfig {
 
   // --- Generation ---
   generation: {
-    /** Whether to create sidecar metadata file (e.g., openai.yaml for Codex). */
+    /** Whether to create a metadata file alongside skills (always openai.yaml; gen-skill-docs hardcodes the format). */
     generateMetadata: boolean;
-    /** Metadata file format (e.g., 'openai.yaml'). */
-    metadataFormat?: string | null;
     /** Skill directories to exclude from generation for this host. */
     skipSkills?: string[];
     /** Skill directories to include (allowlist). Union logic: include minus skip. */
@@ -81,20 +120,17 @@ export interface HostConfig {
     /** Dir → explicit file list for selective file linking. */
     globalFiles?: Record<string, string[]>;
   };
-  /** Optional repo-local sidecar config (e.g., Codex uses .agents/skills/gstack). */
-  sidecar?: {
-    /** Sidecar path relative to repo root (e.g., '.agents/skills/gstack'). */
-    path: string;
-    /** Assets to symlink into sidecar (different set than global). */
-    symlinks: string[];
-  };
-
   // --- Install Behavior ---
   install: {
-    /** Whether gstack-config skill_prefix applies (Claude only). */
-    prefixable: boolean;
     /** How skills are linked into the host dir. */
     linkingStrategy: 'real-dir-symlink' | 'symlink-generated';
+    /**
+     * Instruction-only fallback tier: a committed rules digest this host's
+     * users can hand-copy when there is no full install arm. Delivery is
+     * print-path + user-performed copy ONLY — setup must never write or
+     * overwrite a user's own AGENTS.md. See scripts/gen-agents-digest.ts.
+     */
+    instructionTier?: { rulesFile: string };
   };
 
   // --- Host-Specific Behavioral Config ---
@@ -104,11 +140,6 @@ export interface HostConfig {
   learningsMode?: 'full' | 'basic';
   /** Anti-prompt-injection boundary instruction for cross-model invocations. */
   boundaryInstruction?: string;
-
-  /** Static files to copy alongside generated skills (e.g., { 'SOUL.md': 'openclaw/SOUL.md' }). */
-  staticFiles?: Record<string, string>;
-  /** Optional path to host-adapter module for complex transformations. */
-  adapter?: string;
 }
 
 // --- Validation ---
@@ -117,7 +148,7 @@ const NAME_REGEX = /^[a-z][a-z0-9-]*$/;
 const PATH_REGEX = /^[a-zA-Z0-9_.\/${}~-]+$/;
 const CLI_REGEX = /^[a-z][a-z0-9_-]*$/;
 
-export function validateHostConfig(config: HostConfig): string[] {
+export function validateHostConfig(config: HostConfig, validResolverNames?: ReadonlySet<string>): string[] {
   const errors: string[] = [];
 
   if (!NAME_REGEX.test(config.name)) {
@@ -136,6 +167,24 @@ export function validateHostConfig(config: HostConfig): string[] {
       }
     }
   }
+  if (!HOST_TIERS.includes(config.tier)) {
+    errors.push(`tier '${config.tier}' must be one of ${HOST_TIERS.join(', ')}`);
+  }
+  const caps = config.capabilities;
+  if (!caps) {
+    errors.push('capabilities are required');
+  } else {
+    if (caps.browser && !caps.toolExecution) errors.push('capabilities.browser requires toolExecution');
+    if (!['native', 'prose'].includes(caps.questions)) errors.push(`capabilities.questions must be 'native' or 'prose'`);
+    if (!['enforced', 'advisory'].includes(caps.safetyHooks)) errors.push(`capabilities.safetyHooks must be 'enforced' or 'advisory'`);
+  }
+  if (config.tier === 'instruction-only' && !config.install.instructionTier && config.name !== 'slate' && config.name !== 'gbrain') {
+    errors.push('instruction-only hosts must declare install.instructionTier (what setup tells the user to copy)');
+  }
+  const modelError = validateModel(config.defaultModel);
+  if (modelError) {
+    errors.push(`defaultModel ${modelError}`);
+  }
   if (!PATH_REGEX.test(config.globalRoot)) {
     errors.push(`globalRoot '${config.globalRoot}' contains invalid characters`);
   }
@@ -152,15 +201,27 @@ export function validateHostConfig(config: HostConfig): string[] {
     errors.push(`install.linkingStrategy must be 'real-dir-symlink' or 'symlink-generated'`);
   }
 
+  // Cross-check suppressedResolvers against the known resolver names (injected to avoid a
+  // circular import on the resolver registry). A typo would otherwise silently no-op: the
+  // generator short-circuits suppressed names before the "unknown placeholder" throw, so an
+  // unknown entry never surfaces at generation time either.
+  if (validResolverNames && config.suppressedResolvers) {
+    for (const name of config.suppressedResolvers) {
+      if (!validResolverNames.has(name)) {
+        errors.push(`suppressedResolvers entry '${name}' is not a known resolver`);
+      }
+    }
+  }
+
   return errors;
 }
 
-export function validateAllConfigs(configs: HostConfig[]): string[] {
+export function validateAllConfigs(configs: HostConfig[], validResolverNames?: ReadonlySet<string>): string[] {
   const errors: string[] = [];
 
   // Per-config validation
   for (const config of configs) {
-    const configErrors = validateHostConfig(config);
+    const configErrors = validateHostConfig(config, validResolverNames);
     errors.push(...configErrors.map(e => `[${config.name}] ${e}`));
   }
 

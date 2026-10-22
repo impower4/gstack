@@ -1,0 +1,378 @@
+{
+ "provenance": {
+  "run": "36385945043",
+  "shard": "paid-slice-5 skill-e2e-plan-ceo-split-overflow",
+  "attempt": "plan-ceo-review-1790577773887-YUjBHs",
+  "originalOutcome": "completion_summary",
+  "originalReviewCount": 0,
+  "originalReviewCountCeiling": 8,
+  "originalElapsedMs": 1302190,
+  "completeAt": "2026-09-28T06:51:48.417Z",
+  "observationSha256": "1f5edc82303a3428e4672dde34099c035fa42f8064399cf0431f0c0b8f0069c8",
+  "qualification": "Exact first six published native calls (mode + five candidates) and their captured fingerprints through the final E5 ACK. NativeCall is stored once and reattached by index. The run continued to a full report because no candidate was recognized; this fixture grants no paid semantic or full-review credit."
+ },
+ "calls": [
+  {
+   "sessionId": "591ed182-4cd8-4f17-8498-4d658b7eae6b",
+   "toolUseId": "toolu_01Rpzvmkj8MXwmvo6GKJF7SR",
+   "questions": [
+    {
+     "question": "D1 — Which review posture should this prioritization review take?\nProject/branch/task: main — choosing 2-3 of 5 chat-platform integrations for the quarter (strategy-only depth).\nELI10: You have five candidate integrations and room for two or three. The review mode sets how I behave for the rest of this session: push you to build more, hold exactly what you listed, or help you strip to what fits. Each candidate still gets its own include/defer/cut question after this; the mode only sets my posture.\nStakes if we pick wrong: an expansion posture on a capacity-capped quarter tempts you into a fourth integration you cannot staff; a reduction posture on a plan that is already tight would just re-confirm what you wrote.\nRecommendation: SCOPE REDUCTION because the hard limit is 2-3 slots against 5 candidates, so the real work is deciding what NOT to ship this quarter, and reduction's per-item defer/keep procedure is exactly the per-candidate decision you asked for.\nNote: options differ in kind, not coverage — no completeness score.\nPros / cons:\nA) SCOPE REDUCTION (recommended)\n  ✅ Matches the stated bandwidth cap: 5 candidates, at most 3 slots, so the review is about what to leave out\n  ✅ Per-candidate defer/keep questions are the mode's native procedure; no bundled pick\n  ❌ I will not pitch a shared notifier adapter or other additions unless you ask for them\nB) HOLD SCOPE\n  ✅ Maximum rigor on the 5 as written: failure paths, what each integration must prove before ship\n  ✅ Still asks per-candidate defer/keep through the complexity check\n  ❌ Treats all 5 as the plan to harden, when only 2-3 can ship; rigor on cut items is wasted\nC) SELECTIVE EXPANSION\n  ✅ Keeps the 5 and lets you cherry-pick additions (e.g. shared adapter, chat-native ack) one by one\n  ✅ Adds a CEO summary doc plus an adversarial spec review pass\n  ❌ Heavier ceremony (0F-0H, spec-review loop) for a decision that is fundamentally a cut\nD) SCOPE EXPANSION\n  ✅ Dreams the 12-month chat-native platform and asks what 10x looks like\n  ✅ Useful if the 2-3 cap is soft and AI-assisted build speed changes the math\n  ❌ Directly fights the stated capacity limit; likely to recommend more than you can staff\nNet: you are trading ambition prompts against decisiveness; the plan already asks for a cut, so reduction is the honest posture.",
+     "header": "Review mode",
+     "multiSelect": false,
+     "options": [
+      {
+       "label": "SCOPE REDUCTION (recommended)",
+       "description": "Strip to what fits the 2-3 slot cap. Per-candidate include/defer/cut questions, then the deep review on the retained set. ✅ Matches the stated bandwidth constraint directly ✅ Native per-item defer/keep procedure ❌ No proactive additions pitched unless you ask"
+      },
+      {
+       "label": "HOLD SCOPE",
+       "description": "Harden all 5 as written with maximum rigor, then per-candidate defer/keep via the complexity check. ✅ Deepest failure-path tracing ✅ Still individual decisions ❌ Rigor spent on candidates that cannot ship this quarter"
+      },
+      {
+       "label": "SELECTIVE EXPANSION",
+       "description": "Hold the 5, cherry-pick additions one at a time (shared adapter, chat-native ack), plus CEO summary and spec-review loop. ✅ Surfaces adjacent wins individually ✅ Adversarial reviewer pass ❌ Heaviest ceremony for a cut decision"
+      },
+      {
+       "label": "SCOPE EXPANSION",
+       "description": "Rethink toward the 12-month chat-native ideal; ask what 10x for 2x effort looks like. ✅ Challenges whether the 2-3 cap is real under AI-assisted build ✅ Platonic ideal framing ❌ Fights the stated capacity limit"
+      }
+     ]
+    }
+   ],
+   "answered": true,
+   "failed": false,
+   "answers": {
+    "D1 — Which review posture should this prioritization review take?\nProject/branch/task: main — choosing 2-3 of 5 chat-platform integrations for the quarter (strategy-only depth).\nELI10: You have five candidate integrations and room for two or three. The review mode sets how I behave for the rest of this session: push you to build more, hold exactly what you listed, or help you strip to what fits. Each candidate still gets its own include/defer/cut question after this; the mode only sets my posture.\nStakes if we pick wrong: an expansion posture on a capacity-capped quarter tempts you into a fourth integration you cannot staff; a reduction posture on a plan that is already tight would just re-confirm what you wrote.\nRecommendation: SCOPE REDUCTION because the hard limit is 2-3 slots against 5 candidates, so the real work is deciding what NOT to ship this quarter, and reduction's per-item defer/keep procedure is exactly the per-candidate decision you asked for.\nNote: options differ in kind, not coverage — no completeness score.\nPros / cons:\nA) SCOPE REDUCTION (recommended)\n  ✅ Matches the stated bandwidth cap: 5 candidates, at most 3 slots, so the review is about what to leave out\n  ✅ Per-candidate defer/keep questions are the mode's native procedure; no bundled pick\n  ❌ I will not pitch a shared notifier adapter or other additions unless you ask for them\nB) HOLD SCOPE\n  ✅ Maximum rigor on the 5 as written: failure paths, what each integration must prove before ship\n  ✅ Still asks per-candidate defer/keep through the complexity check\n  ❌ Treats all 5 as the plan to harden, when only 2-3 can ship; rigor on cut items is wasted\nC) SELECTIVE EXPANSION\n  ✅ Keeps the 5 and lets you cherry-pick additions (e.g. shared adapter, chat-native ack) one by one\n  ✅ Adds a CEO summary doc plus an adversarial spec review pass\n  ❌ Heavier ceremony (0F-0H, spec-review loop) for a decision that is fundamentally a cut\nD) SCOPE EXPANSION\n  ✅ Dreams the 12-month chat-native platform and asks what 10x looks like\n  ✅ Useful if the 2-3 cap is soft and AI-assisted build speed changes the math\n  ❌ Directly fights the stated capacity limit; likely to recommend more than you can staff\nNet: you are trading ambition prompts against decisiveness; the plan already asks for a cut, so reduction is the honest posture.": "HOLD SCOPE"
+   },
+   "unansweredQuestionIndices": [],
+   "answeredAt": "2026-09-28T06:45:57.074Z"
+  },
+  {
+   "sessionId": "591ed182-4cd8-4f17-8498-4d658b7eae6b",
+   "toolUseId": "toolu_0134ihX3WiXfvA1ztMRML3r8",
+   "questions": [
+    {
+     "question": "D2.1 — R-E1: Include, defer, or cut the Slack DM bot for incident alerts?\nProject/branch/task: main — first of five per-candidate calls; at most 3 Includes total.\nELI10: Slack is the single most-requested feature you have (about 40% of every ask in the Q2 survey) and it is also the cheapest of the big platforms to build because the workspace-install auth already exists. This call decides whether Slack takes one of your 2-3 slots. No other candidate depends on it.\nStakes if we pick wrong: leaving Slack out keeps your top survey ask open for another quarter while you build for smaller segments; including it costs about 2 human-weeks (CC+gstack: ~1-2 days).\nRecommendation: Include because it serves the largest demand at the second-lowest cost and reuses the only auth flow you already have.\nNote: options differ in kind, not coverage — no completeness score.\nNet: this is the anchor pick; the real debate is slots two and three.",
+     "header": "E1 Slack",
+     "multiSelect": false,
+     "options": [
+      {
+       "label": "Include this quarter (recommended)",
+       "description": "Effort M (human ~2 wk / CC+gstack ~1-2 days), risk low. Reuses existing Slack auth. Verification: install flow, alert delivery, 429 retry, revoked-token and channel-archived paths. ✅ Serves ~40% of Q2 asks, the top customer request ✅ Cheapest big-platform build thanks to reusable auth ❌ Uses one of only three slots; DM-vs-channel shape still needs confirming"
+      },
+      {
+       "label": "Defer to next quarter",
+       "description": "Effort S (zero implementation this quarter), risk high. Recorded in TODOS.md with the Q2 survey context. ✅ Frees a slot for an enterprise platform with revenue attached ✅ Nothing is lost permanently; auth reuse still holds next quarter ❌ Top-requested feature stays open another quarter in every sales call"
+      },
+      {
+       "label": "Cut entirely",
+       "description": "Effort S (zero implementation), risk high. Removed from the roadmap with a reason; no TODO. ✅ Removes the largest single build from the roadmap ✅ Forces the team to bet on revenue segments only ❌ Abandons the 40%-of-asks segment with no plan to revisit"
+      },
+      {
+       "label": "Hold, discuss first",
+       "description": "Stops the chain here; E2-E5 wait. ✅ Lets you question the DM-vs-channel shape before committing ✅ No disposition recorded until you say continue ❌ Delays the remaining four decisions"
+      }
+     ]
+    }
+   ],
+   "answered": true,
+   "failed": false,
+   "answers": {
+    "D2.1 — R-E1: Include, defer, or cut the Slack DM bot for incident alerts?\nProject/branch/task: main — first of five per-candidate calls; at most 3 Includes total.\nELI10: Slack is the single most-requested feature you have (about 40% of every ask in the Q2 survey) and it is also the cheapest of the big platforms to build because the workspace-install auth already exists. This call decides whether Slack takes one of your 2-3 slots. No other candidate depends on it.\nStakes if we pick wrong: leaving Slack out keeps your top survey ask open for another quarter while you build for smaller segments; including it costs about 2 human-weeks (CC+gstack: ~1-2 days).\nRecommendation: Include because it serves the largest demand at the second-lowest cost and reuses the only auth flow you already have.\nNote: options differ in kind, not coverage — no completeness score.\nNet: this is the anchor pick; the real debate is slots two and three.": "Include this quarter (recommended)"
+   },
+   "unansweredQuestionIndices": [],
+   "answeredAt": "2026-09-28T06:47:25.160Z"
+  },
+  {
+   "sessionId": "591ed182-4cd8-4f17-8498-4d658b7eae6b",
+   "toolUseId": "toolu_01ErdLaikMaLqwBF5WCVS2RY",
+   "questions": [
+    {
+     "question": "D2.2 — R-E2: Include, defer, or cut the Discord guild bot for community channels?\nProject/branch/task: main — second of five per-candidate calls; Slack already holds slot 1 of 3.\nELI10: Discord users are about 15% of asks and the loudest group, but Discord is the most expensive build after Teams (about 3 human-weeks, CC+gstack: ~2-3 days) because there is no existing auth to reuse, and the use case is community channels rather than on-call incident response. Loud is not the same as large or paying. This call decides whether Discord takes slot 2.\nStakes if we pick wrong: including it spends the biggest greenfield build on the segment least likely to pay for incident alerting; cutting it outright tells a vocal community you are not coming, which is the segment most likely to say so publicly.\nRecommendation: Defer because 15% of asks at 3 greenfield weeks is the worst demand-per-week ratio except Teams, and unlike Teams it carries no stated revenue; keep it on the next-quarter list so the community gets a date, not a no.\nNote: options differ in kind, not coverage — no completeness score.\nNet: you are trading community goodwill against a slot that revenue-bearing platforms are competing for.",
+     "header": "E2 Discord",
+     "multiSelect": false,
+     "options": [
+      {
+       "label": "Include this quarter",
+       "description": "Effort L (human ~3 wk / CC+gstack ~2-3 days), risk medium. No reuse; new OAuth2 app, bot token, gateway or webhook client. Verification: guild install, channel permission denied, rate limit, bot kicked. ✅ Answers the most vocal segment and stops the public asks ✅ Community channels can double as a support and marketing surface ❌ Largest greenfield build for a segment with no stated revenue; uses slot 2 of 3"
+      },
+      {
+       "label": "Defer to next quarter (recommended)",
+       "description": "Effort S (zero implementation this quarter), risk low. TODOS.md entry with the 15% figure and the community-channel use case. ✅ Keeps slot 2 open for a platform with revenue attached ✅ Gives the community a next-quarter date instead of silence ❌ Loud segment stays loud for one more quarter"
+      },
+      {
+       "label": "Cut entirely",
+       "description": "Effort S (zero implementation), risk medium. Removed with reason; no TODO. ✅ Clears a 3-week build from the roadmap permanently ✅ Signals focus on on-call incident surfaces, not community chat ❌ Publicly visible no to the most vocal 15% with no path back"
+      },
+      {
+       "label": "Hold, discuss first",
+       "description": "Stops the chain here; E3-E5 wait. ✅ Room to discuss whether community channels fit the product at all ✅ No disposition recorded until you say continue ❌ Delays the remaining three decisions"
+      }
+     ]
+    }
+   ],
+   "answered": true,
+   "failed": false,
+   "answers": {
+    "D2.2 — R-E2: Include, defer, or cut the Discord guild bot for community channels?\nProject/branch/task: main — second of five per-candidate calls; Slack already holds slot 1 of 3.\nELI10: Discord users are about 15% of asks and the loudest group, but Discord is the most expensive build after Teams (about 3 human-weeks, CC+gstack: ~2-3 days) because there is no existing auth to reuse, and the use case is community channels rather than on-call incident response. Loud is not the same as large or paying. This call decides whether Discord takes slot 2.\nStakes if we pick wrong: including it spends the biggest greenfield build on the segment least likely to pay for incident alerting; cutting it outright tells a vocal community you are not coming, which is the segment most likely to say so publicly.\nRecommendation: Defer because 15% of asks at 3 greenfield weeks is the worst demand-per-week ratio except Teams, and unlike Teams it carries no stated revenue; keep it on the next-quarter list so the community gets a date, not a no.\nNote: options differ in kind, not coverage — no completeness score.\nNet: you are trading community goodwill against a slot that revenue-bearing platforms are competing for.": "Defer to next quarter (recommended)"
+   },
+   "unansweredQuestionIndices": [],
+   "answeredAt": "2026-09-28T06:48:24.497Z"
+  },
+  {
+   "sessionId": "591ed182-4cd8-4f17-8498-4d658b7eae6b",
+   "toolUseId": "toolu_01RrrTTNfdTkR5P6hR2j9ij6",
+   "questions": [
+    {
+     "question": "D2.3 — R-E3: Include, defer, or cut the Microsoft Teams webhook + bot framework integration?\nProject/branch/task: main — third of five per-candidate calls; Slack holds slot 1, Discord deferred; slots 2 and 3 open.\nELI10: Teams is your most expensive candidate (about 4 human-weeks, CC+gstack: ~3-4 days) and only about 5% of asks, but those asks come from enterprise customers and the plan says they carry the highest revenue per user of any segment. Teams is also the second platform every incident tool ships, and enterprises are re-buying alerting right now because Opsgenie is being retired. The plan does not say how much ARR is actually gated on Teams; that number is unknown. This call decides whether Teams takes slot 2.\nStakes if we pick wrong: including it without a named deal spends the biggest build on 5% of asks; deferring it when a renewal or expansion is gated on Teams hands that enterprise account to a competitor during the one quarter they are shopping.\nRecommendation: Include because it is the only candidate with stated revenue upside plus a market timing window, and 4 weeks is affordable alongside Slack (6 human-weeks total, CC+gstack: ~1 week); confirm the ARR-at-risk figure in Section review before staffing starts.\nNote: options differ in kind, not coverage — no completeness score.\nNet: you are trading the largest build cost against the only candidate described in dollars rather than asks.",
+     "header": "E3 Teams",
+     "multiSelect": false,
+     "options": [
+      {
+       "label": "Include this quarter (recommended)",
+       "description": "Effort XL (human ~4 wk / CC+gstack ~3-4 days), risk medium. Reuse: none stated; Bot Framework registration, Azure AD app, incoming webhook path. Verification: tenant install, admin consent denied, webhook 429/410, message card rendering. ✅ Only candidate with stated revenue upside and highest revenue per user ✅ Enterprise re-buy window (Opsgenie EoS 2027-04) rewards being present now ❌ Largest build for ~5% of asks; ARR-at-risk figure not yet in hand"
+      },
+      {
+       "label": "Defer to next quarter",
+       "description": "Effort S (zero implementation this quarter), risk medium. TODOS.md entry with the enterprise asks and a trigger: revisit when a named deal is gated on Teams. ✅ Frees slot 2 for cheaper wins (Telegram, Mattermost) ✅ Buys a quarter to quantify ARR before committing 4 weeks ❌ Risks losing an enterprise account during the quarter it is shopping"
+      },
+      {
+       "label": "Cut entirely",
+       "description": "Effort S (zero implementation), risk high. Removed with reason; no TODO. ✅ Permanently removes the most expensive build from the roadmap ✅ Concentrates the roadmap on Slack-centric teams ❌ Walks away from the enterprise segment with no return path"
+      },
+      {
+       "label": "Hold, discuss first",
+       "description": "Stops the chain here; E4-E5 wait. ✅ Room to pull the ARR-at-risk number before deciding ✅ No disposition recorded until you say continue ❌ Delays the remaining two decisions"
+      }
+     ]
+    }
+   ],
+   "answered": true,
+   "failed": false,
+   "answers": {
+    "D2.3 — R-E3: Include, defer, or cut the Microsoft Teams webhook + bot framework integration?\nProject/branch/task: main — third of five per-candidate calls; Slack holds slot 1, Discord deferred; slots 2 and 3 open.\nELI10: Teams is your most expensive candidate (about 4 human-weeks, CC+gstack: ~3-4 days) and only about 5% of asks, but those asks come from enterprise customers and the plan says they carry the highest revenue per user of any segment. Teams is also the second platform every incident tool ships, and enterprises are re-buying alerting right now because Opsgenie is being retired. The plan does not say how much ARR is actually gated on Teams; that number is unknown. This call decides whether Teams takes slot 2.\nStakes if we pick wrong: including it without a named deal spends the biggest build on 5% of asks; deferring it when a renewal or expansion is gated on Teams hands that enterprise account to a competitor during the one quarter they are shopping.\nRecommendation: Include because it is the only candidate with stated revenue upside plus a market timing window, and 4 weeks is affordable alongside Slack (6 human-weeks total, CC+gstack: ~1 week); confirm the ARR-at-risk figure in Section review before staffing starts.\nNote: options differ in kind, not coverage — no completeness score.\nNet: you are trading the largest build cost against the only candidate described in dollars rather than asks.": "Include this quarter (recommended)"
+   },
+   "unansweredQuestionIndices": [],
+   "answeredAt": "2026-09-28T06:49:29.253Z"
+  },
+  {
+   "sessionId": "591ed182-4cd8-4f17-8498-4d658b7eae6b",
+   "toolUseId": "toolu_01RAeHhPo78S7sFDEKYSgvwb",
+   "questions": [
+    {
+     "question": "D2.4 — R-E4: Include, defer, or cut the Telegram bot API integration?\nProject/branch/task: main — fourth of five per-candidate calls; Slack and Teams hold slots 1-2; exactly one slot left, contested by Telegram and Mattermost.\nELI10: Telegram is the cheapest thing on the list (about 1 human-week, CC+gstack: ~half a day) and pulls about 8% of asks, mostly international users. The plan itself calls it low strategic value. Your cap is on the number of integrations, not weeks, so the question is not \"can we afford it\" but \"is this the best use of the last slot\" against Mattermost, whose 3% of asks all come from high-ARR accounts that cannot use Slack or Teams. If you Include Telegram here, Mattermost can only be deferred or cut.\nStakes if we pick wrong: including it spends the last slot on the segment the plan already rates low, and locks Mattermost out; deferring it leaves 8% of asks open for a quarter over a build that would take days.\nRecommendation: Defer because the last slot should go to the segment that pays the most and has no other way to get alerts (Mattermost), and Telegram's tiny size makes it the natural stretch item to pick up the moment Slack or Teams lands early, which is worth writing into the TODO.\nNote: options differ in kind, not coverage — no completeness score.\nNet: you are trading the best demand-per-week ratio in the set against the only remaining revenue-bearing candidate.",
+     "header": "E4 Telegram",
+     "multiSelect": false,
+     "options": [
+      {
+       "label": "Include this quarter",
+       "description": "Effort S (human ~1 wk / CC+gstack ~half a day), risk low. Reuse: none needed; bot token, sendMessage, webhook or long-poll. Verification: bot blocked by user, chat not found, 429 retry-after, message too long. ✅ Best demand per build-week in the whole set (8% for 1 week) ✅ Serves international users no other candidate reaches ❌ Takes the last slot, so Mattermost can only be deferred or cut; plan rates it low strategic value"
+      },
+      {
+       "label": "Defer to next quarter (recommended)",
+       "description": "Effort S (zero implementation this quarter), risk low. TODOS.md entry marked as the stretch item: pick up immediately if E1 or E3 finishes early. ✅ Keeps slot 3 for the high-ARR Mattermost segment ✅ Its 1-week size makes it the ideal early-finish filler with no replanning ❌ 8% of asks wait a quarter over a build that would take days"
+      },
+      {
+       "label": "Cut entirely",
+       "description": "Effort S (zero implementation), risk low. Removed with reason; no TODO. ✅ Removes a low-strategic-value item permanently ✅ Keeps the roadmap to work-chat platforms only ❌ Gives up the cheapest possible win with no return path"
+      },
+      {
+       "label": "Hold, discuss first",
+       "description": "Stops the chain here; E5 waits. ✅ Room to weigh Telegram against Mattermost head to head ✅ No disposition recorded until you say continue ❌ Delays the final decision and the summary"
+      }
+     ]
+    }
+   ],
+   "answered": true,
+   "failed": false,
+   "answers": {
+    "D2.4 — R-E4: Include, defer, or cut the Telegram bot API integration?\nProject/branch/task: main — fourth of five per-candidate calls; Slack and Teams hold slots 1-2; exactly one slot left, contested by Telegram and Mattermost.\nELI10: Telegram is the cheapest thing on the list (about 1 human-week, CC+gstack: ~half a day) and pulls about 8% of asks, mostly international users. The plan itself calls it low strategic value. Your cap is on the number of integrations, not weeks, so the question is not \"can we afford it\" but \"is this the best use of the last slot\" against Mattermost, whose 3% of asks all come from high-ARR accounts that cannot use Slack or Teams. If you Include Telegram here, Mattermost can only be deferred or cut.\nStakes if we pick wrong: including it spends the last slot on the segment the plan already rates low, and locks Mattermost out; deferring it leaves 8% of asks open for a quarter over a build that would take days.\nRecommendation: Defer because the last slot should go to the segment that pays the most and has no other way to get alerts (Mattermost), and Telegram's tiny size makes it the natural stretch item to pick up the moment Slack or Teams lands early, which is worth writing into the TODO.\nNote: options differ in kind, not coverage — no completeness score.\nNet: you are trading the best demand-per-week ratio in the set against the only remaining revenue-bearing candidate.": "Defer to next quarter (recommended)"
+   },
+   "unansweredQuestionIndices": [],
+   "answeredAt": "2026-09-28T06:50:45.420Z"
+  },
+  {
+   "sessionId": "591ed182-4cd8-4f17-8498-4d658b7eae6b",
+   "toolUseId": "toolu_01HLUtwDFsFBSyfm1TFvxjJM",
+   "questions": [
+    {
+     "question": "D2.5 — R-E5: Include, defer, or cut the Mattermost REST plugin?\nProject/branch/task: main — last of five per-candidate calls; Slack and Teams hold slots 1-2; Telegram was deferred to keep this slot open.\nELI10: Mattermost is the self-hosted Slack alternative that regulated and on-prem enterprises run because their data cannot leave their network. Only about 3% of asks, but the plan says every one of them is a high-ARR account, and those accounts are locked in: they cannot pick up your Slack or Teams integration instead. Build cost is moderate (about 2 human-weeks, CC+gstack: ~1-2 days) and the REST API is Slack-shaped, so much of the Slack formatter should carry over. This call fills or leaves open the third slot; shipping only two is inside your stated 2-3 range.\nStakes if we pick wrong: including it commits the team to 8 human-weeks across three platforms this quarter (Slack 2 + Teams 4 + Mattermost 2); deferring it leaves your highest-ARR-per-ask segment with no chat alerts for another quarter and no alternative.\nRecommendation: Include because it is the one segment with no substitute path to your product's alerts, the accounts are the ones you least want to churn, and its Slack-like API makes it the cheapest enterprise integration on the list.\nNote: options differ in kind, not coverage — no completeness score.\nNet: you are trading a third concurrent build against leaving your stickiest, highest-ARR accounts unserved.",
+     "header": "E5 Mattermost",
+     "multiSelect": false,
+     "options": [
+      {
+       "label": "Include this quarter (recommended)",
+       "description": "Effort M (human ~2 wk / CC+gstack ~1-2 days), risk medium. Reuse: Slack message formatter likely portable (Mattermost accepts Slack-compatible attachments); auth is per-server bot token. Verification: self-hosted URL unreachable, TLS with private CA, token revoked, channel not found, plugin version skew. ✅ Serves high-ARR accounts that cannot use Slack or Teams ✅ Slack-shaped API makes it the cheapest enterprise build here ❌ Fills the third slot; 8 human-weeks committed this quarter across three platforms"
+      },
+      {
+       "label": "Defer to next quarter",
+       "description": "Effort S (zero implementation this quarter), risk medium. TODOS.md entry with the high-ARR context; quarter ships Slack + Teams only. ✅ Keeps the quarter at two builds (6 human-weeks) with headroom for surprises ✅ Teams alone already covers part of the enterprise story ❌ Locked-in high-ARR accounts get nothing for another quarter and cannot substitute"
+      },
+      {
+       "label": "Cut entirely",
+       "description": "Effort S (zero implementation), risk high. Removed with reason; no TODO. ✅ Avoids supporting self-hosted deployments (private CAs, version skew) long-term ✅ Keeps the platform list to SaaS chat tools ❌ Tells your stickiest enterprise accounts there is no path, ever"
+      },
+      {
+       "label": "Hold, discuss first",
+       "description": "Stops the chain here; no summary yet. ✅ Room to check the actual ARR behind the 3% before committing ✅ No disposition recorded until you say continue ❌ Delays the final assembled-set confirmation"
+      }
+     ]
+    }
+   ],
+   "answered": true,
+   "failed": false,
+   "answers": {
+    "D2.5 — R-E5: Include, defer, or cut the Mattermost REST plugin?\nProject/branch/task: main — last of five per-candidate calls; Slack and Teams hold slots 1-2; Telegram was deferred to keep this slot open.\nELI10: Mattermost is the self-hosted Slack alternative that regulated and on-prem enterprises run because their data cannot leave their network. Only about 3% of asks, but the plan says every one of them is a high-ARR account, and those accounts are locked in: they cannot pick up your Slack or Teams integration instead. Build cost is moderate (about 2 human-weeks, CC+gstack: ~1-2 days) and the REST API is Slack-shaped, so much of the Slack formatter should carry over. This call fills or leaves open the third slot; shipping only two is inside your stated 2-3 range.\nStakes if we pick wrong: including it commits the team to 8 human-weeks across three platforms this quarter (Slack 2 + Teams 4 + Mattermost 2); deferring it leaves your highest-ARR-per-ask segment with no chat alerts for another quarter and no alternative.\nRecommendation: Include because it is the one segment with no substitute path to your product's alerts, the accounts are the ones you least want to churn, and its Slack-like API makes it the cheapest enterprise integration on the list.\nNote: options differ in kind, not coverage — no completeness score.\nNet: you are trading a third concurrent build against leaving your stickiest, highest-ARR accounts unserved.": "Include this quarter (recommended)"
+   },
+   "unansweredQuestionIndices": [],
+   "answeredAt": "2026-09-28T06:51:48.417Z"
+  }
+ ],
+ "fingerprints": [
+  {
+   "signature": "591ed182-4cd8-4f17-8498-4d658b7eae6b:toolu_01Rpzvmkj8MXwmvo6GKJF7SR",
+   "promptSnippet": "Review mode D1 — Which review posture should this prioritization review take? Project/branch/task: main — choosing 2-3 of 5 chat-platform integrations for the quarter (strategy-only depth). ELI10: You have five candidate integrations and ro",
+   "options": [
+    {
+     "index": 1,
+     "label": "SCOPE REDUCTION (recommended)"
+    },
+    {
+     "index": 2,
+     "label": "HOLD SCOPE"
+    },
+    {
+     "index": 3,
+     "label": "SELECTIVE EXPANSION"
+    },
+    {
+     "index": 4,
+     "label": "SCOPE EXPANSION"
+    }
+   ],
+   "observedAtMs": 215484,
+   "preReview": true
+  },
+  {
+   "signature": "591ed182-4cd8-4f17-8498-4d658b7eae6b:toolu_0134ihX3WiXfvA1ztMRML3r8",
+   "promptSnippet": "E1 Slack D2.1 — R-E1: Include, defer, or cut the Slack DM bot for incident alerts? Project/branch/task: main — first of five per-candidate calls; at most 3 Includes total. ELI10: Slack is the single most-requested feature you have (about 40",
+   "options": [
+    {
+     "index": 1,
+     "label": "Include this quarter (recommended)"
+    },
+    {
+     "index": 2,
+     "label": "Defer to next quarter"
+    },
+    {
+     "index": 3,
+     "label": "Cut entirely"
+    },
+    {
+     "index": 4,
+     "label": "Hold, discuss first"
+    }
+   ],
+   "observedAtMs": 303584,
+   "preReview": true
+  },
+  {
+   "signature": "591ed182-4cd8-4f17-8498-4d658b7eae6b:toolu_01ErdLaikMaLqwBF5WCVS2RY",
+   "promptSnippet": "E2 Discord D2.2 — R-E2: Include, defer, or cut the Discord guild bot for community channels? Project/branch/task: main — second of five per-candidate calls; Slack already holds slot 1 of 3. ELI10: Discord users are about 15% of asks and the",
+   "options": [
+    {
+     "index": 1,
+     "label": "Include this quarter"
+    },
+    {
+     "index": 2,
+     "label": "Defer to next quarter (recommended)"
+    },
+    {
+     "index": 3,
+     "label": "Cut entirely"
+    },
+    {
+     "index": 4,
+     "label": "Hold, discuss first"
+    }
+   ],
+   "observedAtMs": 362923,
+   "preReview": true
+  },
+  {
+   "signature": "591ed182-4cd8-4f17-8498-4d658b7eae6b:toolu_01RrrTTNfdTkR5P6hR2j9ij6",
+   "promptSnippet": "E3 Teams D2.3 — R-E3: Include, defer, or cut the Microsoft Teams webhook + bot framework integration? Project/branch/task: main — third of five per-candidate calls; Slack holds slot 1, Discord deferred; slots 2 and 3 open. ELI10: Teams is y",
+   "options": [
+    {
+     "index": 1,
+     "label": "Include this quarter (recommended)"
+    },
+    {
+     "index": 2,
+     "label": "Defer to next quarter"
+    },
+    {
+     "index": 3,
+     "label": "Cut entirely"
+    },
+    {
+     "index": 4,
+     "label": "Hold, discuss first"
+    }
+   ],
+   "observedAtMs": 427675,
+   "preReview": true
+  },
+  {
+   "signature": "591ed182-4cd8-4f17-8498-4d658b7eae6b:toolu_01RAeHhPo78S7sFDEKYSgvwb",
+   "promptSnippet": "E4 Telegram D2.4 — R-E4: Include, defer, or cut the Telegram bot API integration? Project/branch/task: main — fourth of five per-candidate calls; Slack and Teams hold slots 1-2; exactly one slot left, contested by Telegram and Mattermost. E",
+   "options": [
+    {
+     "index": 1,
+     "label": "Include this quarter"
+    },
+    {
+     "index": 2,
+     "label": "Defer to next quarter (recommended)"
+    },
+    {
+     "index": 3,
+     "label": "Cut entirely"
+    },
+    {
+     "index": 4,
+     "label": "Hold, discuss first"
+    }
+   ],
+   "observedAtMs": 503836,
+   "preReview": true
+  },
+  {
+   "signature": "591ed182-4cd8-4f17-8498-4d658b7eae6b:toolu_01HLUtwDFsFBSyfm1TFvxjJM",
+   "promptSnippet": "E5 Mattermost D2.5 — R-E5: Include, defer, or cut the Mattermost REST plugin? Project/branch/task: main — last of five per-candidate calls; Slack and Teams hold slots 1-2; Telegram was deferred to keep this slot open. ELI10: Mattermost is t",
+   "options": [
+    {
+     "index": 1,
+     "label": "Include this quarter (recommended)"
+    },
+    {
+     "index": 2,
+     "label": "Defer to next quarter"
+    },
+    {
+     "index": 3,
+     "label": "Cut entirely"
+    },
+    {
+     "index": 4,
+     "label": "Hold, discuss first"
+    }
+   ],
+   "observedAtMs": 566836,
+   "preReview": true
+  }
+ ]
+}

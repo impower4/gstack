@@ -1,4 +1,4 @@
-#!/usr/bin/env bun
+#!/usr/bin/env -S bun --no-env-file --config=/dev/null
 // compare-pr-version — CI gate helper. Validates the PR's branch VERSION
 // against the queue of other open PRs' claimed versions. Exits 0 (pass)
 // or 1 (confirmed collision).
@@ -16,6 +16,7 @@
 // only blocks actual collisions.
 
 import { readFileSync } from "node:fs";
+import { classifyTrainHead } from "../lib/version-gate-train";
 
 const [, , jsonPath, prNumber] = process.argv;
 if (!jsonPath) {
@@ -29,6 +30,28 @@ try {
 } catch (e) {
   console.log("::warning::could not parse util output; failing open");
   process.exit(0);
+}
+
+const tag = prNumber ? `PR #${prNumber}` : "this PR";
+const prVersionEnv = (process.env.PR_VERSION ?? "").trim();
+
+// Merge trains: when the base's ship policy declares a `train` block, a READY
+// head is unstamped and the lane stamps at its slot (docs/ship-policy.md#run-a-merge-train).
+// The workflow passes BASE_REF and HEAD_SHA with the PR head checked out as cwd.
+if (process.env.BASE_REF && process.env.HEAD_SHA) {
+  const train = classifyTrainHead({ repoRoot: process.cwd(), baseRef: process.env.BASE_REF, head: process.env.HEAD_SHA });
+  if (train.kind === "unstamped") {
+    console.log(`✓ ${tag} is unstamped under the base's train policy: VERSION, package.json and the release outputs match its merge base, and the CHANGELOG change is confined to [Unreleased]. The lane stamps at its slot.`);
+    process.exit(0);
+  }
+  if (train.kind === "invalid") {
+    console.log(`::error::${tag}: ${train.reason}.`);
+    process.exit(1);
+  }
+  if (train.kind === "stamped" && prVersionEnv !== train.expected) {
+    console.log(`::error::${tag} claims v${prVersionEnv}, but under the base's train policy a stamped head must carry v${train.expected} (base + bump, what gstack-restamp --next allocates at its slot). Leave VERSION, package.json and the release outputs at the base's values until the slot is called.`);
+    process.exit(1);
+  }
 }
 
 if (parsed.offline === true) {
@@ -62,7 +85,6 @@ if (!pPR || !pNext) {
   process.exit(0);
 }
 
-const tag = prNumber ? `PR #${prNumber}` : "this PR";
 const claimed = (parsed.claimed ?? []) as Array<{ pr: number; branch: string; version: string; url?: string }>;
 
 // Emit a GitHub step summary (always helpful, even on pass).
@@ -77,10 +99,24 @@ console.log(`  Queue (${claimed.length} open PRs claiming versions):`);
 if (claimedList) console.log(claimedList);
 console.log("::endgroup::");
 
+// Dependabot never edits VERSION, so hard rule 1 would fail every dependency
+// PR it opens. Exempt it only when the author is dependabot and every changed
+// file is a dependency manifest, a lockfile or the dependabot config. The
+// workflow passes the author and the file list; an empty list (the lookup
+// failed) keeps the rule.
+const DEPENDENCY_FILE = /(?:^|\/)(?:package\.json|bun\.lockb?)$|^\.github\/dependabot\.yml$/;
+const changedFiles = (process.env.PR_CHANGED_FILES ?? "").split("\n").map((f) => f.trim()).filter(Boolean);
+const dependabotManifestOnly =
+  process.env.PR_AUTHOR === "dependabot[bot]" && changedFiles.length > 0 && changedFiles.every((f) => DEPENDENCY_FILE.test(f));
+
 // Hard rule 1: this PR's VERSION must be strictly greater than the base
 // version, otherwise we're not actually bumping.
 const pBase = parseV((parsed.base_version ?? "").trim());
 if (pBase && cmp(pPR, pBase) <= 0) {
+  if (dependabotManifestOnly) {
+    console.log(`::notice::${tag} is a dependabot dependency update (${changedFiles.join(", ")}); VERSION bump not required.`);
+    process.exit(0);
+  }
   console.log(`::error::VERSION not bumped: ${tag} claims v${prVersion} but base is v${parsed.base_version}.`);
   process.exit(1);
 }

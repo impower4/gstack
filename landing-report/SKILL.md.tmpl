@@ -1,5 +1,6 @@
 ---
 name: landing-report
+preamble-tier: 2
 version: 0.1.0
 description: |
   Read-only queue dashboard for workspace-aware ship. Shows which VERSION slots
@@ -37,7 +38,7 @@ Think of it as `gh pr list` for VERSION numbers.
 
 ## Step 1: Detect platform and base branch
 
-Same detection as other gstack skills.
+Use the current PR's base branch, else the repository's default branch, else `main`.
 
 ```bash
 BASE_BRANCH=$(gh pr view --json baseRefName -q .baseRefName 2>/dev/null || \
@@ -62,12 +63,12 @@ echo "branch HEAD VERSION: $CURRENT_VERSION"
 
 ## Step 3: Query the queue
 
-Call the util three times — once for each bump level — so the user sees what
-they'd claim for micro/patch/minor/major. Cheap (same gh call cached by bun).
+Call the util once per bump level (micro, patch, minor, major) so the user sees
+what each level would claim.
 
 ```bash
 for LEVEL in micro patch minor major; do
-  bun run bin/gstack-next-version \
+  bun --no-env-file --config=/dev/null run ~/.claude/skills/gstack/bin/gstack-next-version \
     --base "$BASE_BRANCH" \
     --bump "$LEVEL" \
     --current-version "$BASE_VERSION" \

@@ -1,0 +1,9 @@
+{"type":"thread.started","thread_id":"01a150b3-be24-7f22-aa81-7eb4f79018e0"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"I’ll create `notes.md` with `draft`, then change it to `final` using two patches.\n"}}
+{"type":"item.started","item":{"id":"item_1","type":"file_change","changes":[{"path":"/tmp/codex-host-fixture/notes.md","kind":"add"}],"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_1","type":"file_change","changes":[{"path":"/tmp/codex-host-fixture/notes.md","kind":"add"}],"status":"completed"}}
+{"type":"item.started","item":{"id":"item_2","type":"file_change","changes":[{"path":"/tmp/codex-host-fixture/notes.md","kind":"update"}],"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_2","type":"file_change","changes":[{"path":"/tmp/codex-host-fixture/notes.md","kind":"update"}],"status":"completed"}}
+{"type":"item.completed","item":{"id":"item_3","type":"agent_message","text":"Created `notes.md` with `draft`, then changed it to `final` using two `apply_patch` calls."}}
+{"type":"turn.completed","usage":{"input_tokens":25020,"cached_input_tokens":12440,"cache_write_input_tokens":12574,"output_tokens":137,"reasoning_output_tokens":0}}

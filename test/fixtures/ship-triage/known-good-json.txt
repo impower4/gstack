@@ -1,0 +1,4 @@
+Both test files ran. `test/string.test.js` fails because truncate(null) throws; src/string.js is new on this branch.
+`test/math.test.js` fails on divide-by-zero; src/math.js is unchanged since main.
+
+{"test/string.test.js": "in-branch", "test/math.test.js": "pre-existing"}

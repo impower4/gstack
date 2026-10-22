@@ -8,10 +8,12 @@
 #   gstack-analytics all      # all time
 #
 # Env overrides (for testing):
-#   GSTACK_STATE_DIR  — override ~/.gstack state directory
+#   GSTACK_HOME     — relocate the state root (chain: bin/gstack-state-root.sh)
 set -uo pipefail
 
-STATE_DIR="${GSTACK_STATE_DIR:-$HOME/.gstack}"
+. "$(dirname "$0")/gstack-state-root.sh" 2>/dev/null || { echo "$0: cannot resolve the gstack state root: $(dirname "$0")/gstack-state-root.sh is missing. fix: reinstall with ./setup or /gstack-upgrade (docs/state-root.md)" >&2; exit 1; }
+gstack_state_root_select
+STATE_DIR="$_gstack_sr_root"
 JSONL_FILE="$STATE_DIR/analytics/skill-usage.jsonl"
 
 # ─── Parse time window ───────────────────────────────────────
@@ -168,7 +170,9 @@ echo "$SKILL_COUNTS" | while read -r COUNT SKILL; do
       # Extract duration_s value using split on "duration_s":
       n = split($0, parts, "\"duration_s\":")
       if (n >= 2) {
-        # parts[2] starts with the value, e.g. "142,"
+        # parts[2] starts with the value: unquoted (142,...) or quoted ("142",...),
+        # which gstack-skill-end writes. Strip a leading quote before the digits.
+        sub(/^"/, "", parts[2])
         gsub(/[^0-9.].*/, "", parts[2])
         if (parts[2]+0 > 0) { total += parts[2]; count++ }
       }

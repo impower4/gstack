@@ -1,0 +1,117 @@
+#!/usr/bin/env -S bun --no-env-file --config=/dev/null
+/**
+ * gstack-approvals — the per-thread approval record (capy/skill/gstack/captain.md).
+ *
+ *   gstack-approvals add --ask <text> --words <exact words> --by <who> --scope <what it covers>
+ *                        [--pending <text>] [--outcome approved|rejected|pending|standing]
+ *                        [--date YYYY-MM-DD] [--source <ref>] [--branch <name>] [--json]
+ *   gstack-approvals import --autoplan <run dir> [--by <whose words>] [--branch <name>] [--json]
+ *   gstack-approvals render [--no-heading] [--branch <name>]
+ *   gstack-approvals list [--json] [--branch <name>]
+ *   gstack-approvals sync [--branch <name>]
+ *   gstack-approvals path [--branch <name>]
+ *
+ * Rows are kept per branch under the state root and, on Capy, mirrored to the
+ * private Drive folder. Every field is secret-scanned before it is written.
+ * `render` prints the `## Approvals` section /ship puts in the PR body. Logic:
+ * lib/approval-record.ts.
+ */
+import * as path from 'node:path';
+import { EXIT, exitTableHelp } from '../lib/headless-artifacts';
+import { appendRows, buildRow, importAutoplan, locate, readRecord, renderRecord, syncRecord, type RecordError, type StoreLocation } from '../lib/approval-record';
+import { resultLine } from '../lib/result-codes';
+
+const HELP = `gstack-approvals — the per-thread approval record (capy/skill/gstack/captain.md)
+
+  add     --ask <text> --words <exact words> --by <who> --scope <what it covers>
+          [--pending <text>] [--outcome approved|rejected|pending|standing] [--date YYYY-MM-DD] [--source <ref>]
+  import  --autoplan <run dir> [--by <whose words, e.g. Garry>]
+  render  [--no-heading]          the ## Approvals section for a PR body or report
+  list    [--json]
+  sync                            re-mirror the record (Capy Drive or GSTACK_APPROVALS_DIR)
+  path                            print the record and mirror paths
+  Every command takes [--branch <name>] (default: the checked-out branch).
+
+Example:
+  gstack-approvals add --ask "Approve the plan for the Capy approvals PR" --words "rec" \\
+    --by "Garry (via GStack Minder)" --scope "the reviewed plan, every recommendation"
+
+${exitTableHelp()}`;
+
+const VALUE_FLAGS = new Set(['--ask', '--words', '--by', '--scope', '--pending', '--outcome', '--date', '--source', '--branch', '--autoplan']);
+
+function parse(args: string[]): { flags: Record<string, string>; bools: Set<string>; error?: string } {
+  const flags: Record<string, string> = {};
+  const bools = new Set<string>();
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i]!;
+    if (VALUE_FLAGS.has(a)) {
+      const v = args[i + 1];
+      if (v === undefined) return { flags, bools, error: `${a} needs a value` };
+      flags[a] = v; i++;
+    } else if (a === '--json' || a === '--no-heading') bools.add(a);
+    else return { flags, bools, error: `unknown argument ${a}` };
+  }
+  return { flags, bools };
+}
+
+function fail(cmd: string, e: RecordError): number {
+  process.stderr.write(resultLine(`gstack-approvals ${cmd}`, e.code, e.message) + '\n');
+  if (e.code === 'APPROVAL_RECORD_INVALID') return EXIT.usage;
+  if (e.code === 'APPROVAL_RECORD_WRITE_FAILED' || e.code === 'APPROVAL_RECORD_UNAVAILABLE' || e.code === 'ARTIFACT_MALFORMED_JSONL') return EXIT.fail;
+  return EXIT.refused;
+}
+
+function main(argv: string[]): number {
+  const [cmd, ...rest] = argv;
+  if (!cmd || cmd === '--help' || cmd === '-h') { process.stdout.write(HELP + '\n'); return cmd ? EXIT.ok : EXIT.usage; }
+  const { flags, bools, error } = parse(rest);
+  if (error) { process.stderr.write(`gstack-approvals: ${error}\n${HELP}\n`); return EXIT.usage; }
+  const loc = locate({ cwd: process.cwd(), env: process.env, branch: flags['--branch'] });
+  if ('code' in loc) return fail(cmd, loc);
+  const json = bools.has('--json');
+  const recorded = (where: StoreLocation) => `${where.file}${where.mirror ? ` mirror=${where.mirror}` : ''}`;
+
+  if (cmd === 'add' || cmd === 'import') {
+    let rows;
+    if (cmd === 'add') {
+      const built = buildRow({ ask: flags['--ask'] ?? '', words: flags['--words'] ?? '', by: flags['--by'] ?? '', scope: flags['--scope'] ?? '', pending: flags['--pending'], outcome: flags['--outcome'], date: flags['--date'], source: flags['--source'] }, loc.branch);
+      if ('code' in built) return fail(cmd, built);
+      rows = [built];
+    } else {
+      if (!flags['--autoplan']) { process.stderr.write(`gstack-approvals: import needs --autoplan <run dir>\n`); return EXIT.usage; }
+      const imported = importAutoplan(path.resolve(flags['--autoplan']), loc.branch, flags['--by']);
+      if ('code' in imported) return fail(cmd, imported);
+      rows = imported;
+    }
+    const res = appendRows(loc, rows);
+    if ('code' in res) return fail(cmd, res);
+    if (json) process.stdout.write(JSON.stringify({ added: res.added.map(r => r.id), skipped: res.skipped, file: loc.file, mirror: loc.mirror ?? null }) + '\n');
+    else if (cmd === 'add') process.stdout.write(`APPROVAL_RECORDED: ${rows[0]!.id}${res.skipped ? ' (already present)' : ''} ${recorded(loc)}\n`);
+    else process.stdout.write(`APPROVAL_IMPORTED: n=${res.added.length} skipped=${res.skipped} ${recorded(loc)}\n`);
+    if (res.mirrorError) return fail(cmd, res.mirrorError);
+    return EXIT.ok;
+  }
+  if (cmd === 'render' || cmd === 'list') {
+    const read = readRecord(loc);
+    if (read.restored) process.stderr.write(`gstack-approvals: read the Drive mirror ${loc.mirror} (no local copy on this machine; gstack-approvals sync restores it)\n`);
+    if (cmd === 'list' && json) process.stdout.write(JSON.stringify({ branch: loc.branch, state: read.state, rows: read.rows }) + '\n');
+    else if (cmd === 'list') for (const r of read.rows) process.stdout.write(`${r.date} ${r.id} ${r.outcome} ${JSON.stringify(r.ask)} words=${JSON.stringify(r.words)} by=${JSON.stringify(r.by)}\n`);
+    else process.stdout.write(renderRecord(read, loc, { heading: !bools.has('--no-heading') }));
+    if (read.state === 'unavailable') return fail(cmd, { code: 'APPROVAL_RECORD_UNAVAILABLE', message: `no record at ${loc.file} and no mirror` });
+    return EXIT.ok;
+  }
+  if (cmd === 'sync') {
+    const s = syncRecord(loc);
+    process.stdout.write(`APPROVAL_SYNCED: rows=${s.rows} ${recorded(loc)}\n`);
+    return s.error ? fail(cmd, s.error) : EXIT.ok;
+  }
+  if (cmd === 'path') {
+    process.stdout.write(`RECORD: ${loc.file}\nMIRROR: ${loc.mirror ?? 'none'}\nBRANCH: ${loc.branch}\n`);
+    return EXIT.ok;
+  }
+  process.stderr.write(`gstack-approvals: unknown command ${cmd}\n${HELP}\n`);
+  return EXIT.usage;
+}
+
+process.exitCode = main(process.argv.slice(2));

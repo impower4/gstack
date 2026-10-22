@@ -1,0 +1,42 @@
+<!-- AUTO-GENERATED from capy-pr.md.tmpl — do not edit directly -->
+<!-- Regenerate: bun run gen:skill-docs -->
+## Step 19-C: Capy PR body (What changed, Why, Approvals)
+
+Read only when Step 19 printed `CAPY_PR: on`. Under Capy a person decides the merge from the PR and
+the READY report, through a Captain, so the body shows what changed in pictures, why, and who
+approved what. Guide: `captain.md` beside the Capy `gstack` skill's SKILL.md.
+
+**Order.** The `gstack-ship-receipt` block stays first when Step 19 writes one. Then `## What changed`,
+`## Why` and `## Approvals`, then the standard sections below. Keep `## Summary` to commit themes;
+do not repeat the captions.
+
+1. **Pick the evidence:** one to three before/after pairs, highest-signal first. The first is the
+   key image.
+   - UI change: screenshot the changed screen at the base and on this branch with the browse
+     flow, or your host's browser, at the same size.
+   - Skill or prompt change: `~/.claude/skills/gstack/bin/gstack-pr-shots --path <template or SKILL.md> --heading "<changed section>" --caption "<what changed and why>"`.
+   - CLI change: save the output of a command this ship already runs, at the base and on this
+     branch, to files inside the repository (`.gstack/tmp/before.txt`, `.gstack/tmp/after.txt`), then
+     `~/.claude/skills/gstack/bin/gstack-pr-shots --before <file> --after <file> --kind terminal --caption "<…>"`.
+     Never run a command with side effects just to make a picture.
+   - No visible surface: picture the source section or test output that best shows the change.
+   `gstack-pr-shots` refuses inputs that match the secret scanner (`PR_SHOTS_INPUT_REFUSED`). Remove
+   the secret from the capture; never work around the refusal.
+2. **Read `SHOT_PNG:`.** A path: use it. `unavailable (…)`: screenshot the printed `shot.html` with your
+   own browser at 880 px wide and use that PNG. `failed (…)`: use the text version only.
+3. **Upload.** Only for a public repository (`gh repo view --json visibility -q .visibility` prints
+   `PUBLIC`). A private repository gets the text version, unless the person approved images for it
+   (record that with `gstack-approvals add`). Upload each PNG with Capy's PR asset tool
+   (`tools.pr.uploadAsset`). Embed exactly the URL it returns, with the caption as alt text:
+   `![<caption>](<url>)` (a returned bare video URL stays on its own line). If an upload fails,
+   retry once, and only for a transient error. Otherwise use the text version and write
+   `image upload failed: <reason>` under the caption. Never block publication on an image.
+4. **Under every image:** a one-line caption saying what changed and why, then the contents of the
+   printed `text.md` (a collapsed text before/after, for readers who cannot see the image and for search).
+5. **`## Why`:** two or three sentences covering the cause (issue, failed run, or the person's request,
+   quoted) and the effect the user will see.
+6. **`## Approvals`:** the output of `~/.claude/skills/gstack/bin/gstack-approvals render`, verbatim. It
+   escapes its cells, and the receipt never reads it as an approval citation. On
+   `APPROVAL_RECORD_UNAVAILABLE` keep its text and say so in the READY report. Never type rows by hand.
+7. **READY report:** attach the key image's PNG to the report you send (Capy's message
+   attachments) and give its uploaded URL, so the Captain can show it inline.

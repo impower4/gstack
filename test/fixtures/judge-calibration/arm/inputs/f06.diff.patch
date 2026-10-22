@@ -1,0 +1,133 @@
+diff --git a/accordion.js b/accordion.js
+new file mode 100644
+index 0000000..c31d782
+--- /dev/null
++++ b/accordion.js
+@@ -0,0 +1,70 @@
++// Accessible, animated accordion component with an event API.
++(function () {
++  const DEFAULTS = { animate: false, duration: 200, allowMultiple: true };
++
++  class Accordion {
++    constructor(root, options = {}) {
++      this.root = root;
++      this.options = { ...DEFAULTS, ...options };
++      this.handlers = {};
++      this.items = [...root.querySelectorAll('.accordion__item')].map((item, i) => {
++        const trigger = item.querySelector('.accordion__trigger');
++        const panel = item.querySelector('.accordion__panel');
++        const id = `accordion-panel-${Accordion.nextId++}`;
++        panel.id = id;
++        trigger.setAttribute('aria-controls', id);
++        trigger.setAttribute('aria-expanded', 'false');
++        panel.hidden = true;
++        trigger.addEventListener('click', () => this.toggle(i));
++        trigger.addEventListener('keydown', (e) => this.onKey(e, i));
++        return { trigger, panel };
++      });
++    }
++
++    on(event, fn) {
++      (this.handlers[event] ||= []).push(fn);
++      return this;
++    }
++
++    emit(event, detail) {
++      (this.handlers[event] || []).forEach((fn) => fn(detail));
++    }
++
++    toggle(index) {
++      const { trigger, panel } = this.items[index];
++      const open = trigger.getAttribute('aria-expanded') !== 'true';
++      if (open && !this.options.allowMultiple) {
++        this.items.forEach((_, j) => j !== index && this.close(j));
++      }
++      trigger.setAttribute('aria-expanded', String(open));
++      if (this.options.animate) {
++        panel.style.transition = `max-height ${this.options.duration}ms ease`;
++      }
++      panel.hidden = !open;
++      this.emit(open ? 'open' : 'close', { index });
++    }
++
++    close(index) {
++      const { trigger, panel } = this.items[index];
++      trigger.setAttribute('aria-expanded', 'false');
++      panel.hidden = true;
++    }
++
++    onKey(event, index) {
++      const last = this.items.length - 1;
++      const target = { ArrowDown: index === last ? 0 : index + 1, ArrowUp: index === 0 ? last : index - 1, Home: 0, End: last }[event.key];
++      if (target === undefined) return;
++      event.preventDefault();
++      this.items[target].trigger.focus();
++    }
++  }
++  Accordion.nextId = 1;
++
++  const registry = new WeakMap();
++  document.querySelectorAll('[data-accordion]').forEach((root) => {
++    registry.set(root, new Accordion(root, { animate: root.dataset.accordionAnimate === 'true' }));
++  });
++
++  window.Accordion = Accordion;
++  window.getAccordion = (root) => registry.get(root);
++})();
+diff --git a/faq.html b/faq.html
+index 4b35b03..7a9e706 100644
+--- a/faq.html
++++ b/faq.html
+@@ -8,12 +8,21 @@
+ <body>
+   <main class="faq">
+     <h1>Frequently asked questions</h1>
+-    <h2>What should I bring?</h2>
+-    <p>Water, sturdy shoes, a rain layer and snacks. We provide poles.</p>
+-    <h2>Can I cancel?</h2>
+-    <p>Free cancellation up to 48 hours before the hike start time.</p>
+-    <h2>Are dogs allowed?</h2>
+-    <p>Leashed dogs are welcome on the Lakeside and Meadow routes.</p>
++    <div class="accordion" data-accordion data-accordion-animate="true">
++      <div class="accordion__item">
++        <button class="accordion__trigger" type="button">What should I bring?</button>
++        <div class="accordion__panel"><p>Water, sturdy shoes, a rain layer and snacks. We provide poles.</p></div>
++      </div>
++      <div class="accordion__item">
++        <button class="accordion__trigger" type="button">Can I cancel?</button>
++        <div class="accordion__panel"><p>Free cancellation up to 48 hours before the hike start time.</p></div>
++      </div>
++      <div class="accordion__item">
++        <button class="accordion__trigger" type="button">Are dogs allowed?</button>
++        <div class="accordion__panel"><p>Leashed dogs are welcome on the Lakeside and Meadow routes.</p></div>
++      </div>
++    </div>
+   </main>
++  <script src="accordion.js"></script>
+ </body>
+ </html>
+diff --git a/styles.css b/styles.css
+index 548f45f..c895da4 100644
+--- a/styles.css
++++ b/styles.css
+@@ -4,3 +4,20 @@ body {
+   margin: 2rem auto;
+   line-height: 1.5;
+ }
++
++.accordion__trigger {
++  display: block;
++  width: 100%;
++  padding: 0.75rem 0;
++  border: 0;
++  border-bottom: 1px solid #ddd;
++  background: none;
++  font: inherit;
++  font-weight: 600;
++  text-align: left;
++  cursor: pointer;
++}
++
++.accordion__panel {
++  overflow: hidden;
++}

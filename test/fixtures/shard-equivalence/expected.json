@@ -1,0 +1,127 @@
+{
+  "recordedFrom": "96764e80 (pre-engine base) via test/fixtures/shard-equivalence/record.ts",
+  "free": {
+    "fixtures": {
+      "pass": {
+        "status": "passed",
+        "exitCode": 0,
+        "laneExit": 0
+      },
+      "fail": {
+        "status": "failed",
+        "exitCode": 1,
+        "laneExit": 1
+      },
+      "skip": {
+        "status": "passed",
+        "exitCode": 0,
+        "laneExit": 0
+      },
+      "wall-timeout": {
+        "status": "timed-out",
+        "exitCode": null,
+        "laneExit": 124
+      },
+      "module-load-error": {
+        "status": "failed",
+        "exitCode": 1,
+        "laneExit": 1
+      },
+      "zero-executed": {
+        "status": "passed",
+        "exitCode": 0,
+        "laneExit": 0
+      },
+      "unhandled-between-tests": {
+        "status": "failed",
+        "exitCode": 1,
+        "laneExit": 1
+      }
+    },
+    "laneExit": 124
+  },
+  "paid": {
+    "fixtures": {
+      "pass": {
+        "status": "passed",
+        "exitCode": 0,
+        "executedTests": 1,
+        "skippedTests": 0,
+        "laneExit": {
+          "selective": 0,
+          "evalsAll": 0
+        }
+      },
+      "fail": {
+        "status": "failed",
+        "exitCode": 1,
+        "executedTests": 1,
+        "skippedTests": 0,
+        "laneExit": {
+          "selective": 1,
+          "evalsAll": 1
+        }
+      },
+      "skip": {
+        "status": "passed",
+        "exitCode": 0,
+        "executedTests": 1,
+        "skippedTests": 1,
+        "laneExit": {
+          "selective": 0,
+          "evalsAll": 0
+        }
+      },
+      "wall-timeout": {
+        "status": "timed-out",
+        "exitCode": null,
+        "executedTests": null,
+        "skippedTests": null,
+        "laneExit": {
+          "selective": 1,
+          "evalsAll": 1
+        }
+      },
+      "module-load-error": {
+        "status": "failed",
+        "exitCode": 1,
+        "executedTests": 1,
+        "skippedTests": 0,
+        "laneExit": {
+          "selective": 1,
+          "evalsAll": 1
+        }
+      },
+      "zero-executed": {
+        "status": "passed",
+        "exitCode": 0,
+        "executedTests": 0,
+        "skippedTests": 0,
+        "laneExit": {
+          "selective": 0,
+          "evalsAll": 1
+        }
+      },
+      "unhandled-between-tests": {
+        "status": "failed",
+        "exitCode": 1,
+        "executedTests": 0,
+        "skippedTests": 0,
+        "laneExit": {
+          "selective": 1,
+          "evalsAll": 1
+        }
+      }
+    },
+    "laneExit": {
+      "selective": 1,
+      "evalsAll": 1
+    }
+  },
+  "realShard": {
+    "file": "test/strict-output.test.ts",
+    "status": "passed",
+    "filesRan": 1,
+    "sawTerminalSummary": true
+  }
+}

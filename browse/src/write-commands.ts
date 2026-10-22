@@ -7,16 +7,20 @@
 
 import type { TabSession } from './tab-session';
 import type { BrowserManager } from './browser-manager';
-import { findInstalledBrowsers, importCookies, importCookiesViaCdp, hasV20Cookies, listSupportedBrowserNames } from './cookie-import-browser';
+import { CookieImportError, cookieDomainMatches, findInstalledBrowsers, listSupportedBrowserNames } from './cookie-import-browser';
 import { generatePickerCode } from './cookie-picker-routes';
+import { formatCookieImportResult, parseCookieImportArgs, runCookieImport, validateCookieTarget } from './cookie-import-operation';
+import { validateCookieAuthOptions, validateCookieStorageSupport } from './cookie-auth-verification';
 import { validateNavigationUrl } from './url-validation';
 import { validateOutputPath, validateReadPath } from './path-security';
+import { guardScreenshotPath } from './screenshot-size-guard';
 import * as fs from 'fs';
 import * as path from 'path';
 import type { SetContentWaitUntil } from './tab-session';
-import { TEMP_DIR, isPathWithin } from './platform';
+import { TEMP_DIR } from './platform';
 import { SAFE_DIRECTORIES } from './path-security';
 import { modifyStyle, undoModification, resetModifications, getModificationHistory } from './cdp-inspector';
+import { withCdpSession } from './cdp-bridge';
 
 /**
  * Aggressive page cleanup selectors and heuristics.
@@ -247,11 +251,11 @@ export async function handleWriteCommand(
       if (!filePath) throw new Error('Usage: browse load-html <file> [--wait-until load|domcontentloaded|networkidle] [--tab-id <N>]  |  load-html --from-file <payload.json> [--tab-id <N>]');
 
       // Extension allowlist
-      const ALLOWED_EXT = ['.html', '.htm', '.xhtml', '.svg'];
+      const ALLOWED_EXT = ['.html', '.htm', '.xhtml'];
       const ext = path.extname(filePath).toLowerCase();
       if (!ALLOWED_EXT.includes(ext)) {
         throw new Error(
-          `load-html: file does not appear to be HTML. Expected .html/.htm/.xhtml/.svg, got ${ext || '(no extension)'}. Rename the file if it's really HTML.`
+          `load-html: file does not appear to be HTML. Expected .html/.htm/.xhtml, got ${ext || '(no extension)'}. Rename the file if it's really HTML.`
         );
       }
 
@@ -375,11 +379,14 @@ export async function handleWriteCommand(
       const value = valueParts.join(' ');
       if (!selector || !value) throw new Error('Usage: browse fill <selector> <value>');
       const resolved = await session.resolveRef(selector);
-      if ('locator' in resolved) {
-        await resolved.locator.fill(value, { timeout: 5000 });
-      } else {
-        await target.locator(resolved.selector).fill(value, { timeout: 5000 });
-      }
+      const locator = 'locator' in resolved ? resolved.locator : target.locator(resolved.selector);
+      await locator.fill(value, { timeout: 5000 });
+      // Playwright's fill() only dispatches an `input` event. Frameworks that
+      // validate on `change` (AngularJS ng-change, debounced strength/match
+      // checks — e.g. cPanel's Jupiter theme) never see the update, so a value
+      // that's correct in the DOM can still fail the framework's own
+      // validation. Dispatch `change` too so those listeners fire.
+      await locator.dispatchEvent('change');
       // Wait for network to settle (form validation XHRs)
       await page.waitForLoadState('networkidle', { timeout: 2000 }).catch(() => {});
       return `Filled ${selector}`;
@@ -413,10 +420,32 @@ export async function handleWriteCommand(
     }
 
     case 'type': {
-      const text = args.join(' ');
-      if (!text) throw new Error('Usage: browse type <text>');
+      // #2936: bare `type` sends keystrokes to whatever has focus, so a selector
+      // given as the first word was typed as text. --selector targets an
+      // element; `--` ends flags so literal text may start with "--".
+      const usage = 'Usage: browse type [--selector <sel>] [--] <text>';
+      let rest = args;
+      let selector: string | undefined;
+      if (rest[0] === '--selector') {
+        selector = rest[1];
+        if (!selector) throw new Error(usage);
+        rest = rest.slice(2);
+      }
+      if (rest[0] === '--') rest = rest.slice(1);
+      const text = rest.join(' ');
+      if (!text) throw new Error(usage);
+      if (selector) {
+        const resolved = await session.resolveRef(selector);
+        const locator = 'locator' in resolved ? resolved.locator : target.locator(resolved.selector);
+        await locator.pressSequentially(text, { timeout: 5000 });
+        return `Typed ${text.length} characters into ${selector}`;
+      }
       await page.keyboard.type(text);
-      return `Typed ${text.length} characters`;
+      const first = rest[0];
+      const selectorLike = /^([#.][A-Za-z_-]|\[[^\]]+\]$|[A-Za-z][\w-]*[#.[][A-Za-z_-])/.test(first) || rest.includes('>');
+      return selectorLike
+        ? `Typed ${text.length} characters into the focused element\nhint: "${first}" looks like a CSS selector. To type into that element: browse type --selector '${first}' <text>`
+        : `Typed ${text.length} characters`;
     }
 
     case 'press': {
@@ -516,18 +545,25 @@ export async function handleWriteCommand(
         } else if (sizeArg === undefined) {
           sizeArg = args[i];
         } else {
-          throw new Error(`Unexpected positional arg: ${args[i]}. Usage: viewport [WxH] [--scale <n>]`);
+          throw new Error(`Unexpected positional arg: ${args[i]}. Usage: viewport [WxH|auto] [--scale <n>]`);
         }
       }
 
       if (sizeArg === undefined && scaleArg === undefined) {
-        throw new Error('Usage: browse viewport [<WxH>] [--scale <n>]  (e.g. 375x812, or --scale 2 to keep current size)');
+        throw new Error('Usage: browse viewport [<WxH>|auto] [--scale <n>]  (e.g. 375x812, auto to unpin, or --scale 2 to keep current size)');
+      }
+
+      if (sizeArg !== undefined && ['auto', 'reset', 'unpin'].includes(sizeArg.toLowerCase())) {
+        if (scaleArg !== undefined) throw new Error('viewport auto cannot be combined with --scale or a size.');
+        return (await bm.resetViewport()) === 'window'
+          ? 'Viewport unpinned: the page follows the browser window again (refs cleared)'
+          : 'Viewport reset to default 1280x720';
       }
 
       // Resolve width/height: either from sizeArg or from current viewport if --scale-only.
       let w: number, h: number;
       if (sizeArg) {
-        if (!sizeArg.includes('x')) throw new Error('Usage: browse viewport [<WxH>] [--scale <n>] (e.g., 375x812)');
+        if (!sizeArg.includes('x')) throw new Error('Usage: browse viewport [<WxH>|auto] [--scale <n>] (e.g., 375x812)');
         const [rawW, rawH] = sizeArg.split('x').map(Number);
         w = Math.min(Math.max(Math.round(rawW) || 1280, 1), 16384);
         h = Math.min(Math.max(Math.round(rawH) || 720, 1), 16384);
@@ -593,29 +629,21 @@ export async function handleWriteCommand(
       const [selector, ...filePaths] = args;
       if (!selector || filePaths.length === 0) throw new Error('Usage: browse upload <selector> <file1> [file2...]');
 
-      // Validate paths are within safe directories (same check as cookie-import)
-      for (const fp of filePaths) {
+      const validatedPaths = filePaths.map(fp => {
         if (!fs.existsSync(fp)) throw new Error(`File not found: ${fp}`);
-        if (path.isAbsolute(fp)) {
-          let resolvedFp: string;
-          try { resolvedFp = fs.realpathSync(path.resolve(fp)); } catch (err: any) { if (err?.code !== 'ENOENT') throw err; resolvedFp = path.resolve(fp); }
-          if (!SAFE_DIRECTORIES.some(dir => isPathWithin(resolvedFp, dir))) {
-            throw new Error(`Path must be within: ${SAFE_DIRECTORIES.join(', ')}`);
-          }
-        }
-        if (path.normalize(fp).includes('..')) {
-          throw new Error('Path traversal sequences (..) are not allowed');
-        }
-      }
+        const realPath = fs.realpathSync(path.resolve(fp));
+        validateReadPath(realPath);
+        return realPath;
+      });
 
       const resolved = await session.resolveRef(selector);
       if ('locator' in resolved) {
-        await resolved.locator.setInputFiles(filePaths);
+        await resolved.locator.setInputFiles(validatedPaths);
       } else {
-        await target.locator(resolved.selector).setInputFiles(filePaths);
+        await target.locator(resolved.selector).setInputFiles(validatedPaths);
       }
 
-      const fileInfo = filePaths.map(fp => {
+      const fileInfo = validatedPaths.map(fp => {
         const stat = fs.statSync(fp);
         return `${path.basename(fp)} (${stat.size}B)`;
       }).join(', ');
@@ -640,18 +668,9 @@ export async function handleWriteCommand(
     case 'cookie-import': {
       const filePath = args[0];
       if (!filePath) throw new Error('Usage: browse cookie-import <json-file>');
-      // Path validation — resolve to absolute and check against safe dirs.
-      // Fixes #707: relative paths previously bypassed the safe directory check.
-      // Mirrors validateOutputPath() — resolves symlinks (e.g., macOS /tmp → /private/tmp).
-      const resolved = path.resolve(filePath);
-      let resolvedReal = resolved;
-      try { resolvedReal = fs.realpathSync(resolved); } catch {
-        // File may not exist yet — resolve parent dir instead
-        try { resolvedReal = path.join(fs.realpathSync(path.dirname(resolved)), path.basename(resolved)); } catch {}
-      }
-      if (!SAFE_DIRECTORIES.some(dir => isPathWithin(resolvedReal, dir))) {
-        throw new Error(`Path must be within: ${SAFE_DIRECTORIES.join(', ')}`);
-      }
+      // Path validation against safe dirs (#707: relative paths included),
+      // through the same realpath as SAFE_DIRECTORIES (#3104).
+      validateReadPath(filePath);
       if (!fs.existsSync(filePath)) throw new Error(`File not found: ${filePath}`);
       const raw = fs.readFileSync(filePath, 'utf-8');
       let cookies: any[];
@@ -682,80 +701,50 @@ export async function handleWriteCommand(
     }
 
     case 'cookie-import-browser': {
-      // Two modes:
-      // 1. Direct CLI import: cookie-import-browser <browser> --domain <domain> [--profile <profile>]
-      //    Requires --domain (or --all to explicitly import everything).
-      // 2. Open picker UI: cookie-import-browser [browser] (interactive domain selection)
-      const browserArg = args[0];
-      const domainIdx = args.indexOf('--domain');
-      const profileIdx = args.indexOf('--profile');
-      const hasAll = args.includes('--all');
-      const profile = (profileIdx !== -1 && profileIdx + 1 < args.length) ? args[profileIdx + 1] : 'Default';
-
-      if (domainIdx !== -1 && domainIdx + 1 < args.length) {
-        // Direct import mode — scoped to specific domain
-        const domain = args[domainIdx + 1];
-        // Validate --domain against current page hostname to prevent cross-site cookie injection
-        const pageHostname = new URL(page.url()).hostname;
-        const normalizedDomain = domain.startsWith('.') ? domain.slice(1) : domain;
-        if (normalizedDomain !== pageHostname && !pageHostname.endsWith('.' + normalizedDomain)) {
-          throw new Error(`--domain "${domain}" does not match current page domain "${pageHostname}". Navigate to the target site first.`);
+      const options = parseCookieImportArgs(args);
+      const target = { page, url: page.url() };
+      const authOptions = {
+        identitySelector: process.env.GSTACK_COOKIE_AUTH_SELECTOR,
+        expectedIdentity: process.env.GSTACK_COOKIE_AUTH_EXPECTED_IDENTITY,
+      };
+      if (options.domains || options.all) {
+        if (options.domains) {
+          const targetUrl = validateCookieTarget(target);
+          if (!options.domains.every(domain => cookieDomainMatches(targetUrl.hostname, '.' + domain))) {
+            throw new CookieImportError('The requested cookie domain does not match the current page. Navigate to the target site first.', 'target_mismatch');
+          }
         }
-        const browser = browserArg || 'comet';
-        let result = await importCookies(browser, [domain], profile);
-        // If all cookies failed and v20 is detected, try CDP extraction
-        if (result.cookies.length === 0 && result.failed > 0 && hasV20Cookies(browser, profile)) {
-          result = await importCookiesViaCdp(browser, [domain], profile);
+        const result = await runCookieImport(options, target, domains => bm.trackCookieImportDomains(domains), authOptions);
+        const message = formatCookieImportResult(result);
+        if (result.outcome === 'failed' || options.verifyAuth && !result.verification.verified) {
+          throw new CookieImportError(message, 'cookie_import_incomplete');
         }
-        if (result.cookies.length > 0) {
-          await page.context().addCookies(result.cookies);
-          bm.trackCookieImportDomains([domain]);
-        }
-        const msg = [`Imported ${result.count} cookies for ${domain} from ${browser}`];
-        if (result.failed > 0) msg.push(`(${result.failed} failed to decrypt)`);
-        return msg.join(' ');
+        return message + (options.all ? ' Used --all: all source-profile cookie domains were selected.' : '');
       }
 
-      if (hasAll) {
-        // Explicit all-cookies import — requires --all flag as a deliberate opt-in.
-        // Imports every non-expired cookie domain from the browser.
-        const browser = browserArg || 'comet';
-        const { listDomains } = await import('./cookie-import-browser');
-        const { domains } = listDomains(browser, profile);
-        const allDomainNames = domains.map((d: any) => d.domain);
-        if (allDomainNames.length === 0) {
-          return `No cookies found in ${browser} (profile: ${profile})`;
-        }
-        const result = await importCookies(browser, allDomainNames, profile);
-        if (result.cookies.length > 0) {
-          await page.context().addCookies(result.cookies);
-          bm.trackCookieImportDomains(allDomainNames);
-        }
-        const msg = [`Imported ${result.count} cookies across ${Object.keys(result.domainCounts).length} domains from ${browser}`];
-        msg.push('(used --all: all browser cookies imported, consider --domain for tighter scoping)');
-        if (result.failed > 0) msg.push(`(${result.failed} failed to decrypt)`);
-        return msg.join(' ');
-      }
-
-      // Picker UI mode — open in user's browser for interactive domain selection
       const port = bm.serverPort;
-      if (!port) throw new Error('Server port not available');
-
+      if (!port) throw new CookieImportError('Server port not available', 'unavailable');
       const browsers = findInstalledBrowsers();
-      if (browsers.length === 0) {
-        throw new Error(`No Chromium browsers found. Supported: ${listSupportedBrowserNames().join(', ')}`);
-      }
-
-      const code = generatePickerCode();
+      if (browsers.length === 0) throw new CookieImportError(`No Chromium browsers found. Supported: ${listSupportedBrowserNames().join(', ')}`, 'not_installed');
+      if (options.clearStorage || options.verifyAuth) validateCookieTarget(target);
+      if (options.clearStorage) validateCookieStorageSupport(page);
+      if (options.verifyAuth) validateCookieAuthOptions(authOptions);
+      const code = generatePickerCode({
+        target,
+        browser: options.browser,
+        profile: options.profile,
+        clearStorage: options.clearStorage,
+        verifyAuth: options.verifyAuth,
+      });
       const pickerUrl = `http://127.0.0.1:${port}/cookie-picker?code=${code}`;
+      const openCommand = process.platform === 'darwin' ? ['open', pickerUrl]
+        : process.platform === 'win32' ? ['cmd.exe', '/d', '/c', 'start', '', pickerUrl] : ['xdg-open', pickerUrl];
       try {
-        Bun.spawn(['open', pickerUrl], { stdout: 'ignore', stderr: 'ignore' });
-      } catch (err: any) {
-        // open may fail on non-macOS or if 'open' binary is missing — URL is in the message below
-        if (err?.code !== 'ENOENT' && !err?.message?.includes('spawn')) throw err;
+        Bun.spawn(openCommand, { stdout: 'ignore', stderr: 'ignore', windowsHide: true });
+      } catch {
+        throw new CookieImportError('Could not open the cookie picker in a local browser. Retry from a desktop session.', 'picker_open_failed');
       }
-
-      return `Cookie picker opened at http://127.0.0.1:${port}/cookie-picker\nDetected browsers: ${browsers.map(b => b.name).join(', ')}\nSelect domains to import, then close the picker when done.\n\nTip: For scripted imports, use --domain <domain> to scope cookies to a single domain.`;
+      return `Cookie picker opened at http://127.0.0.1:${port}/cookie-picker\nDetected browsers: ${browsers.map(b => b.name).join(', ')}\nSelect the source profile and domains. Cookies copied does not mean sign-in verified.`;
     }
 
     case 'style': {
@@ -1005,13 +994,18 @@ export async function handleWriteCommand(
         } else if (args[i] === '--cleanup') {
           doCleanup = true;
         } else if (args[i] === '--hide' && i + 1 < args.length) {
-          // Collect all following non-flag args as selectors to hide
+          // Collect all following non-flag args as selectors to hide. A
+          // trailing image path is the output path, not a selector (#1419).
+          const values: string[] = [];
           i++;
           while (i < args.length && !args[i].startsWith('--')) {
-            hideSelectors.push(args[i]);
+            values.push(args[i]);
             i++;
           }
           i--; // Back up since the for loop will increment
+          const last = values[values.length - 1];
+          if (!outputPath && values.length > 1 && /^(\/|\.\.?\/|~)|\.(png|jpe?g|webp)$/i.test(last)) outputPath = values.pop();
+          hideSelectors.push(...values);
         } else if (args[i] === '--width' && i + 1 < args.length) {
           viewportWidth = parseInt(args[++i], 10);
           if (isNaN(viewportWidth)) throw new Error('--width must be a number');
@@ -1123,6 +1117,10 @@ export async function handleWriteCommand(
 
       // Take screenshot
       await page.screenshot({ path: outputPath, fullPage: !scrollTo });
+      // Guard against Anthropic vision API >2000px brick (#1214). Only
+      // applies to fullPage captures; scrollTo viewport-bound shots are
+      // already capped by the viewport size.
+      if (!scrollTo) await guardScreenshotPath(outputPath);
 
       // Restore viewport
       if (viewportWidth && originalViewport) {
@@ -1309,12 +1307,17 @@ export async function handleWriteCommand(
       const selectorIdx = args.indexOf('--selector');
       const selector = selectorIdx >= 0 ? args[selectorIdx + 1] : undefined;
       const dirIdx = args.indexOf('--dir');
-      const dir = dirIdx >= 0 ? args[dirIdx + 1] : path.join(TEMP_DIR, `browse-scrape-${Date.now()}`);
+      const requestedDir = dirIdx >= 0 ? args[dirIdx + 1] : path.join(TEMP_DIR, `browse-scrape-${Date.now()}`);
       const limitIdx = args.indexOf('--limit');
       const limit = Math.min(limitIdx >= 0 ? parseInt(args[limitIdx + 1], 10) || 50 : 50, 200);
 
-      validateOutputPath(dir);
+      validateOutputPath(requestedDir);
+      const dir = path.resolve(requestedDir);
       fs.mkdirSync(dir, { recursive: true });
+      // Each file is validated too: a symlink planted in an existing --dir
+      // would otherwise redirect the write outside the safe directories.
+      const manifestPath = path.join(dir, 'manifest.json');
+      validateOutputPath(manifestPath);
 
       const { extractMedia } = await import('./media-extract');
       const target = bm.getActiveFrameOrPage();
@@ -1373,6 +1376,7 @@ export async function handleWriteCommand(
           const ext = mimeToExt(ct.split(';')[0].trim());
           const filename = `${type}-${String(i + 1).padStart(3, '0')}${ext}`;
           const filePath = path.join(dir, filename);
+          validateOutputPath(filePath);
           const body = Buffer.from(await response.body());
           try {
             fs.writeFileSync(filePath, body);
@@ -1393,7 +1397,7 @@ export async function handleWriteCommand(
       }
 
       // Write manifest
-      fs.writeFileSync(path.join(dir, 'manifest.json'), JSON.stringify(manifest, null, 2));
+      fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
 
       return `Scraped ${toDownload.length} items to ${dir}/\n${lines.join('\n')}\n\nSummary: ${manifest.succeeded} succeeded, ${manifest.failed} failed, ${Math.round(manifest.total_size / 1024)}KB total`;
     }
@@ -1404,9 +1408,10 @@ export async function handleWriteCommand(
       validateOutputPath(outputPath);
 
       try {
-        const cdp = await page.context().newCDPSession(page);
-        const { data } = await cdp.send('Page.captureSnapshot', { format: 'mhtml' });
-        await cdp.detach();
+        const data = await withCdpSession(page, async (cdp) => {
+          const result = await cdp.send('Page.captureSnapshot', { format: 'mhtml' });
+          return (result as { data: string }).data;
+        });
         fs.writeFileSync(outputPath, data);
         return `Archive saved: ${outputPath} (${Math.round(data.length / 1024)}KB, MHTML)`;
       } catch (err: any) {

@@ -31,7 +31,7 @@ triggers:
 
 # /design-review: Design Audit → Fix → Verify
 
-You are a senior product designer AND a frontend engineer. Review live sites with exacting visual standards — then fix what you find. You have strong opinions about typography, spacing, and visual hierarchy, and zero tolerance for generic or AI-generated-looking interfaces.
+You are a senior product designer AND a frontend engineer. Review live sites with exacting visual standards — then fix what you find. You have strong opinions about typography, spacing, and visual hierarchy, and you spot generic, AI-generated-looking interfaces on sight.
 
 ## Setup
 
@@ -42,21 +42,17 @@ You are a senior product designer AND a frontend engineer. Review live sites wit
 | Target URL | (auto-detect or ask) | `https://myapp.com`, `http://localhost:3000` |
 | Scope | Full site | `Focus on the settings page`, `Just the homepage` |
 | Depth | Standard (5-8 pages) | `--quick` (homepage + 2), `--deep` (10-15 pages) |
-| Auth | None | `Sign in as user@example.com`, `Import cookies` |
+| Auth | The user's Aside session (already signed in) | `I'm signed in as user@example.com in Aside` |
 
 **If no URL is given and you're on a feature branch:** Automatically enter **diff-aware mode** (see Modes below).
 
 **If no URL is given and you're on main/master:** Ask the user for a URL.
 
-**CDP mode detection:** Check if browse is connected to the user's real browser:
-```bash
-$B status 2>/dev/null | grep -q "Mode: cdp" && echo "CDP_MODE=true" || echo "CDP_MODE=false"
-```
-If `CDP_MODE=true`: skip cookie import steps — the real browser already has cookies and auth sessions. Skip headless detection workarounds.
+**Capture the project's design system:**
 
-**Check for DESIGN.md:**
+Look for `DESIGN.md`, `design-system.md`, or similar in the repo root, then for the tokens the code ships: `:root` CSS custom properties, `tailwind.config.*`, and theme or tokens files. Read what exists; Phase 2 adds what the page renders. All design decisions are calibrated against this system, and deviations from it are higher severity. Use universal design principles only when the project has neither a design doc nor code tokens, and offer to create a DESIGN.md from the inferred system.
 
-Look for `DESIGN.md`, `design-system.md`, or similar in the repo root. If found, read it — all design decisions must be calibrated against it. Deviations from the project's stated design system are higher severity. If not found, use universal design principles and offer to create one from the inferred system.
+{{DESIGN_MD_CHECK:calibrate}}
 
 **Check for clean working tree:**
 
@@ -76,9 +72,11 @@ RECOMMENDATION: Choose A because uncommitted work should be preserved as a commi
 
 After the user chooses, execute their choice (commit or stash), then continue with setup.
 
-**Find the browse binary:**
+**Check the Aside browser:**
 
-{{BROWSE_SETUP}}
+{{ASIDE_SETUP}}
+
+{{BROWSE_FALLBACK}}
 
 **Check test framework (bootstrap if needed):**
 
@@ -92,14 +90,22 @@ If `DESIGN_READY`: during the fix loop, you can generate "target mockups" showin
 
 If `DESIGN_NOT_AVAILABLE`: skip mockup generation — the fix loop works without it.
 
+{{DESIGN_DETECTOR}}
+
 **Create output directories:**
 
 ```bash
-eval "$(~/.claude/skills/gstack/bin/gstack-slug 2>/dev/null)"
-REPORT_DIR="$HOME/.gstack/projects/$SLUG/designs/design-audit-$(date +%Y%m%d)"
-mkdir -p "$REPORT_DIR/screenshots"
-echo "REPORT_DIR: $REPORT_DIR"
+SLUG=$(~/.claude/skills/gstack/bin/gstack-slug --get SLUG 2>/dev/null)
+GSTACK_STATE_ROOT=$(~/.claude/skills/gstack/bin/gstack-paths --get GSTACK_STATE_ROOT); : "${GSTACK_STATE_ROOT:?gstack-paths failed; reinstall with ./setup or /gstack-upgrade}"
+REPORT_DIR="$GSTACK_STATE_ROOT/projects/$SLUG/designs/design-audit-$(date +%Y%m%d)"
+RUN_ID="$(date +%H%M%S)-$$"
+mkdir -p "$REPORT_DIR/screenshots" "$REPORT_DIR/dom/$RUN_ID"
+echo "REPORT_DIR: $REPORT_DIR"; echo "RUN_ID: $RUN_ID"
 ```
+
+Remember `RUN_ID` and restate it literally in later blocks (each bash block is a fresh shell). DOM dumps land in `$REPORT_DIR/dom/$RUN_ID/`; nothing from earlier runs is touched.
+
+{{DESIGN_DETECTOR:phase0}}
 
 ---
 
@@ -120,14 +126,14 @@ Record baseline design score and AI slop score at end of Phase 6.
 ## Output Structure
 
 ```
-~/.gstack/projects/$SLUG/designs/design-audit-{YYYYMMDD}/
+$GSTACK_STATE_ROOT/projects/$SLUG/designs/design-audit-{YYYYMMDD}/
 ├── design-audit-{domain}.md                  # Structured report
 ├── screenshots/
-│   ├── first-impression.png                  # Phase 1
+│   ├── first-impression.jpg                  # Phase 1
 │   ├── {page}-annotated.png                  # Per-page annotated
-│   ├── {page}-mobile.png                     # Responsive
-│   ├── {page}-tablet.png
-│   ├── {page}-desktop.png
+│   ├── {page}-mobile.jpg                     # Responsive
+│   ├── {page}-tablet.jpg
+│   ├── {page}-desktop.jpg
 │   ├── finding-001-before.png                # Before fix
 │   ├── finding-001-target.png                # Target mockup (if generated)
 │   ├── finding-001-after.png                 # After fix
@@ -149,6 +155,8 @@ Sort all discovered findings by impact, then decide which to fix:
 
 Mark findings that cannot be fixed from source code (e.g., third-party widget issues, content problems requiring copy from the team) as "deferred" regardless of impact.
 
+Detector findings carry their `[rule-id]`; a deferred one ends with its `handoff=` command when `IMPECCABLE_SKILL: present` (Phase 0 lists them), and nothing when the detector did not run.
+
 ---
 
 ## Phase 8: Fix Loop
@@ -168,11 +176,20 @@ For each fixable finding, in impact order:
 
 ### 8a.5. Target Mockup (if DESIGN_READY)
 
-If the gstack designer is available and the finding involves visual layout, hierarchy, or spacing (not just a CSS value fix like wrong color or font-size), generate a target mockup showing what the corrected version should look like:
+If the gstack designer is available and the finding involves visual layout, hierarchy, or spacing (not just a CSS value fix like wrong color or font-size), generate a target mockup showing what the corrected version should look like. Write the description of the page or component with the finding fixed into a private file. The brief reuses the captured system verbatim (the same colors, fonts, radii and spacing scale) and changes layout or structure only; never introduce a new palette or typeface for a product that already has one:
+
+{{FREE_TEXT_FILE:BRIEF_FILE=brief}}
+
+Then substitute the printed name for `<brief-file-name>`:
 
 ```bash
-$D generate --brief "<description of the page/component with the finding fixed, referencing DESIGN.md constraints>" --output "$REPORT_DIR/screenshots/finding-NNN-target.png"
+BRIEF_FILE="$(git rev-parse --show-toplevel 2>/dev/null || pwd)/.gstack/tmp/<brief-file-name>"
+[ -s "$BRIEF_FILE" ] || { echo "Not run: $BRIEF_FILE is missing or empty. Write the brief, then rerun this block." >&2; exit 1; }
+_OUT=$($D generate --brief "$(cat "$BRIEF_FILE")" --output "$REPORT_DIR/screenshots/finding-NNN-target.png"); _RC=$?
+printf '%s\n' "$_OUT"; echo "EXIT: $_RC"; [ "$_RC" != 0 ] || rm -f "$BRIEF_FILE"
 ```
+
+Record the printed `outputPath` for this finding (images are never overwritten, so it may be bumped); later steps use that path. Exit 2: no mockup was saved; skip it for this finding.
 
 Show the user: "Here's the current state (screenshot) and here's what it should look like (mockup). Now I'll fix the source to match."
 
@@ -198,14 +215,25 @@ git commit -m "style(design): FINDING-NNN — short description"
 
 ### 8d. Re-test
 
-Navigate back to the affected page and verify the fix:
+Navigate back to the affected page and verify the fix — one Aside script per finding:
 
 ```bash
-$B goto <affected-url>
-$B screenshot "$REPORT_DIR/screenshots/finding-NNN-after.png"
-$B console --errors
-$B snapshot -D
+aside repl '
+const HOOK = `(() => { window.__gstackErrs = window.__gstackErrs || []; const oe = console.error; console.error = (...a) => { window.__gstackErrs.push(a.map(String).join(" ")); oe.apply(console, a); }; window.addEventListener("error", e => window.__gstackErrs.push("uncaught: " + e.message)); })()`;
+const pg = await openTab("about:blank");
+await pg._sendToTarget("Page.addScriptToEvaluateOnNewDocument", { source: HOOK });
+await pg.goto("<affected-url>");
+const s = await snapshot(pg, { interactive: true });
+console.log(s.tree);
+console.log("CONSOLE_ERRORS=" + JSON.stringify(await pg.evaluate(() => window.__gstackErrs)));
+await pg.screenshot({ path: "finding-NNN-after.png", type: "png", fullPage: true });
+console.log("ASIDE_DIR=" + pwd);
+await closeTab(pg);
+console.log("GSTACK_STEP_OK");
+'
 ```
+
+Then `cp "<ASIDE_DIR>/finding-NNN-after.png" "$REPORT_DIR/screenshots/"` and Read it next to the before shot. `CONSOLE_ERRORS=` must be `[]` (or no worse than the baseline) — a new error is a regression.
 
 Take **before/after screenshot pair** for every fix.
 
@@ -252,9 +280,10 @@ DESIGN-FIX RISK:
 After all fixes are applied:
 
 1. Re-run the design audit on all affected pages
-2. If target mockups were generated during the fix loop AND `DESIGN_READY`: run `$D verify --mockup "$REPORT_DIR/screenshots/finding-NNN-target.png" --screenshot "$REPORT_DIR/screenshots/finding-NNN-after.png"` to compare the fix result against the target. Include pass/fail in the report.
+2. If target mockups were generated during the fix loop AND `DESIGN_READY`: run `$D verify --mockup "<outputPath printed for finding NNN>" --screenshot "$REPORT_DIR/screenshots/finding-NNN-after.png"` to compare the fix result against the target. Include pass/fail in the report.
 3. Compute final design score and AI slop score
-4. **If final scores are WORSE than baseline:** WARN prominently — something regressed
+4. Recompute the detector count the same way Phase 0 scanned: DOM mode re-dumps the affected pages after reload into `$REPORT_DIR/dom/$RUN_ID/` and rescans; source mode rescans the files you touched. Then delete `$REPORT_DIR/dom/$RUN_ID/` unless the user passed `--keep-dom`.
+5. **If final scores are WORSE than baseline:** WARN prominently — something regressed
 
 ---
 
@@ -268,7 +297,7 @@ Write the report to `$REPORT_DIR` (already set up in the setup phase):
 ```bash
 {{SLUG_SETUP}}
 ```
-Write a one-line summary to `~/.gstack/projects/{slug}/{user}-{branch}-design-audit-{datetime}.md` with a pointer to the full report in `$REPORT_DIR`.
+Write a one-line summary to `<PROJECT_DIR>/{user}-{branch}-design-audit-{datetime}.md` (`PROJECT_DIR` printed above) with a pointer to the full report in `$REPORT_DIR`.
 
 **Per-finding additions** (beyond standard design audit report):
 - Fix Status: verified / best-effort / reverted / deferred
@@ -282,6 +311,7 @@ Write a one-line summary to `~/.gstack/projects/{slug}/{user}-{branch}-design-au
 - Deferred findings
 - Design score delta: baseline → final
 - AI slop score delta: baseline → final
+- Detector: N → M (counted findings; "not installed" or "off" when it did not run)
 
 **PR Summary:** Include a one-line summary suitable for PR descriptions:
 > "Design review found N issues, fixed M. Design score X → Y, AI slop score X → Y."
@@ -303,10 +333,12 @@ If the repo has a `TODOS.md`:
 
 ## Additional Rules (design-review specific)
 
+The audit rule "Never read source code" governs the Phases 1-6 audit only; the Phase 8 fix loop reads and edits source.
+
 11. **Clean working tree required.** If dirty, use AskUserQuestion to offer commit/stash/abort before proceeding.
 12. **One commit per fix.** Never bundle multiple design fixes into one commit.
 13. **Only modify tests when generating regression tests in Phase 8e.5.** Never modify CI configuration. Never modify existing tests — only create new test files.
 14. **Revert on regression.** If a fix makes things worse, `git revert HEAD` immediately.
 15. **Self-regulate.** Follow the design-fix risk heuristic. When in doubt, stop and ask.
 16. **CSS-first.** Prefer CSS/styling changes over structural component changes. CSS-only changes are safer and more reversible.
-17. **DESIGN.md export.** You MAY write a DESIGN.md file if the user accepts the offer from Phase 2.
+17. **DESIGN.md export.** You MAY write a DESIGN.md file if the user accepts the offer from Phase 2. Write it in the open DESIGN.md format (front matter tokens plus the canonical sections, the Phase 6 template in /design-consultation); an existing file keeps its persisted format choice, and this skill never offers a conversion.

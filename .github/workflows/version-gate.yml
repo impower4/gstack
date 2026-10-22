@@ -2,6 +2,7 @@ name: Version Gate
 
 on:
   pull_request:
+    branches: [main]
     paths:
       - 'VERSION'
       - 'CHANGELOG.md'
@@ -14,19 +15,32 @@ concurrency:
 jobs:
   check:
     name: Check VERSION is not stale vs queue
-    runs-on: ubicloud-standard-8
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
     permissions:
       contents: read
       pull-requests: read
     steps:
       - name: Checkout PR head
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
           ref: ${{ github.event.pull_request.head.sha }}
 
+      # The gate's own code comes from the PR's merge commit (github.sha): a PR
+      # that edits the gate runs its edit, and an open PR picks up a gate fix
+      # on main at its next pull_request event (reopen or push), not on a re-run.
+      - name: Checkout gate code (merge commit)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.sha }}
+          path: .version-gate
+          persist-credentials: false
+
       - name: Setup Bun
-        uses: oven-sh/setup-bun@v2
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.4.2
 
       - name: Read versions
         id: versions
@@ -34,7 +48,7 @@ jobs:
           set -euo pipefail
           PR_VERSION=$(cat VERSION | tr -d '[:space:]')
           BASE_REF="${{ github.event.pull_request.base.ref }}"
-          git fetch origin "$BASE_REF" --depth=1 --quiet || true
+          git fetch origin "$BASE_REF" --quiet || true
           BASE_VERSION=$(git show "origin/$BASE_REF:VERSION" 2>/dev/null | tr -d '[:space:]' || echo "0.0.0.0")
           {
             echo "pr_version=$PR_VERSION"
@@ -69,6 +83,12 @@ jobs:
 
       - name: Compare PR VERSION to next free slot
         env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_VERSION: ${{ steps.versions.outputs.pr_version }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          BASE_REF: ${{ steps.versions.outputs.base_ref }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
-          bun run scripts/compare-pr-version.ts next.json "${{ github.event.pull_request.number }}"
+          if ! PR_CHANGED_FILES=$(gh api --paginate "repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/files" --jq '.[].filename'); then PR_CHANGED_FILES=""; fi
+          export PR_CHANGED_FILES
+          bun --no-env-file --config=/dev/null run .version-gate/scripts/compare-pr-version.ts next.json "${{ github.event.pull_request.number }}"

@@ -11,9 +11,17 @@ export type FontMode = "sans"; // v1: Helvetica only. Future: "serif" | "custom"
  * Options for `$P generate` — the public CLI contract.
  * Matches the flag set documented in the CEO plan.
  */
+export type OutputFormat = "pdf" | "html" | "docx";
+
 export interface GenerateOptions {
   input: string;                  // markdown input path
-  output?: string;                // PDF output path (default: /tmp/<slug>.pdf)
+  output?: string;                // output path (default: /tmp/<slug>.<ext>)
+
+  // Output format (NOT --format, which is a --page-size alias):
+  //   pdf  — print-quality PDF through the browser: Aside, else gstack's own (default)
+  //   html — single self-contained file, zero network references
+  //   docx — content-fidelity Word document (diagrams embedded as PNG)
+  to?: OutputFormat;
 
   // Page layout
   margins?: string;               // "1in" | "72pt" | "25mm" | "2.54cm"
@@ -44,6 +52,10 @@ export interface GenerateOptions {
   // Network
   allowNetwork?: boolean;         // default: false
 
+  // Strict mode (eng-review D6.1): missing/remote images hard-fail instead of
+  // warn + placeholder. For CI docs pipelines that need determinism.
+  strict?: boolean;               // default: false
+
   // Metadata
   title?: string;
   author?: string;
@@ -71,32 +83,6 @@ export interface PreviewOptions {
 }
 
 /**
- * Parsed page.pdf() options passed to browse.
- */
-export interface BrowsePdfOptions {
-  output: string;
-  tabId: number;
-  format?: PageSize;
-  width?: string;
-  height?: string;
-  margins?: {
-    top: string;
-    right: string;
-    bottom: string;
-    left: string;
-  };
-  headerTemplate?: string;
-  footerTemplate?: string;
-  pageNumbers?: boolean;
-  displayHeaderFooter?: boolean;
-  tagged?: boolean;
-  outline?: boolean;
-  printBackground?: boolean;
-  preferCSSPageSize?: boolean;
-  toc?: boolean;                  // signals browse to wait for Paged.js
-}
-
-/**
  * Exit codes for $P generate.
  * Mirror these in orchestrator error paths.
  */
@@ -104,21 +90,20 @@ export const ExitCode = {
   Success: 0,
   BadArgs: 1,
   RenderError: 2,
-  PagedJsTimeout: 3,
-  BrowseUnavailable: 4,
+  TocPagination: 3,
+  BrowserUnavailable: 4,
 } as const;
 export type ExitCode = typeof ExitCode[keyof typeof ExitCode];
 
 /**
- * Structured error for browse CLI shell-out failures.
+ * No browser at all: Aside is not installed or not open AND gstack's own
+ * headless browser is not built (exit 4). The message (lib/aside-render's
+ * NO_BROWSER text) names both remedies. A render that fails while a browser
+ * IS available is a plain Error (exit 2).
  */
-export class BrowseClientError extends Error {
-  constructor(
-    public readonly exitCode: number,
-    public readonly command: string,
-    public readonly stderr: string,
-  ) {
-    super(`browse ${command} exited ${exitCode}: ${stderr.trim()}`);
-    this.name = "BrowseClientError";
+export class BrowserUnavailableError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "BrowserUnavailableError";
   }
 }

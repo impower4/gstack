@@ -4,6 +4,8 @@ on:
     branches: [main]
     paths:
       - 'make-pdf/**'
+      - 'lib/diagram-render/**'
+      - 'test/diagram-render-drift.test.ts'
       - 'browse/src/meta-commands.ts'
       - 'browse/src/write-commands.ts'
       - 'browse/src/commands.ts'
@@ -14,15 +16,27 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: make-pdf-gate-${{ github.head_ref }}
+  # PR-number keyed: head_ref carries no fork prefix, so same-name branches
+  # from two forks would share one group and cancel each other's runs.
+  group: make-pdf-gate-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: true
+
+# Build + test only — no token writes.
+permissions:
+  contents: read
 
 jobs:
   gate:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubicloud-standard-8, macos-latest]
+        # macOS only: the Linux leg is covered by the free-tests lane, which
+        # builds the gate binaries (build:gates) and runs make-pdf/test
+        # (incl. e2e/) on every PR via the canonical runner, with
+        # GSTACK_EXPECT_BINARIES=1 arming ci-prereqs.test.ts so the gates
+        # can never silently self-skip there again. This gate's remaining
+        # value is macOS rendering coverage on make-pdf-scoped changes.
+        os: [macos-latest]
         # Windows is tolerant-mode — Xpdf / Poppler-Windows extraction
         # differs enough from the Linux/macOS baseline that the strict
         # exact-diff gate is unreliable. Enable once the normalized
@@ -33,12 +47,13 @@ jobs:
         #     tolerant: true
 
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - uses: oven-sh/setup-bun@v2
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
-          bun-version: latest
+          bun-version: 1.4.2
 
       - name: Install dependencies
         run: bun install --frozen-lockfile
@@ -51,11 +66,22 @@ jobs:
         if: matrix.os == 'ubicloud-standard-8'
         run: sudo apt-get update && sudo apt-get install -y poppler-utils
 
+      # Install a color-emoji font BEFORE Chromium launches so the emoji render
+      # gate has a fallback font. macOS ships Apple Color Emoji already.
+      - name: Install color-emoji font (Ubuntu)
+        if: matrix.os == 'ubicloud-standard-8'
+        run: |
+          sudo apt-get install -y fonts-noto-color-emoji
+          fc-cache -f || true
+          fc-match -f '%{family[0]}\t%{color}\n' ':lang=und-zsye:charset=1F600' || true
+
       - name: Install Playwright Chromium
         run: bunx playwright install chromium
 
       - name: Build binaries
         run: bun run build
+        env:
+          GSTACK_STRICT_BUILD: '1'
 
       - name: ad-hoc codesign (Apple Silicon)
         if: matrix.os == 'macos-latest'
@@ -72,9 +98,9 @@ jobs:
           which pdftotext && pdftotext -v 2>&1 | head -1 || true
 
       - name: Run make-pdf unit tests
-        run: bun test make-pdf/test/*.test.ts
+        run: bun test make-pdf/test/*.test.ts test/diagram-render-drift.test.ts
 
-      - name: Run combined-features copy-paste gate (P0)
+      - name: Run E2E gates (combined-features copy-paste + emoji render)
         env:
           BROWSE_BIN: ${{ github.workspace }}/browse/dist/browse
-        run: bun test make-pdf/test/e2e/combined-gate.test.ts
+        run: bun test make-pdf/test/e2e/

@@ -1,0 +1,13 @@
+{
+  "captured_at": "2026-10-16",
+  "model": "claude-fable-5-1",
+  "runner": "Claude Code 2.1.302 (claude -p, --allowedTools Read 'Bash(git:*)' Grep Glob, --max-turns 30)",
+  "turns": 8,
+  "cost_usd": 0.5603,
+  "duration_ms": 75656,
+  "repo": "test/helpers/state-matrix-fixture.ts makeStateMatrixRepo(), branch trust-guard against origin/main",
+  "prompt": "the review-army specialist instructions from review/sections/review-army.md (Step 4.5 dispatch, item 5) with checklist path review-specialists/state-machines.md, base main, TEST_FW unknown, STACK node, learnings none",
+  "checklist": "review/specialists/state-machines.md",
+  "checklist_sha256_at_capture": "597215e4438d85d9cc71b48097c61eef7cba4f4b09dc14c92b4b94893b3d3ea2",
+  "output": "captured-output.jsonl (the run's result text, verbatim)"
+}

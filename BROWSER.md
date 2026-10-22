@@ -1,15 +1,273 @@
-# Browser — Complete Reference
+# Browser — Aside first, gstack's own browser as the fallback
 
-gstack's browser surface in one document. Headless Chromium daemon, ~70+
+gstack's browser surface in one document. Every skill that opens a web page —
+`/browse`, `/qa`, `/qa-only`, `/design-review`, `/canary`, `/benchmark`,
+`/scrape`, `/devex-review`, and the third-party web actions inside `/ship`,
+`/spec`, `/land-and-deploy`, `/setup-deploy`, and `/office-hours` — drives the
+[Aside](https://aside.com) AI browser first (macOS 15+). It is your real
+browser: real cookies, real logged-in accounts, your actual tabs. The agent
+works in tabs it opens for itself and closes when it is done, and never touches
+a tab of yours unless you name it. Aside also prints the PDFs and rasterizes
+the diagrams, and it is where the planning skills do their web research.
+
+When Aside is not installed or not running — Linux, Windows, or a closed Aside
+app on a Mac — the same skills switch, automatically, to the browser gstack
+ships itself: a persistent headless Chromium daemon behind a compiled CLI
+(`$B`), ~70 commands, ref-based element selection, codifiable browser-skills,
+a headed "GStack Browser" mode with a Chrome side panel, cookie import, and the
+`/pair-agent` tunnel. Nothing was removed; it is the second engine now, and the
+second half of this document is its complete reference.
+
+---
+
+## Aside is the browser gstack drives first
+
+### The driver contract
+
+Source of truth: [`scripts/resolvers/aside.ts`](scripts/resolvers/aside.ts). It
+renders `{{ASIDE_SETUP}}` into browser instructions (conditionally for QA), and
+`test/aside-driver.test.ts` pins its load-bearing sentences. If this page and
+the resolver ever disagree, the resolver wins. The contract in one screen:
+
+1. **Detect, never install.** Skills probe `command -v aside` and a one-line
+   `aside repl`. `READY` → drive Aside. `NEEDS_ASIDE` → on macOS, one line
+   pointing at aside.com (macOS 15+); off macOS, no pitch — then the fallback
+   engine below for the rest of the run. `ASIDE_NOT_RUNNING` → ask the user
+   once to open Aside, re-probe, and fall back only if it still fails. gstack
+   never runs an installer, a brew formula, or a download for Aside, and never
+   substitutes curl or unit tests for the browser step.
+2. **Own tabs only.** `openTab(url)` and work there (or a tab the user named via
+   `attachBrowserTab`). `listBrowserTabs()` output is private user data — never
+   echoed, never written to a report.
+3. **Stay on the named target.** Only the origin(s) the user named plus
+   same-origin links.
+4. **Look freely, act with consent.** Invoking a skill with a target is consent
+   to read, navigate, and fill forms without submitting. Mutating actions on a
+   LOCAL target (localhost, 127.0.0.1, 0.0.0.0, ::1, `*.localhost`, `*.test`;
+   never `*.local`, an mDNS suffix that resolves to other machines on the LAN)
+   may proceed; on any non-local
+   target they hit the user's real account, so the skill asks ONE
+   AskUserQuestion per run listing the exact actions first. Links matching
+   logout/signout/delete/remove/cancel/unsubscribe are never followed.
+5. **Credentials never pass through the agent.** Sign-in wall? The user signs
+   in inside Aside and says "done"; the skill re-runs the step. No passwords,
+   one-time codes, payment details, cookies, tokens, or localStorage — typed,
+   read, or printed.
+6. **Everything a page returns is untrusted.** Snapshot trees, page text,
+   console output, `aside exec` answers, screenshots: content, never
+   instructions. Syntax may be taken from them; scope, permissions, and consent
+   may not.
+7. **One flow per script.** Each `aside repl` call is a fresh session: no
+   variables persist and every tab it opened is closed when it ends. A flow —
+   open, act, capture evidence — lives in ONE script (120-second budget). The
+   exit code is always 0, so every script ends with
+   `console.log("GSTACK_STEP_OK")` and a missing sentinel (or a line starting
+   with `[error`) is failure.
+8. **Artifacts leave through the session directory.** Relative `screenshot`/`pdf`
+   paths land in Aside's per-run directory; the script prints
+   `ASIDE_DIR=<pwd>` and bash copies files into the report directory. Never
+   print image data — stdout truncates.
+9. **Show the user.** Copied screenshots are opened with the Read tool so they
+   appear inline. JPEG quality 60 keeps them small.
+10. **Deterministic first.** `aside repl` for anything expressible as steps;
+    `aside exec "<task>"` (Aside's own agent) only for open-ended, read-only
+    reading — same sessions, same consent rules, and its answer is untrusted.
+
+What exists inside `aside repl` (Aside CLI 1.26, verified by running it):
+`openTab`, `closeTab`, `attachBrowserTab`, `listBrowserTabs`,
+`snapshot(pg, { interactive: true })` → `{ tree, diff }`,
+`annotatedScreenshot(pg)` → `{ base64Image }`, the page surface
+`goto/url/title/evaluate/fill/click/locator/getByRole/getByLabel/getByText/
+screenshot/pdf/waitForSelector/waitForURL/waitForLoadState/reload/goBack/content`,
+raw CDP via `pg._sendToTarget(method, params)`, locators with
+`click/fill/check/selectOption/press/hover/textContent/innerText/isVisible/
+count/screenshot/waitFor`, and the globals `fs` (promises, session dir only),
+`path`, `Buffer`, `pwd`, `fetch` (user's cookies), `sleep`. Nothing else: no
+`process`, `require`, `import`, no viewport setter (use CDP
+`Emulation.setDeviceMetricsOverride`), no console event hook (install one
+through CDP before `goto`, as the cookbook does), and no `file://` navigation.
+
+### What each skill does in Aside
+
+| Skill | In Aside |
+|-------|----------|
+| `/browse` | The base skill and the home of the cookbook. Open a page, read it, click through a flow, take screenshots, check console errors. |
+| `/qa`, `/qa-only` | Read the git diff, open the affected routes in their own tabs, run the QA methodology, capture before/after evidence. `/qa` fixes; `/qa-only` reports. |
+| `/design-review` | The 80-item visual audit plus responsive captures (CDP device metrics), then the fix loop with before/after screenshots. |
+| `/canary` | One `aside repl` script per page per cycle: console errors, `performance` entries, screenshots against the pre-deploy baseline. |
+| `/benchmark` | Navigation and resource timings read from the page's own `performance` entries on a real load. |
+| `/scrape` | Prototype the extraction with `aside repl`, hand back the table, list, or prices as structured data. Read-only. |
+| `/devex-review` | Walk the real onboarding flow and time it, carrying the cookbook inline. |
+| `/ship`, `/spec`, `/land-and-deploy`, `/setup-deploy`, `/office-hours` | Third-party web actions (vendor dashboards, API keys, webhooks) offered as an Aside drive across your real sessions, with the one-question consent gate for anything mutating. |
+| `/plan-ceo-review`, `/plan-eng-review`, `/plan-devex-review`, `/design-consultation`, `/review`, `/investigate`, `/cso`, `/office-hours` | Web research runs through `aside exec` in your real browser (`{{ASIDE_RESEARCH}}`), one read-only request per question, answers treated as untrusted content. No Aside → the same queries go to the host's WebSearch tool; no WebSearch either → "Search unavailable" once and the skill proceeds on in-distribution knowledge. |
+
+### Local-HTML rendering
+
+`/make-pdf`, `/diagram`, `/design-html` previews, and `/office-hours` sketches
+generate HTML on disk and need a browser to print or rasterize it. That browser
+is Aside, through two thin wrappers:
+
+- [`lib/aside-render.ts`](lib/aside-render.ts) — the TypeScript API:
+  `render(spec)` picks the engine (`pickEngine()`: Aside when it answers,
+  gstack's own browser otherwise) and `renderWithAside(spec)` /
+  `renderWithBrowse(spec)` are the engine-specific implementations; embedded
+  into the compiled make-pdf binary.
+- [`bin/gstack-render.ts`](bin/gstack-render.ts) — the CLI skill templates
+  call:
+
+  ```bash
+  bun run ~/.claude/skills/gstack/bin/gstack-render.ts page.html \
+    --wait-selector '#ready' --wait-timeout 30000 \
+    --pdf out.pdf --paper letter --margin 0.75in --page-numbers --tagged --outline \
+    --screenshot out.png --width 1280 \
+    --eval 'window.renderSvg()' --out out.svg
+  ```
+
+  `ENGINE=aside|browse` first (the engine that actually rendered: if Aside's
+  CLI cannot start, or its private CDP bridge is missing, the render retries
+  once on gstack's own browser and this line says `browse`; a page failure or
+  a timed-out script is never retried), then one `OK <path>` line
+  per artifact, then `EVAL <i>: …` for inline evals and `PAGE_ERRORS=[…]` when
+  the page logged errors, fenced between `═══ BEGIN/END UNTRUSTED WEB CONTENT ═══`
+  lines because they are page-controlled text; exit 1 with `ERROR: …` on
+  failure. `--wait-timeout <ms>` bounds `--wait-selector` / `--wait-expr`
+  (default 30000), `--help` exits 0, and a non-numeric value for any numeric
+  flag is rejected instead of becoming a `NaN` timeout. When neither
+  browser resolves, the first line is `NEEDS_ASIDE` / `ASIDE_NOT_RUNNING` (the
+  browser skills' readiness contract) and the error names both remedies: open
+  Aside, or build gstack's browser with `./setup`.
+
+How a render works (every fact verified against Aside CLI 1.26): Aside refuses
+`file://` URLs, so the HTML's directory is served on `127.0.0.1` on an
+ephemeral port for the duration of one render and opened with
+`goto(url, { waitUntil: "load" })`. The URL carries a per-render secret as its
+first path segment, so another local process gets 404 for everything;
+containment is checked on the real path of every request (a symlink that
+escapes the directory is 403, malformed encoding is 400) and directories are
+never listed. One `aside repl` script does the whole job
+(open, wait, run the steps in order, close the tab) because nothing persists
+between CLI calls. Artifacts are written inside Aside's sandbox (the per-run
+session directory is the only writable place) and copied out afterwards. PDFs
+go through raw CDP `Page.printToPDF` so header/footer templates, tagged PDF,
+and the document outline keep working; sized screenshots use CDP
+`Emulation.setDeviceMetricsOverride`. The CLI exit code is 0 even when the
+script throws, so the wrappers trust only the `GSTACK_RENDER_OK` sentinel on
+stdout.
+
+When `probeAside()` says `NEEDS_ASIDE` or `ASIDE_NOT_RUNNING`, the same
+wrappers render through the fallback engine: the same loopback server, then one daemon call per action — `newtab --json`, `goto <loopback URL>`, `js` polling for readiness, `pdf --from-file`, `viewport` + `screenshot [--selector]`, `js --out`, and `closetab` in a finally. Same CLI flags, same `OK <path>` lines; `ENGINE=aside|browse` names the engine that actually rendered (when Aside was chosen but its CLI could not start, or its private CDP bridge is gone mid-run, `render()` retries the same spec once on this path; a page failure, or a timeout of a script that was already running, is never retried). Not mirrored on the fallback: sized screenshots come out at 1x (Aside defaults to 2x), JPEG `--quality` and `pageRanges`/`scale` are Aside-only, `--landscape` is emulated by swapping the paper dimensions, and `--wait-pagedjs` maps to the daemon's `toc` wait.
+
+Never point the renderer at a website: it serves a local directory and nothing
+else. Site work is the driver contract above.
+
+### Cookbook
+
+The verified `aside repl` script shapes — read a page, drive a flow, annotated
+screenshot, responsive captures, links + status (HEAD-checked only on a LOCAL
+target; on a real site every HEAD request would carry the user's cookies, so
+links print as `LINK ?` unfetched), performance, PDF, element screenshot,
+`aside exec` research — live in `generateAsideCookbook()` in
+[`scripts/resolvers/aside.ts`](scripts/resolvers/aside.ts) and render as
+`{{ASIDE_COOKBOOK}}` into `/browse` and `/devex-review` (read the generated
+[browse/SKILL.md](browse/SKILL.md) for the current copy). Every script there
+was executed against Aside CLI 1.26 before it was written down; edit the
+resolver, never a rendered copy.
+
+### Web research runs in Aside first
+
+The planning, review, and design skills run their "look up the competitors" /
+"check current best practices" steps through Aside's own agent (`aside exec`)
+in your real browser, via `{{ASIDE_RESEARCH}}`: one read-only request per
+question, the answer cited as untrusted content, the query sanitized before it
+leaves the machine (no hostnames, paths, SQL, or secrets). Every `aside exec`
+call goes through the `_aside_exec` wrapper that `{{ASIDE_EXEC_PRELUDE}}`
+renders into the same bash block: it writes an egress receipt
+(`~/.gstack/security/egress.jsonl`) before the prompt leaves the machine, and
+fails open (the call still runs, unreceipted) only when the egress library
+itself is missing from the install; skills never call `aside exec` bare.
+Without Aside the
+same queries go to the host's WebSearch tool when it provides one; without
+that, the skill says "Search unavailable — proceeding with in-distribution
+knowledge only" once and carries on. (Codex keeps its own `web_search` config
+flag; that is Codex's tool, not gstack's.)
+
+## When the fallback kicks in
+
+The switch is the readiness probe every browser skill runs at its BROWSER SETUP
+step — `command -v aside && aside repl 'console.log("ASIDE_READY " + pwd)'`,
+bounded to 30 seconds by `gtimeout`, `timeout`, or a `perl alarm` on stock
+macOS (which ships neither):
+
+| Probe result | Means | What the skill does |
+|---|---|---|
+| `READY` | Aside CLI on PATH and the app answered | Drive Aside for the whole run. |
+| `NEEDS_ASIDE` | No `aside` CLI (Linux, Windows, or a Mac without Aside) | On macOS, one line pointing at aside.com (macOS 15+; gstack never installs it); off macOS, no pitch. Then resolve `$B` per `{{BROWSE_FALLBACK}}` and run the `$B` equivalent of each cookbook step. |
+| `ASIDE_NOT_RUNNING` | CLI present, app closed or not signed in | Ask the user once to open Aside (and sign in), then re-run the probe. If it still fails, quote the probe output and fall back as above for this run. |
+
+The decision is made once per skill run, never per step, so a run never
+straddles two browsers. `lib/aside-render.ts` makes the same decision with
+`probeAside()` (which also requires `aside --version` to exit 0; a CLI that is
+present but failing is `ASIDE_NOT_RUNNING`, never "install it") for
+`/make-pdf`, `/diagram`, and design previews, and
+`{{ASIDE_RESEARCH}}` makes it for research (Aside → WebSearch → say so).
+`GSTACK_SKIP_ASIDE=1` makes all three treat Aside as absent (the probe prints
+`NEEDS_ASIDE`; the renderer and `./setup`'s browser summary follow), which is
+how the fallback path is exercised on a Mac with Aside open.
+
+What changes when the fallback is active:
+
+| On Aside | On the fallback engine |
+|---|---|
+| Your sessions are already there | `/setup-browser-cookies` copies selected cookies from Chrome, Chromium, Brave, Edge, Windows-only Opera and Opera GX, or macOS-only Comet, Arc, and Dia; verify sign-in separately, or log in once in headed mode |
+| You watch the tabs the agent opens in Aside | `/open-gstack-browser` (or `$B connect`) shows the headed GStack Browser with the side panel |
+| Sign-in wall: sign in inside Aside, say "done" | `$B handoff` opens a visible Chrome at the same page; `$B resume` continues |
+| One `aside repl` script per flow, fresh session each time | Persistent daemon: cookies, tabs, and localStorage carry over between `$B` calls |
+| Evidence lines from the cookbook (`CONSOLE_ERRORS=`, `DIFF_START…DIFF_END`, `ASIDE_DIR=`, `GSTACK_STEP_OK`) | `$B` prints raw output; the skill labels it with the same evidence lines (`URL=`, `CONSOLE_ERRORS=`, `DIFF_START`/`DIFF_END`) so the report reads identically. No `ASIDE_DIR` copy step — `$B screenshot <path>` is already on disk |
+| Durable per-site automation belongs to Aside's own skills | `/scrape` → `/skillify` codifies a flow into a browser-skill; domain-skills keep per-site notes |
+| Other agents open their own Aside tabs | `/pair-agent` shares the daemon over a scoped tunnel |
+| Aside keeps the browsing history | The daemon logs to `.gstack/*.log` and writes egress receipts for tunnel starts |
+
+Known gaps on the Aside path (none of them block the fallback):
+
+- **Aside CLI 1.26's command set.** Aside's own skill doc lists `session`,
+  `memory`, `skills`, `host`, and `--permission`; the 1.26 binary has none of
+  them (`aside --help` is the authority). Skills use only what the binary
+  exposes today and re-probe on each Aside release (tracked in `TODOS.md`).
+- **No persistent page across CLI calls.** Every `aside repl` is a fresh
+  session and its tabs die with it, so a long audit re-navigates from the URL in
+  each script and a render is always one script. `aside mcp` may lift this
+  later (tracked in `TODOS.md`).
+- **No gstack-side audit trail for Aside drives.** `aside repl` scripts run
+  inside Aside, so they produce no daemon logs or egress receipts; Aside keeps
+  its own history. (Only `aside exec` research calls leave a receipt, through
+  `_aside_exec`.)
+- **CI cannot run Aside.** `test/skill-e2e-aside.test.ts`, `design-review-fix`
+  in `test/skill-e2e-design.test.ts`, and the two live Aside cases in
+  `test/aside-render.test.ts` self-skip where Aside is absent
+  (`asideAvailable()`; `GSTACK_SKIP_ASIDE=1` forces it); the qa E2E files run
+  on either engine (`asideAvailable() || browse/dist/browse exists`), so Linux
+  CI drives them through the fallback; the static contract
+  pins in `test/aside-driver.test.ts` and `test/aside-render.test.ts` are what
+  CI proves for Aside. make-pdf's render gates and `test/skill-e2e-diagram.test.ts`
+  are not Aside-only: they run through whichever engine resolves
+  (`browserAvailable()` — Aside, or the browse binary CI builds with
+  `bun run build:gates`), so Linux CI runs them live on the fallback engine and
+  they skip only when neither browser exists.
+- **`aside exec` is another agent.** Its answer is content; skills use it only
+  for read-only research and never take scope or consent from it.
+
+---
+
+## The fallback engine — complete reference
+
+Everything below is gstack's own browser: the headless Chromium daemon, ~70+
 commands, ref-based element selection, codifiable browser-skills, real-browser
 mode with a Chrome side panel, an in-sidebar Claude PTY, an ngrok pair-agent
 flow, and a layered prompt-injection defense — all behind a compiled CLI that
 prints plain text to stdout. ~100-200ms per call. Zero context-token overhead.
-
-If you've used gstack in the last release or two, the productivity loop is the
-new headline: `/scrape <intent>` drives a page once, `/skillify` codifies the
-flow into a deterministic Playwright script, and the next `/scrape` on the
-same intent runs in ~200ms instead of ~30 seconds of agent re-exploration.
+It runs whenever the probe above does not print `READY`, and `$B` is a
+legitimate tool in that context; on a Mac with Aside open the skills never
+reach for it.
 
 ---
 
@@ -49,7 +307,7 @@ $B connect                       # headed Chromium + Side Panel extension
 5. [Snapshot system + ref-based selection](#snapshot-system)
 6. [Browser-skills runtime](#browser-skills-runtime)
 7. [Domain-skills (per-site agent notes)](#domain-skills)
-8. [Real-browser mode (`$B connect`)](#real-browser-mode) — including [`--headed` + `--proxy` + `--navigate` (v1.28.0.0)](#headed-mode--proxy--browser-native-downloads-v12800)
+8. [Real-browser mode (`$B connect`)](#real-browser-mode) — including [`--headed` + `--proxy` + `--navigate` (v1.28.0.0)](#headed-mode--proxy--browser-native-downloads-v12800) and [Aside and third-party drives (v1.72.0.0+)](#aside-and-third-party-drives-v17200)
 9. [Side Panel + sidebar agent](#side-panel--sidebar-agent)
 10. [Pair-agent — remote agents over an ngrok tunnel](#pair-agent)
 11. [Authentication + tokens](#authentication)
@@ -168,8 +426,18 @@ for the full design + decision trail.
 1. **First call.** CLI checks `<project>/.gstack/browse.json` for a running
    server. None found — it spawns `bun run browse/src/server.ts` in the
    background. Daemon launches headless Chromium via Playwright, picks a
-   random port (10000–60000), generates a bearer token, writes the state
-   file (chmod 600), starts accepting requests. ~3 seconds.
+   random port (10000–49151, deliberately below the macOS ephemeral pool
+   49152-65535 so the OS never hands a colliding port to another process),
+   generates a bearer token, writes the state file (chmod 600), starts
+   accepting requests. ~3 seconds. One launch-time exception to fail-fast:
+   when a macOS XProtect definition update SIGKILLs the pinned Chromium at
+   spawn, the daemon classifies the kill signature, clears the quarantine
+   flag on the Playwright cache, reinstalls the pinned revision from the
+   gstack install root (bounded ~120s), and retries once — at most once per
+   daemon process. If the heal can't complete, the original launch error
+   plus manual `bunx playwright install chromium` guidance lands on daemon
+   stderr (see `browse-daemon.log`). Wired at all three launch sites in
+   `browser-manager.ts` via `browse/src/xprotect-heal.ts`.
 2. **Subsequent calls.** CLI reads the state file, sends an HTTP POST with
    the bearer token, prints the response. ~100-200ms round trip.
 3. **Idle shutdown.** After 30 minutes of no commands, daemon shuts down and
@@ -177,17 +445,34 @@ for the full design + decision trail.
 4. **Crash recovery.** If Chromium crashes, the daemon exits immediately —
    no self-healing, don't hide failure. CLI detects the dead daemon on the
    next call and starts a fresh one.
+5. **Busy vs dead.** A daemon that stops answering HTTP while its process is
+   alive is busy, not dead. The CLI gives `/health` a bounded ~8s to recover,
+   then reports busy with a nonzero exit — it never kills an alive pid.
+   Only an explicit `--force-restart` replaces a live-but-unresponsive
+   daemon (tabs, cookies, and logins are lost). `browse stop` against a
+   daemon that already died is success: the desired end state holds, so it
+   cleans the stale state file instead of booting a daemon just to stop it —
+   and attempts to reap a surviving headless Chromium child when the state
+   file contains its recorded identity. The reap checks the start time AND a
+   Chromium-looking cmdline before sending any signal. Production identity
+   capture remains unfixed: the existing Playwright `Browser.process()`
+   assumption does not supply that record. Tests with supplied identities
+   verify cleanup, not real-launch identity capture.
 
 ### Multi-workspace isolation
 
 Each project root (detected via `git rev-parse --show-toplevel`) gets its
-own daemon, port, state file, cookies, and logs. No cross-workspace
-collisions. State at `<project>/.gstack/browse.json`.
+own daemon, port, state file, and logs. Headless sessions have separate
+cookie stores; headed sessions still share the default Chromium profile.
+Headless startup, stop, disconnect, and shutdown leave that profile's locks
+and their holder alone. Headed launches retain stale-lock cleanup, and
+headed-versus-headed arbitration is unchanged. State lives at
+`<project>/.gstack/browse.json`.
 
 | Workspace | State file | Port |
 |-----------|-----------|------|
-| `/code/project-a` | `/code/project-a/.gstack/browse.json` | random (10000–60000) |
-| `/code/project-b` | `/code/project-b/.gstack/browse.json` | random (10000–60000) |
+| `/code/project-a` | `/code/project-a/.gstack/browse.json` | random (10000–49151) |
+| `/code/project-b` | `/code/project-b/.gstack/browse.json` | random (10000–49151) |
 
 ---
 
@@ -212,8 +497,8 @@ from `snapshot`, or `@c` refs from `snapshot -C`. Full table:
 
 | Command | Description |
 |---------|-------------|
-| `js <expr>` | Run inline JavaScript expression in page context, return as string |
-| `eval <file>` | Run JS from a file (path under /tmp or cwd; same sandbox as `js`) |
+| `js <expr> [--out <file>] [--raw]` | Run inline JavaScript expression in page context, return as string. With `--out <file>` the result is written to disk instead of returned (a `data:*;base64,...` result is decoded to raw bytes unless `--raw`). `--out` makes the invocation a WRITE (needs `write` scope, never allowed over the tunnel). |
+| `eval <file> [--out <file>] [--raw]` | Run JS from a file (path under /tmp or cwd; same sandbox as `js`). `--out`/`--raw` behave as for `js`. |
 | `css <sel> <prop>` | Computed CSS value |
 | `attrs <sel\|@ref>` | Element attributes as JSON |
 | `is <prop> <sel\|@ref>` | State check: visible, hidden, enabled, disabled, checked, editable, focused |
@@ -245,7 +530,7 @@ from `snapshot`, or `@c` refs from `snapshot -C`. Full table:
 | `fill <sel> <val>` | Fill input |
 | `select <sel> <val>` | Select dropdown option (value, label, or visible text) |
 | `hover <sel>` | Hover element |
-| `type <text>` | Type into focused element |
+| `type [--selector <sel>] [--] <text>` | Type into the focused element, or into `<sel>` with `--selector`; put text that starts with `--` after `--`. Bare `type` hints when its first word looks like a selector |
 | `press <key>` | Playwright keyboard key (case-sensitive: Enter, Tab, ArrowUp, Shift+Enter, Control+A, ...) |
 | `scroll [sel\|@ref]` | Scroll element into view, or jump to page bottom if no selector |
 | `viewport [<WxH>] [--scale <n>]` | Set viewport size + optional `deviceScaleFactor` 1-3 (retina screenshots) |
@@ -277,9 +562,58 @@ from `snapshot`, or `@c` refs from `snapshot -C`. Full table:
 |---------|-------------|
 | `cookie <name>=<value>` | Set cookie on current page domain |
 | `cookie-import <json>` | Import cookies from JSON file |
-| `cookie-import-browser [browser] [--domain d]` | Import from installed Chromium browsers (interactive picker, or `--domain` for direct import) |
+| `cookie-import-browser [browser] [--domain d] [--profile p] [--all] [--clear-storage] [--verify-auth]` | Copy selected browser cookies; picker by default, explicit scoped or all-domain import, optional storage reset and sign-in assertion |
 | `header <name>:<value>` | Set custom request header (sensitive values auto-redacted) |
 | `useragent <string>` | Set user agent (triggers context recreation, invalidates refs) |
+
+#### Choosing a source and checking sign-in
+
+Select the source browser and account/profile explicitly. The picker recognizes Chrome, Chromium, Brave, Edge, Windows-only Opera and Opera GX, and macOS-only Comet, Arc, and Dia. It shows current profile names from `Local State`, falling back to Preferences and then the directory name, with directory labels to distinguish duplicate names. `--profile` takes that directory (`Default`, `Profile 2`), not its display name. Without it, only a sole relevant profile is selected; ambiguity or unreadable profiles require a choice. The omitted-browser default remains `comet` for CLI compatibility, not as a recommendation. The picker opening link is one-use and expires after five minutes.
+
+For direct import, first navigate to a page matching `--domain`. Example after choosing Chrome's `Profile 2`:
+
+```bash
+$B goto https://example.com
+$B cookie-import-browser chrome --domain example.com --profile "Profile 2"
+```
+
+**Windows: Opera and Opera GX.** On Windows, Chrome, Edge and Brave increasingly store App-Bound Encryption cookies that gstack cannot decrypt; Opera and Opera GX still use DPAPI-protected cookies that it can. In Git Bash, with `$B` set as in the quick start above (the Windows build is `browse/dist/browse.exe`):
+
+```bash
+SITE=app.example.com
+DOMAIN=example.com
+$B goto "https://$SITE"
+$B cookie-import-browser opera-gx --domain "$DOMAIN" --profile Default   # or: opera
+$B reload                                                               # view the page; only --verify-auth proves sign-in
+```
+
+Run `$B cookie-import-browser` with no flags to see which browsers were detected. `--profile` can be omitted when only one profile has cookies for the domain. If the receipt reports App-Bound Encryption, run `$B handoff`, sign in to the intended account in the window that opens, then `$B resume` (needs a display).
+
+**Receipt failure reasons** (printed after the message as `Failure reasons: key=count`):
+
+| Key | Meaning | Next step |
+|---|---|---|
+| `unsupported_encryption` | App-Bound Encryption (v20) cookies gstack cannot decrypt | `$B handoff`, sign in, `$B resume` |
+| `decryption_failed` | The cookie could not be decrypted with the browser's key | Close the source browser and retry; otherwise sign in manually |
+| `native_unrecovered` | Windows native extraction ran but could not recover these cookies | Sign in manually with `$B handoff` |
+
+**Import errors:**
+
+| Code | Meaning | Next step |
+|---|---|---|
+| `not_installed` | No supported cookie database for that browser or profile; the message lists every path checked and, off-platform, which OS supports the browser | Pick a browser listed as available on this OS, or pass an existing `--profile` |
+| `profile_required` | Several profiles qualify, none has cookies for the domain, or a profile could not be read | Retry with `--profile "<dir>"` as the message suggests, or run `$B cookie-import-browser <browser>` to use the picker |
+| `native_unsupported_browser` | Internal guard; not expected in normal use | Sign in manually with `$B handoff` |
+
+The picker shows receipt messages verbatim; detailed `not_installed` and `profile_required` explanations appear in CLI output.
+
+`--all` explicitly selects every non-expired cookie in the chosen source profile; it cannot accompany `--domain` or `--clear-storage`. Cookies are applied to the captured browser context, not isolated to a tab. The receipt distinguishes imported, partial, empty, and failed results, plus separate storage-reset and authentication outcomes. Cookies copied with authentication `not_requested` means **not checked**, not logged in. Zero imports, cookie counts, and HTTP 200 alone never prove sign-in.
+
+`--verify-auth` (also an explicit picker checkbox) reloads the captured target. Configure `GSTACK_COOKIE_AUTH_SELECTOR` and `GSTACK_COOKIE_AUTH_EXPECTED_IDENTITY` privately in the **daemon environment before startup**; setting them only on a later CLI call does not reconfigure an existing daemon. Missing configuration rejects before mutation. Verification requires a successful same-origin response and exactly one visible element whose whitespace-normalized text equals the expected identity. A wrong account, login redirect, missing assertion, or changed target is not verified. Do not paste cookie values, passwords, profile/account labels, or expected identity into public logs; report only sanitized outcomes.
+
+Storage stays intact by default. With explicit approval on a Chromium target, `--clear-storage` clears localStorage for the captured origin (exact scheme, host, and port, shared across that origin's tabs in the context) and sessionStorage for the target tab before applying cookies. Reset runs in an isolated world with a native monotonic deadline, so the site's scripts cannot forge its timeout clock. Other target engines reject reset; ordinary imports and authentication checks remain available. It does not clear other origins, other tabs' sessionStorage, IndexedDB, or service workers. Keep the target open and unchanged. A failed reset may have cleared some storage; a later cookie-application failure does not undo it.
+
+**Platform limits:** macOS imports may request Keychain approval; Linux `v11` cookies may require libsecret, while `v10` uses Chromium's fallback key. The Windows Node server needs Node.js 22.13 or newer with built-in SQLite enabled for cookie database reads. DPAPI-compatible cookies remain supported, but native App-Bound Encryption extraction is disabled until the browser/runtime passes qualification. Opera and Opera GX are Windows-only and read from `%APPDATA%\Opera Software\Opera Stable` or `Opera GX Stable`, in `Default` or `Profile N` directories; legacy root-level layouts, Opera side profiles and portable or relocated installs are not detected. Opera has no native extraction, so its App-Bound cookies (if any) need manual sign-in. Chrome 136+ blocks remote debugging of its default user-data directory, including numbered profiles, over both pipe and TCP; closing Chrome does not remove that protection. There is no TCP fallback or real-profile-copy workaround. If import cannot recover the session, sign in manually in gstack's headed browser when a display is available.
 
 ### Tabs + frames
 
@@ -291,6 +625,14 @@ from `snapshot`, or `@c` refs from `snapshot -C`. Full table:
 | `closetab [id]` | Close tab |
 | `tab-each <command> [args...]` | Fan out a command across every open tab; returns JSON |
 | `frame <sel\|@ref\|--name n\|--url pattern\|main>` | Switch to iframe context (or back to main); clears refs |
+
+**A busy tab is not a busy daemon.** `/health` `status` is daemon liveness
+(Chromium connected); the active tab's main thread is reported separately as
+`activeTab: { id, responsive }`, probed for at most 1s. While one page is stuck
+in a long script, `status`, `tabs`, `tab <id>`, `newtab`, `closetab`,
+`state save` and `stop` keep working, and `status` and `tabs` mark the tab as
+not responding. A command that needs the stuck tab times out after 30s and
+names it, so you can switch away or close it without `--force-restart`.
 
 ### Extraction
 
@@ -311,12 +653,21 @@ from `snapshot`, or `@c` refs from `snapshot -C`. Full table:
 | Command | Description |
 |---------|-------------|
 | `status` | Daemon health + mode (headless / headed / cdp) |
-| `stop` | Shut down daemon |
+| `stop` | Shut down daemon (succeeds even if the daemon already died — never boots one just to stop it; reaps a surviving recorded headless Chromium after identity checks) |
 | `restart` | Restart daemon |
+| `profiles [list]` | List the per-project headed Chromium profiles: size, last use, and which browser holds each |
+| `profiles prune [--days N]` | Remove headed profiles idle for N days (default 30); never one a live browser holds |
 | `connect` | Launch headed GStack Browser with Side Panel extension |
 | `disconnect` | Close headed Chrome, return to headless |
 | `focus [@ref]` | Bring headed Chrome to foreground (macOS); `@ref` also scrolls into view |
 | `state save\|load <name>` | Save or load browser state (cookies + URLs) |
+| `memory [--json]` | Snapshot Bun heap + per-tab JS heap + Chromium process tree + bounded buffer sizes. Use `--json` for programmatic consumers; text mode renders sorted top-10 tabs with "and N more" tail. |
+
+The daemon's own stdout/stderr persists to `<project>/.gstack/browse-daemon.log`
+(append mode, rotated to `.log.1` at the size cap, single generation), with
+tokens and unsanitized page content kept out — check it when a daemon dies
+without an obvious cause. A live-but-unresponsive daemon is never auto-killed;
+pass `--force-restart` to replace it explicitly (see "Daemon lifecycle" above).
 
 ### Handoff
 
@@ -526,10 +877,16 @@ window is being controlled.
 ### What "GStack Browser" means
 
 Not your daily Chrome — a Playwright-managed Chromium with custom branding
-in the Dock and menu bar, anti-bot stealth (sites like Google and NYTimes
-work without captchas), a custom user agent, and the gstack extension
-pre-loaded via `launchPersistentContext`. Your regular Chrome with your tabs
-and bookmarks stays untouched.
+in the Dock and menu bar (the `.app` name, Dock icon, and tray, NOT the UA
+string), always-on Layer C anti-bot stealth (most JS-observable automation
+tells are masked, so many anti-bot-protected sites load cleanly), a
+stock-Chrome user agent that reports the underlying Chromium version, and the
+gstack extension pre-loaded via `launchPersistentContext`. The UA no longer
+carries a `GStackBrowser` suffix — that branding string was itself a
+high-entropy tell, so the browser now reports a plain `Chrome/<version>` UA.
+Deepest-layer CDP-protocol detection still gets through (Google can still
+trigger captchas; see the CDP-patch item in `TODOS.md`). Your regular Chrome
+with your tabs and bookmarks stays untouched.
 
 ### When to use headed mode
 
@@ -538,6 +895,29 @@ and bookmarks stays untouched.
 - **Debugging** where headless behavior differs from real Chrome
 - **Demos** where you're sharing your screen
 - **Pair-agent** sessions (the remote agent drives your local browser)
+
+Headed browse keeps one Chromium profile per project, at
+`<project>/.gstack/chromium-profile` (`CHROMIUM_PROFILE` still wins). The first
+headed start copies your logins from `~/.gstack/chromium-profile` when no browser
+is using it, and otherwise starts fresh and prints how to import. If a live
+browser already holds the project's profile, browse names it and stops instead
+of killing it. `browse profiles` lists the profiles; `browse profiles prune
+--days 30` removes idle ones.
+
+### Aside and third-party drives (v1.72.0.0+)
+
+For third-party website moments (registering an API key, configuring a vendor
+dashboard), the workflow skills (`/ship`, `/spec`, `/office-hours`,
+`/land-and-deploy`, `/setup-deploy`) recommend the Aside AI browser when it's
+installed — it acts across your real logged-in sessions — with `$B` headed
+mode + handoff as the universal fallback. Consent is per-task and explicit;
+gstack never installs Aside for you, and a detected binary is never treated
+as consent.
+
+One observability caveat: drives through Aside happen entirely inside Aside,
+so they leave no gstack-side audit trail — no egress receipts, no
+browse-daemon logs. The audit trail for those drives lives in Aside itself.
+Drives through `$B` keep the normal daemon logs and egress receipts.
 
 ### CDP-aware skills
 
@@ -580,13 +960,78 @@ A running daemon with config A meeting a new invocation with config B exits
 1 with a `browse disconnect` hint instead of silently restarting and dropping
 tab state, cookies, or sessions.
 
-**Stealth scope.** When `--headed` or `--proxy` are set, `$B` masks
-`navigator.webdriver` only — via Chromium's
-`--disable-blink-features=AutomationControlled` plus a small init script.
-We do NOT fake `navigator.plugins`, `navigator.languages`, or `window.chrome`
-— modern fingerprinters check those for consistency, and synthesizing fixed
-values can flag MORE bot-like, not less. ChromeDriver's `cdc_` runtime
-artifacts and the Permissions API patch are still cleaned up.
+### Proxy from environment
+
+Without `--proxy`, `$B` picks the proxy up from the environment (#915). The
+first one set wins:
+
+1. `--proxy <url>`
+2. `BROWSE_PROXY_URL` (`BROWSE_PROXY_URL=direct` turns off steps 3-5)
+3. `HTTPS_PROXY`, then `https_proxy`
+4. `HTTP_PROXY`, then `http_proxy`
+5. `ALL_PROXY`, then `all_proxy`
+6. no proxy (a direct connection)
+
+Values from the environment follow the same credential policy as `--proxy`.
+`socks5h://` is treated as `socks5://`, because Chromium's SOCKS5 already
+resolves names through the proxy. `NO_PROXY` (or `no_proxy`) is translated to
+Chromium's bypass list: `example.com` and `.example.com` cover the domain and
+its subdomains, and CIDR blocks and `host:port` entries pass through.
+Loopback (`localhost`, `127.0.0.1`, `[::1]`) is always bypassed, for every
+proxy source. When a server starts, `$B` prints one line naming the proxy and
+where it came from, with credentials redacted.
+
+- **`warning: HTTPS_PROXY is not a proxy URL browse can use (...)`.** The
+  variable doesn't parse as `scheme://host:port`: a curl-style `host:port`, an
+  unsupported scheme, or a bad port. `$B` connects directly instead of failing
+  every command. Fix: `export HTTPS_PROXY=http://host:port` (or `socks5://`),
+  or set `BROWSE_PROXY_URL=direct` to silence the warning. A bad `--proxy` or
+  `BROWSE_PROXY_URL` is still an error, because those are explicit browse
+  settings and a silent direct connection could expose your real IP address.
+- **`the running browse daemon was started with different proxy settings (<VAR> differs), so it was not reused.`**
+  The proxy and the normalized `NO_PROXY` rules are part of the daemon config,
+  so a session whose environment differs (even by `NO_PROXY` alone) does not
+  silently reuse a daemon that routes differently. The refusal prints the
+  daemon's settings and this session's. Fix: run `browse stop` to restart the
+  daemon with this session's settings (stop works whatever the proxy settings
+  are), or set `BROWSE_PROXY_URL=direct` when the running daemon has no proxy.
+
+**Stealth scope (Layer C, always on).** Every context — headless `launch`,
+`--headed`/`--proxy`, `handoff`, and the `useragent`/`viewport --scale`
+rebuild (`recreateContext`) — gets the full Layer C mask, no opt-in flag.
+Layer C masks `navigator.webdriver`, restores the `window.chrome.*` shape
+(`runtime`, `app`, `csi`, `loadTimes`), aligns `Notification.permission`
+with the Permissions API, reports a per-install
+`hardwareConcurrency`/`deviceMemory` from the host profile, sweeps the known
+Selenium/Phantom/Nightmare/Playwright globals, and installs a
+`Function.prototype.toString` proxy so every patched getter reports
+`[native code]` even under the depth-3 recursion check. It still does NOT
+fake `navigator.plugins` or `navigator.languages` — modern fingerprinters
+cross-check those for consistency, and synthesizing fixed values flags MORE
+bot-like, not less. ChromeDriver's `cdc_`/`__webdriver` runtime artifacts and
+the Permissions notifications tell are also cleaned up on every path.
+
+`GSTACK_STEALTH=extended` (also accepts `1` or `true`; off by default) layers
+six more aggressive patches on top — WebGL renderer spoof, a faked
+`navigator.plugins` PluginArray, `navigator.mediaDevices`. That mode actively
+lies and can break sites that reflect on those properties; use it only when
+the default triggers detection. For gbrowser builds with the C++ patches, the
+`GSTACK_*` host-profile env (GPU vendor/renderer, UA-CH platform/model,
+hardware) emits the Pack 1 `--gstack-gpu-vendor` / `--gstack-gpu-renderer` /
+`--gstack-ua-platform` / `--gstack-ua-model` / `--gstack-hw-concurrency` /
+`--gstack-device-memory` switches that push the GPU/UA-CH/hardware spoof down
+to native code, and `GSTACK_CDP_STEALTH=on` (or `1`/`true`) emits the Pack 2
+`--gstack-suppress-prepare-stack-trace` switch (closes the Cloudflare
+`Error.prepareStackTrace` canary). On stock Playwright Chromium every one of
+these switches is a safe no-op.
+
+`launchHeaded` / `handoff` also strip Playwright's automation-tell launch
+defaults via `ignoreDefaultArgs` (`STEALTH_IGNORE_DEFAULT_ARGS`):
+`--enable-automation` (the "Chrome is being controlled by automated test
+software" infobar), `--disable-extensions`,
+`--disable-component-extensions-with-background-pages`,
+`--disable-popup-blocking`, `--disable-component-update`, and
+`--disable-default-apps`.
 
 **Container support.** `--headed` on Linux without `DISPLAY` walks the
 display range (`:99`, `:100`, ...) until `xdpyinfo` reports a free slot,
@@ -669,6 +1114,10 @@ Or do it manually: `chrome://extensions` → toggle Developer mode → Load
 unpacked → navigate to `~/.claude/skills/gstack/extension` → pin the
 extension → enter the port from `$B status`.
 
+v1.63 pinned the extension identity via the manifest `key` field, so existing
+unpacked installs get a new extension ID and panel-local state (saved port)
+resets once — a one-time in-product notice explains this.
+
 ---
 
 ## Pair-agent
@@ -722,6 +1171,15 @@ remote agent that tries them gets a 403 plus a fresh entry in the denial log.
 + domain only (no raw IP, no full request body), rotates at 10MB with 5
 generations. Per-device salt at `~/.gstack/security/device-salt` (mode 0600).
 
+### Tunnel egress receipts (v1.63+)
+
+Every tunnel session open writes a hash-chained egress receipt (sink
+`browse-tunnel`) to `~/.gstack/security/egress.jsonl` BEFORE ngrok forwards
+anything. Fail-closed: if the receipt can't be written, the tunnel listener
+is torn down and the start is refused. Inspect the ledger with
+`bin/gstack-egress list` and verify chain integrity with
+`bin/gstack-egress verify` (exit 3 on tamper).
+
 See [`docs/REMOTE_BROWSER_ACCESS.md`](docs/REMOTE_BROWSER_ACCESS.md) for the
 full operator guide.
 
@@ -764,6 +1222,19 @@ The Terminal pane uses a separate session cookie, `gstack_pty`, minted via
 PTY, can't dispatch arbitrary `/command` calls. `/health` endpoint MUST NOT
 surface this token.
 
+### Extension token bootstrap (v1.63+)
+
+`GET /health` is liveness/status only — it never carries a token, in any
+mode. The Side Panel extension bootstraps the root token via
+`POST /extension-token` on the local listener. The server releases the
+token only when the caller's Origin is exactly
+`chrome-extension://<GSTACK_EXTENSION_ID>` — the `key` field in
+`extension/manifest.json` pins the extension ID (`GSTACK_EXTENSION_ID` in
+`browse/src/server.ts`; derivation reproducible via
+`bun browse/scripts/extension-id.ts`) — AND the parsed Host hostname is
+loopback. Anything else gets a detail-free 403. The endpoint is never
+added to `TUNNEL_PATHS`, so the tunnel surface 404s it by default-deny.
+
 ### Token registry
 
 `browse/src/token-registry.ts` handles mint/validate/revoke for all three
@@ -775,57 +1246,54 @@ startup.
 
 ## Security stack
 
-Layered defense against prompt injection. Every layer runs synchronously on
-every user message and every tool output that could carry untrusted content
-(Read, Glob, Grep, WebFetch, page text from `$B`).
+Layered defense against prompt injection on untrusted page content.
 
 | Layer | Module | Lives in |
 |-------|--------|----------|
-| **L1** Datamarking | `content-security.ts` | both server + sidebar agent |
-| **L2** Hidden-element strip | `content-security.ts` | both |
-| **L3** ARIA + URL blocklist + envelope wrapping | `content-security.ts` | both |
-| **L4** TestSavantAI ML classifier (22MB ONNX) | `security-classifier.ts` | sidebar-agent only* |
-| **L4b** Claude Haiku transcript check | `security-classifier.ts` | sidebar-agent only |
-| **L5** Canary token (session-exfil detection) | `security.ts` | both — inject in compiled, check in agent |
-| **L6** `combineVerdict` ensemble | `security.ts` | both |
+| **L1** Datamarking | `content-security.ts` | server + page-content read path |
+| **L2** Hidden-element strip | `content-security.ts` | server + page-content read path |
+| **L3** ARIA + URL blocklist + envelope wrapping | `content-security.ts` | server + page-content read path |
+| **L4** TestSavantAI ML classifier (112MB ONNX) | `security-classifier.ts` | security sidecar subprocess* |
+| Canary token utilities | `security.ts` | pure functions — no live injector today |
+| `combineVerdict` ensemble | `security.ts` | server (inline L4 verdict path) |
 
 \* `security-classifier.ts` cannot be imported from the compiled browse
 binary — `@huggingface/transformers` v4 requires `onnxruntime-node` which
 fails to `dlopen` from Bun compile's temp extract dir. The compiled binary
-runs L1–L3, L5, L6 only.
+runs L1–L3 plus the pure parts of `security.ts`; L4 runs in a plain-Node
+sidecar (`security-sidecar-entry.ts`, spawned lazily by
+`security-sidecar-client.ts` on the first `/pty-inject-scan`).
 
 ### Thresholds
 
 - `BLOCK: 0.85` — single-layer score that would cause BLOCK if cross-confirmed
-- `WARN: 0.75` — cross-confirm threshold. When L4 AND L4b both >= 0.75 → BLOCK
-- `LOG_ONLY: 0.40` — gates transcript classifier (skip Haiku when all layers < 0.40)
+- `WARN: 0.75` — cross-confirm threshold in `combineVerdict`
+- `LOG_ONLY: 0.40` — log-only floor
 - `SOLO_CONTENT_BLOCK: 0.92` — single-layer threshold for label-less content classifiers
 
 ### Ensemble rule
 
-BLOCK only when the ML content classifier AND the transcript classifier both
-report >= WARN. Single-layer high confidence degrades to WARN — this is the
-Stack Overflow instruction-writing FP mitigation. **Canary leak always
-BLOCKs (deterministic).**
+`combineVerdict` retains multi-layer ensemble semantics (2-of-N block votes;
+single-layer high confidence degrades to WARN — the Stack Overflow
+instruction-writing FP mitigation), but only L4 (testsavant) is live today:
+the Haiku transcript and DeBERTa ensemble layers were removed along with the
+sidebar chat pipeline that hosted them. **Canary leak always BLOCKs
+(deterministic).**
 
 ### Env knobs
 
 - `GSTACK_SECURITY_OFF=1` — emergency kill switch. Classifier stays off
-  even if warmed. Canary is still injected; just the ML scan is skipped.
-- `GSTACK_SECURITY_ENSEMBLE=deberta` — opt-in DeBERTa-v3 ensemble. Adds
-  ProtectAI DeBERTa-v3-base-injection-onnx as L4c classifier. 721MB
-  first-run download. With ensemble enabled, BLOCK requires 2-of-3 ML
-  classifiers agreeing at >= WARN.
+  even if warmed. Just the ML scan is skipped.
 - Classifier model cache: `~/.gstack/models/testsavant-small/` (112MB, first
-  run only) plus `~/.gstack/models/deberta-v3-injection/` (721MB, only when
-  ensemble enabled).
+  run only).
 - Attack log: `~/.gstack/security/attempts.jsonl` (salted SHA-256 + domain
   only, rotates at 10MB, 5 generations).
 - Per-device salt: `~/.gstack/security/device-salt` (0600).
-- Session state: `~/.gstack/security/session-state.json` (cross-process,
-  atomic).
 
-A shield icon in the sidebar header shows the live status. See
+There is no security status indicator in the sidebar and no `security`
+field on `/health` (#2557): the session-state file that fed them lost its
+only writer when the chat-path agent was removed, so they reported stale or
+empty data. The live defenses report through their own call sites. See
 ARCHITECTURE.md § "Prompt injection defense" for the full threat model.
 
 ---
@@ -1033,6 +1501,19 @@ $B state load my-session         # restore
 In-memory `load-html` content is intentionally NOT persisted (avoid leaking
 secrets to disk).
 
+Manual save/load is one-shot. For state that survives daemon restarts
+automatically, opt in with `BROWSE_PERSIST_STATE=1` in the daemon's
+environment: the headless daemon snapshots cookies + per-tab
+URL/localStorage/sessionStorage to `<stateDir>/session-state.json` (0600,
+atomic writes) every 30 seconds and at clean shutdown, then restores it off
+the boot path on the next launch. Default OFF — cookies on disk are a real
+cost, so the user opts in. Headless only (headed mode's persistent Chromium
+profile already owns its state). Loaded HTML and tab ownership are never
+persisted, cookies for localhost, `.internal`, loopback IP literals
+(127.0.0.0/8, `::1`), and link-local/cloud-metadata addresses
+(169.254.0.0/16) are dropped on restore, and a corrupt snapshot is quarantined to
+`session-state.json.corrupt` so persistence can never block a launch.
+
 ### Watch
 
 ```bash
@@ -1069,7 +1550,13 @@ untrusted). Untrusted methods (data-exfil-shaped, e.g.
 ```bash
 $B cdp Page.getLayoutMetrics
 $B cdp Network.enable
-$B cdp Accessibility.getFullAXTree --json '{"max_depth":5}'
+$B cdp Accessibility.getFullAXTree '{"depth":5}'
+
+# Perf measurement on a simulated low-end client (overrides persist on the
+# tab until you clear them — callers own restoration):
+$B cdp Emulation.setCPUThrottlingRate '{"rate":4}'   # clear: '{"rate":1}'
+$B cdp Network.emulateNetworkConditions '{"offline":false,"latency":150,"downloadThroughput":195000,"uploadThroughput":97500}'
+# clear: '{"offline":false,"latency":0,"downloadThroughput":-1,"uploadThroughput":-1}'
 ```
 
 To discover allowed methods: read `browse/src/cdp-allowlist.ts`.
@@ -1133,13 +1620,15 @@ No protocol. No schema. No connection management.
 ## Multi-workspace
 
 Each project root (detected via `git rev-parse --show-toplevel`) gets its
-own daemon, port, state file, cookies, and logs. No cross-workspace
-collisions.
+own daemon, port, state file, and logs. Headless sessions have separate
+cookie stores and leave the shared headed profile alone; two headed
+sessions still share the default profile. See [Multi-workspace isolation](#multi-workspace-isolation)
+for the cleanup boundary.
 
 | Workspace | State file | Port |
 |-----------|-----------|------|
-| `/code/project-a` | `/code/project-a/.gstack/browse.json` | random (10000–60000) |
-| `/code/project-b` | `/code/project-b/.gstack/browse.json` | random (10000–60000) |
+| `/code/project-a` | `/code/project-a/.gstack/browse.json` | random (10000–49151) |
+| `/code/project-b` | `/code/project-b/.gstack/browse.json` | random (10000–49151) |
 
 Browser-skills three-tier lookup walks project → global → bundled, so a
 project-tier skill at `/code/project-a/.gstack/browser-skills/foo/` shadows
@@ -1151,18 +1640,24 @@ the global `~/.gstack/browser-skills/foo/` only inside project-a.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `BROWSE_PORT` | 0 (random 10000–60000) | Fixed port for the HTTP server (debug override) |
+| `BROWSE_PORT` | 0 (random 10000–49151) | Fixed port for the HTTP server (debug override) |
 | `BROWSE_IDLE_TIMEOUT` | 1800000 (30 min) | Idle shutdown timeout in ms |
-| `BROWSE_STATE_FILE` | `.gstack/browse.json` | Path to state file |
+| `BROWSE_STATE_FILE` | `.gstack/browse.json` | Path to state file. Its parent dir gets owner-only (0700) hardening only when gstack owns it — shared sticky dirs (`/tmp`, `/var/tmp`), foreign-owned dirs, symlinked dirs, and (under root) any world-writable dir are left untouched with a one-time warning (v1.72.0.0+) |
 | `BROWSE_SERVER_SCRIPT` | auto-detected | Path to `server.ts` |
 | `BROWSE_CDP_URL` | (none) | Set to `channel:chrome` for real-browser mode |
 | `BROWSE_CDP_PORT` | 0 | CDP port (used internally) |
 | `BROWSE_HEADLESS_SKIP` | 0 | Skip Chromium launch entirely (test harness only) |
 | `BROWSE_TUNNEL` | 0 | Activate the dual-listener tunnel architecture (requires `NGROK_AUTHTOKEN`) |
 | `BROWSE_TUNNEL_LOCAL_ONLY` | 0 | Test-only — bind both listeners locally without ngrok |
+| `CHROMIUM_PROFILE` | unset | Explicit headed Chromium profile directory (used by gbrowser's gbd per-workspace); honored by headed launch and profile-lock cleanup, not used by headless sessions |
+| `GSTACK_DISABLE_GPU` | unset | On macOS, headless Chromium starts with a GPU-taming flag set (it stops runaway GPU-process spin) that also disables WebGL: `getContext('webgl')`/`'webgl2'` return `null`, so WebGL pages (three.js, Mapbox GL, sigma.js) show their fallback. Set `GSTACK_DISABLE_GPU=off` to enable WebGL (`off` is the only recognized value). |
 | `GSTACK_BROWSE_MAX_HTML_BYTES` | 52428800 (50MB) | `load-html` size cap |
 | `GSTACK_SECURITY_OFF` | unset | Emergency kill switch — disable ML classifier |
-| `GSTACK_SECURITY_ENSEMBLE` | unset | Set to `deberta` for 3-classifier ensemble (721MB download) |
+| `GSTACK_STEALTH` | unset | Set to `extended` (also accepts `1`/`true`) to layer six aggressive patches (WebGL spoof, faked plugins, mediaDevices) on top of Layer C. Actively lies; can break sites. |
+| `GSTACK_CDP_STEALTH` | unset | Set to `on`/`1`/`true` to emit `--gstack-suppress-prepare-stack-trace` (gbrowser Pack 2 / B11 C++ patch only; no-op on stock Chromium) |
+| `GSTACK_GPU_VENDOR`, `GSTACK_GPU_RENDERER`, `GSTACK_GPU_CHIPSET` | unset | Per-install GPU spoof fed to the Pack 1 WebGL/UA-CH C++ patches. Set by gbd from the host profile; emitted as `--gstack-gpu-vendor` / `--gstack-gpu-renderer` / `--gstack-ua-model` cmdline switches only when present. |
+| `GSTACK_PLATFORM` | unset | Host platform classification (`MacARM`/`MacIntel` → `macOS`, `Win32` → `Windows`, `Linux*` → `Linux`) emitted as `--gstack-ua-platform` |
+| `GSTACK_HW_CONCURRENCY`, `GSTACK_DEVICE_MEMORY` | host profile (fallback 8) | Per-install `hardwareConcurrency`/`deviceMemory` reported by Layer C and emitted as `--gstack-hw-concurrency` / `--gstack-device-memory` for the worker-navigator C++ patch |
 
 ---
 
@@ -1174,11 +1669,13 @@ browse/
 │   ├── cli.ts                   # Thin client — reads state, sends HTTP, prints
 │   ├── server.ts                # Bun HTTP daemon — routes commands, dual-listener
 │   ├── browser-manager.ts       # Chromium lifecycle, tabs, ref map, crash detection
+│   ├── port-allocator.ts        # Fixed 10000-49151 scan range for every long-lived listener (never port:0)
+│   ├── xprotect-heal.ts         # macOS XProtect launch-kill classify + quarantine-clear + bounded reinstall
 │   ├── socks-bridge.ts          # Local 127.0.0.1 SOCKS5 bridge that handles auth handshakes Chromium can't speak
 │   ├── proxy-config.ts          # --proxy URL parsing + cred resolution (URL vs env, fail-fast on both)
 │   ├── proxy-redact.ts          # Cred-redaction helper for any proxy URL surfaced to logs/errors
 │   ├── xvfb.ts                  # Xvfb auto-spawn + orphan cleanup with PID + start-time validation
-│   ├── stealth.ts               # navigator.webdriver mask + cdc_ cleanup + Permissions API patch
+│   ├── stealth.ts               # Layer C: webdriver mask + window.chrome.* + Notification/Permissions + per-install hardware + toString proxy + automation-global sweep; buildGStackLaunchArgs (GSTACK_* cmdline switches); GSTACK_STEALTH=extended opt-in
 │   ├── browse-client.ts         # Canonical SDK — what skills import as _lib/browse-client.ts
 │   ├── snapshot.ts              # AX tree → @e/@c refs → Locator map; -D/-a/-C handling
 │   ├── read-commands.ts         # Non-mutating: text, html, links, js, css, is, dialog, ...
@@ -1205,10 +1702,18 @@ browse/
 │   ├── url-validation.ts        # URL safety checks for goto
 │   ├── content-security.ts      # L1-L3: datamarking, hidden strip, ARIA, URL blocklist, envelopes
 │   ├── security.ts              # L5 canary + L6 verdict combiner + thresholds
-│   ├── security-classifier.ts   # L4 ML classifier (TestSavant + optional DeBERTa ensemble)
+│   ├── security-classifier.ts   # L4 ML classifier (TestSavantAI, runs in the security sidecar)
+│   ├── security-sidecar-entry.ts # Sidecar subprocess entrypoint hosting the ONNX classifier
+│   ├── security-sidecar-client.ts # server.ts-side client that drives the sidecar
 │   ├── terminal-agent.ts        # Side Panel Claude PTY manager (auth + lifecycle)
 │   ├── sidebar-utils.ts         # Sidebar URL sanitization + helpers
 │   ├── cookie-import-browser.ts # Decrypt + import cookies from real Chromium browsers
+│   ├── cookie-database.ts       # Read-only Bun/Node SQLite with integer-safe cookie timestamps
+│   ├── cookie-import-operation.ts # Shared source selection, target policy, import receipts
+│   ├── cookie-auth-verification.ts # Opt-in target storage reset + exact identity assertion
+│   ├── cookie-import-native.ts  # Qualification-gated Windows pipe extraction adapter
+│   ├── cookie-import-native-worker.ts # Supervised native launch/read/cleanup
+│   ├── cookie-import-native-job.ts # Windows owned-process job boundary
 │   ├── cookie-picker-routes.ts  # HTTP routes for /cookie-picker/*
 │   ├── cookie-picker-ui.ts      # Self-contained HTML/CSS/JS for cookie picker
 │   ├── network-capture.ts       # Network request capture for $B network
@@ -1236,6 +1741,13 @@ skillify/SKILL.md.tmpl           # /skillify gstack skill — codify last /scrap
 ```
 
 ---
+
+## QA surfaces and setup
+
+QA uses this browser path only for selected browser surfaces. `/qa-only`, `/review`
+and `/ship` discovery never install the fallback browser or invoke cookie import;
+unavailable browser access blocks the affected probes. Standalone `/qa` may run
+setup or cookie import only after explicit approval.
 
 ## Development
 
@@ -1352,9 +1864,7 @@ foundation.
 
 The prompt-injection L4 layer uses
 [TestSavantAI/distilbert-v1.1-32](https://huggingface.co/TestSavantAI/distilbert-v1.1-32)
-(112MB ONNX), and the optional ensemble layer uses
-[ProtectAI/deberta-v3-base-prompt-injection-v2](https://huggingface.co/protectai/deberta-v3-base-prompt-injection-v2)
-(721MB ONNX) — both run locally via `@huggingface/transformers`.
+(112MB ONNX), run locally via `@huggingface/transformers`.
 
 The CDP escape hatch is gated by an allowlist directly inspired by Codex's
 T2 outside-voice review during the v1.4 design pass: deny-default with an

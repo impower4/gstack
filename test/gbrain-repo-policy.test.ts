@@ -14,6 +14,7 @@
  */
 
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
+import { canRevokeReads } from './helpers/fs-caps';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
@@ -24,10 +25,22 @@ const BIN = path.join(ROOT, 'bin', 'gstack-gbrain-repo-policy');
 
 let tmpHome: string;
 
+function isolateGitRemote(repo: string, url: string): void {
+  const git = (...args: string[]) => {
+    const result = spawnSync('git', args, { cwd: repo, encoding: 'utf8', timeout: 10_000 });
+    expect(result.status).toBe(0);
+    return result.stdout.trim();
+  };
+  expect(git('config', '--get', 'remote.origin.url')).toBe(url);
+  git('config', '--local', `url.${url}.insteadOf`, url);
+  expect(git('remote', 'get-url', 'origin')).toBe(url);
+}
+
 function run(args: string[], opts: { env?: Record<string, string> } = {}) {
   const res = spawnSync(BIN, args, {
     env: { ...process.env, GSTACK_HOME: tmpHome, ...(opts.env || {}) },
     encoding: 'utf-8',
+    timeout: 30_000,
   });
   return {
     stdout: (res.stdout || '').trim(),
@@ -50,6 +63,25 @@ beforeEach(() => {
 
 afterEach(() => {
   fs.rmSync(tmpHome, { recursive: true, force: true });
+});
+
+test('fixture origin isolation overrides a controlled URL rewrite without changing the stored remote', () => {
+  const repo = path.join(tmpHome, 'repo');
+  fs.mkdirSync(repo);
+  const git = (...args: string[]) => {
+    const result = spawnSync('git', args, { cwd: repo, encoding: 'utf8', timeout: 10_000 });
+    expect(result.status).toBe(0);
+    return result.stdout.trim();
+  };
+  const url = 'https://fixture.invalid/org/repo.git';
+  git('init', '-q');
+  git('remote', 'add', 'origin', url);
+  git('config', '--local', 'url.https://mirror.invalid/.insteadOf', 'https://fixture.invalid/');
+  expect(git('config', '--get', 'remote.origin.url')).toBe(url);
+  expect(git('remote', 'get-url', 'origin')).toBe('https://mirror.invalid/org/repo.git');
+  isolateGitRemote(repo, url);
+  expect(git('config', '--get', 'remote.origin.url')).toBe(url);
+  expect(git('remote', 'get-url', 'origin')).toBe(url);
 });
 
 describe('normalize', () => {
@@ -262,10 +294,127 @@ describe('get without arg (auto-detect from current dir)', () => {
         env: { ...process.env, GSTACK_HOME: tmpHome },
         cwd: cwdTmp,
         encoding: 'utf-8',
+        timeout: 30_000,
       });
       expect((res.stdout || '').trim()).toBe('unset');
     } finally {
       fs.rmSync(cwdTmp, { recursive: true, force: true });
     }
+  });
+});
+
+// ── #2140 sync-path chokepoint ──────────────────────────────────────────────
+// The tier above is a STORE. This block pins the ENFORCEMENT: a direct
+// gstack-gbrain-sync invocation (skill prose bypassed — cron, curiosity,
+// automation) must honor deny/read-only at the code-import stage, and the
+// egress receipt's "per-repo policy chokepoint (repoPolicyTier)" consent
+// string must describe code that exists. Wave-1 shipped the receipt string
+// without the function; these tests make that impossible to repeat.
+
+describe('gstack-gbrain-sync code stage honors the repo policy (#2140 sync path)', () => {
+  const SYNC = path.join(ROOT, 'bin', 'gstack-gbrain-sync.ts');
+  const REPO_URL = 'https://github.com/acme/widget.git';
+
+  let repoDir: string;
+
+  function makeRepo(): void {
+    repoDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gbrain-policy-repo-'));
+    const git = (...args: string[]) =>
+      spawnSync('git', args, { cwd: repoDir, encoding: 'utf-8', timeout: 30_000 });
+    git('init', '-q', '.');
+    git('remote', 'add', 'origin', REPO_URL);
+    isolateGitRemote(repoDir, REPO_URL);
+    expect(git('config', '--local', '--unset', `url.${REPO_URL}.insteadOf`).status).toBe(0);
+    git('config', '--local', 'url.https://git.capy.ai/.insteadOf', 'https://github.com/');
+    expect(git('remote', 'get-url', 'origin').stdout.trim()).toBe('https://git.capy.ai/acme/widget.git');
+    expect(git('config', '--get', 'remote.origin.url').stdout.trim()).toBe(REPO_URL);
+    fs.writeFileSync(path.join(repoDir, 'README.md'), 'fixture\n');
+    git('add', '-A');
+    git('-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'fixture');
+  }
+
+  function runSync(): { status: number; text: string; stages: any[] } {
+    const res = spawnSync('bun', [SYNC, '--code-only', '--incremental'], {
+      cwd: repoDir,
+      encoding: 'utf-8',
+      timeout: 60_000,
+      // HOME also redirected so engine detection can't find a real ~/.gbrain.
+      env: { ...process.env, GSTACK_HOME: tmpHome, HOME: tmpHome },
+    });
+    let stages: any[] = [];
+    try {
+      stages = JSON.parse(
+        fs.readFileSync(path.join(tmpHome, '.gbrain-sync-state.json'), 'utf-8'),
+      ).last_stages || [];
+    } catch {
+      // state file may be absent on early refusal paths — text asserts cover it
+    }
+    return {
+      status: res.status ?? -1,
+      text: `${res.stdout || ''}\n${res.stderr || ''}`,
+      stages,
+    };
+  }
+
+  afterEach(() => {
+    if (repoDir) fs.rmSync(repoDir, { recursive: true, force: true });
+  });
+
+  test('implicit lookup uses the configured remote rather than its rewritten transport URL', () => {
+    makeRepo();
+    expect(run(['set', REPO_URL, 'deny']).status).toBe(0);
+    const r = spawnSync(BIN, ['get'], { cwd: repoDir, env: { ...process.env, GSTACK_HOME: tmpHome },
+      encoding: 'utf8', timeout: 30_000 });
+    expect(r.status).toBe(0);
+    expect(r.stdout.trim()).toBe('deny');
+  });
+
+  test('deny → code stage refuses loudly, exit 1, status refused-policy-deny', () => {
+    makeRepo();
+    expect(run(['set', REPO_URL, 'deny']).status).toBe(0);
+    const r = runSync();
+    expect(r.status).toBe(1);
+    expect(r.text).toContain('refused');
+    expect(r.text).toContain('deny');
+    const code = r.stages.find((s: any) => s.name === 'code');
+    expect(code?.detail?.status).toBe('refused-policy-deny');
+  });
+
+  test('read-only → clean skip (exit 0), status skipped-policy-read-only', () => {
+    makeRepo();
+    expect(run(['set', REPO_URL, 'read-only']).status).toBe(0);
+    const r = runSync();
+    expect(r.status).toBe(0);
+    expect(r.text).toContain('read-only');
+    const code = r.stages.find((s: any) => s.name === 'code');
+    expect(code?.detail?.status).toBe('skipped-policy-read-only');
+  });
+
+  test('store exists but unreadable → fail-closed refusal, never bypassed', () => {
+    if (!canRevokeReads()) return; // chmod is advisory here (win32, root, DAC-override containers)
+    makeRepo();
+    expect(run(['set', REPO_URL, 'deny']).status).toBe(0);
+    fs.chmodSync(policyFile(), 0o000);
+    try {
+      const r = runSync();
+      expect(r.status).toBe(1);
+      expect(r.text).toContain('refus');
+      const code = r.stages.find((s: any) => s.name === 'code');
+      expect(code?.detail?.status).toBe('refused-policy-unreadable');
+    } finally {
+      fs.chmodSync(policyFile(), 0o600);
+    }
+  });
+
+  test('no policy store → fail-open, stage proceeds past the gate (no policy status)', () => {
+    makeRepo();
+    const r = runSync();
+    const code = r.stages.find((s: any) => s.name === 'code');
+    // With no engine in the redirected HOME the stage skips for ENGINE
+    // reasons — what matters is that no policy refusal fired and the exit
+    // is clean, preserving pre-policy behavior for every non-policy user.
+    expect(r.status).toBe(0);
+    expect(String(code?.detail?.status || '')).not.toContain('policy');
+    expect(r.text).not.toContain('refused');
   });
 });

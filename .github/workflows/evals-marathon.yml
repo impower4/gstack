@@ -1,0 +1,355 @@
+name: Marathon Evals
+# The NON-BLOCKING marathon lane: complete start-to-finish flows (tier
+# 'marathon' in test/helpers/touchfiles-data.ts / describeE2ETier('marathon'))
+# that take longer than a blocking lane's ~12-minute wall. They never run in
+# the PR gate (evals.yml) or the weekly periodic + gate census
+# (evals-periodic.yml); nothing requires this workflow, so a red marathon
+# reports through its own tracking issue without gating any merge. Same engine
+# and FAIL-CLOSED report as the other lanes: one planner manifest, one file per
+# runner, a missing slice artifact is a failure. Always fresh: no result reuse.
+on:
+  schedule:
+    - cron: '0 12 * * 6'  # Saturday 12:00 UTC, clear of the Monday periodic census
+  workflow_dispatch:
+
+# One group per ref and event: a branch dispatch never cancels main's
+# scheduled marathon, and a manual main dispatch never cancels the schedule.
+concurrency:
+  group: evals-marathon-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: true
+
+env:
+  IMAGE: ghcr.io/${{ github.repository }}/ci
+  EVALS_PROFILE: full
+  EVALS_FRESH: "1"
+  EVALS_CACHE_PURPOSE: marathon
+
+jobs:
+  build-image:
+    runs-on: ubicloud-standard-8
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image-tag: ${{ steps.meta.outputs.tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - id: meta
+        # Keep in sync with evals.yml and evals-periodic.yml — key on Dockerfile + lockfile only
+        # (package.json's version field would bust the key on every ship).
+        # Byte-identity pinned by test/ci-image-tag-binding.test.ts.
+        run: echo "tag=${{ env.IMAGE }}:${{ hashFiles('.github/docker/Dockerfile.ci', 'bun.lock', 'patches/**') }}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Check if image exists
+        id: check
+        run: |
+          if docker manifest inspect ${{ steps.meta.outputs.tag }} > /dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - if: steps.check.outputs.exists == 'false'
+        run: cp package.json bun.lock .github/docker/ && cp -R patches .github/docker/patches
+
+      # Registry cache export needs a docker-container builder — the default
+      # `docker` driver hard-errors on cache-to.
+      - if: steps.check.outputs.exists == 'false'
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - if: steps.check.outputs.exists == 'false'
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .github/docker
+          file: .github/docker/Dockerfile.ci
+          push: true
+          # Cron-triggered in the base repo only, so cache export is always safe here.
+          cache-from: type=registry,ref=${{ env.IMAGE }}:buildcache
+          cache-to: type=registry,ref=${{ env.IMAGE }}:buildcache,mode=max
+          tags: |
+            ${{ steps.meta.outputs.tag }}
+            ${{ env.IMAGE }}:latest
+
+
+  plan-slices:
+    runs-on: ubicloud-standard-8
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      slices: ${{ steps.matrix.outputs.slices }}
+      slice_timeouts: ${{ steps.matrix.outputs.slice_timeouts }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.4.2
+
+      # One marathon file per runner: a 1-second budget never packs two
+      # recorded files together.
+      - name: Emit run manifest (ALL marathon tests)
+        env:
+          EVALS_ALL: "1"
+        run: EVALS_TIER=marathon bun --no-install run scripts/test-paid-shards.ts --tier marathon --emit-plan /tmp/marathon-plan/manifest.json --slice-budget 1 --jobs 1
+
+      - name: Derive the executor matrix from the plan
+        id: matrix
+        run: |
+          echo "slices=$(jq -c '[range(1; .sliceCount + 1)]' /tmp/marathon-plan/manifest.json)" >> "$GITHUB_OUTPUT"
+          echo "slice_timeouts=$(jq -ec '[0] + .plan.sliceCiTimeoutMinutes' /tmp/marathon-plan/manifest.json)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: marathon-plan
+          path: /tmp/marathon-plan/manifest.json
+          retention-days: 30
+
+  eval-slices:
+    runs-on: ubicloud-standard-8
+    needs: [build-image, plan-slices]
+    env:
+      EVALS_RUN_ID: ci-${{ github.run_id }}-${{ github.run_attempt }}-marathon-${{ matrix.slice }}
+    # One marathon file per runner; its job ceiling is that file's supervised
+    # wall plus 20 minutes setup (W2c/ENG-2), indexed by slice ([0] pads the
+    # array). The executor stops 5 minutes before it so results still upload.
+    timeout-minutes: ${{ fromJSON(needs.plan-slices.outputs.slice_timeouts)[matrix.slice] }}
+    permissions:
+      contents: read
+      packages: read
+    container:
+      image: ${{ needs.build-image.outputs.image-tag }}
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+      options: --user runner
+    strategy:
+      fail-fast: false
+      max-parallel: 8
+      matrix:
+        slice: ${{ fromJSON(needs.plan-slices.outputs.slices) }}
+    steps:
+      - name: Record the job start for the slice deadline
+        run: echo "GSTACK_SLICE_JOB_STARTED_AT=$(date +%s)" >> "$GITHUB_ENV"
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          # Full history: files with SELF-derived selection (the LLM-judge
+          # map, routing) walk git at module load, and selection is
+          # fail-closed on git errors — a shallow checkout crashed those
+          # shards on the lane's first live run ("ambiguous argument
+          # 'main...HEAD'"). The manifest still governs WHICH shards run.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Fix bun temp
+        uses: ./.github/actions/fix-bun-temp
+
+      - name: Restore deps
+        uses: ./.github/actions/restore-deps
+
+      - run: bun run build
+
+      # Any slice can host a PTY test — seed + registration run
+      # unconditionally (idempotent; mirrors evals.yml's sliced lane). The
+      # register composite carries the fail-fast dangling-symlink/frontmatter
+      # verification loop — this lane previously LACKED it, so a moved skill
+      # target surfaced as a silent "Unknown command" + wedged PTY session.
+      - name: Seed claude interactive config
+        uses: ./.github/actions/seed-claude-config
+        with:
+          anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
+
+      - name: Register gstack skills for PTY tests
+        uses: ./.github/actions/register-gstack-skills
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: marathon-plan
+          path: /tmp/marathon-plan
+
+      # The image ships the pinned Codex CLI off PATH and without a
+      # credential; codex does not read OPENAI_API_KEY from the environment.
+      # Log it in from the secret (same-repo runs only) under a non-default
+      # home. The shard runner hands that home and the CLI to the Codex files
+      # only (scripts/lib/paid-cases.ts scopeCodexAccess); every other paid case sees no
+      # Codex, as before. Without a key the Codex cases fail; they never pass.
+      - name: Authenticate the Codex CLI
+        shell: bash
+        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          set -euo pipefail
+          codex="${GSTACK_CI_CODEX_BIN_DIR:?}/codex"
+          export CODEX_HOME="$HOME/.gstack-ci-codex"
+          mkdir -p "$CODEX_HOME"
+          echo "GSTACK_CI_CODEX_HOME=$CODEX_HOME" >> "$GITHUB_ENV"
+          if [ -z "${OPENAI_API_KEY:-}" ]; then
+            echo "::warning::OPENAI_API_KEY is unavailable; Codex eval cases cannot authenticate and will fail."
+            exit 0
+          fi
+          printenv OPENAI_API_KEY | "$codex" login --with-api-key
+          "$codex" login status >/dev/null 2>&1
+
+      - name: Run marathon slice ${{ matrix.slice }}
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          PLAYWRIGHT_BROWSERS_PATH: /opt/playwright-browsers
+          EVALS_JOBS: "1"
+          EVALS_CONCURRENCY: "2"
+          GSTACK_EVAL_DIR: /tmp/marathon-slice-results
+        run: EVALS_TIER=marathon bun run scripts/test-paid-shards.ts --tier marathon --plan /tmp/marathon-plan/manifest.json --slice ${{ matrix.slice }}
+
+      - name: Upload slice results
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: marathon-slice-${{ matrix.slice }}-a${{ github.run_attempt }}
+          path: /tmp/marathon-slice-results
+          retention-days: 90
+
+      - name: Upload native capture evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: native-captures-${{ env.EVALS_RUN_ID }}
+          include-hidden-files: true
+          path: |
+            ~/.gstack/projects/*/e2e-runs
+            ~/.gstack/projects/*/evals/qa-callers
+            ~/.gstack-dev/e2e-runs
+            ~/.gstack-dev/evals/qa-callers
+          if-no-files-found: ignore
+          retention-days: 90
+
+      - name: Upload shard logs on failure
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: marathon-logs-slice-${{ matrix.slice }}-a${{ github.run_attempt }}
+          include-hidden-files: true
+          # The Fix-bun-temp step points TMPDIR at /home/runner/.cache, so the
+          # runner's spool lands THERE, not /tmp — the original /tmp glob
+          # uploaded nothing and a red slice's diagnostics were unreachable.
+          path: |
+            /home/runner/.cache/gstack-paid-shard-*.log
+            /tmp/gstack-paid-shard-*.log
+          if-no-files-found: ignore
+          retention-days: 30
+
+  report:
+    runs-on: ubicloud-standard-2
+    needs: [plan-slices, eval-slices]
+    # !cancelled(): the report must run (and FAIL) when an executor died — a
+    # missing slice artifact reading as green is the class this lane kills —
+    # but a cancelled run stops here.
+    if: ${{ !cancelled() && needs.plan-slices.result == 'success' }}
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.4.2
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: marathon-plan
+          path: /tmp/marathon-report
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          pattern: marathon-slice-*
+          path: /tmp/marathon-report
+
+      - name: Reconcile slices against the manifest (fail-closed)
+        id: reconcile
+        if: always()
+        run: |
+          set +e
+          EVALS_TIER=marathon bun --no-install run scripts/test-paid-shards.ts --tier marathon --report /tmp/marathon-report | tee /tmp/report.txt
+          # PIPESTATUS[0], NOT $?: the default step shell has no pipefail.
+          echo "exit=${PIPESTATUS[0]}" >> "$GITHUB_OUTPUT"
+
+      # A red marathon run writes its report to the step summary and the
+      # marathon-report artifact on every ref. Only main upserts the lane's ONE
+      # tracking issue (never one per week) and closes it on the next green
+      # run; a branch-dispatched run never touches main's issue.
+      - name: Write the marathon report
+        if: always() && (steps.reconcile.outputs.exit != '0' || needs.eval-slices.result != 'success')
+        run: |
+          set -euo pipefail
+          {
+            echo "Marathon report (non-blocking lane): branch ${GITHUB_REF_NAME} @ ${GITHUB_SHA}, event ${GITHUB_EVENT_NAME}, run ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+            echo
+            echo "A census went red: triage with ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/blob/${GITHUB_SHA}/docs/evals/census-red.md"
+            echo
+            echo "- reconciliation exit: ${{ steps.reconcile.outputs.exit }}"
+            echo "- marathon slices job: ${{ needs.eval-slices.result }}"
+            echo
+            { tail -c 6000 /tmp/report.txt 2>/dev/null || echo "(no reconciliation output)"; } \
+              | bun --no-install -e 'import { publishedFence } from "./scripts/lib/published-text";
+                  const lines = (await Bun.stdin.text()).split("\n").filter(Boolean);
+                  console.log(publishedFence(lines.length ? lines : ["(none)"]).join("\n"));'
+          } > /tmp/marathon-report.md
+          cat /tmp/marathon-report.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the marathon report
+        if: always() && (steps.reconcile.outputs.exit != '0' || needs.eval-slices.result != 'success')
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: marathon-report-a${{ github.run_attempt }}
+          path: /tmp/marathon-report.md
+          if-no-files-found: ignore
+          retention-days: 90
+
+      - name: Upsert tracking issue on failure
+        if: always() && github.ref == 'refs/heads/main' && (steps.reconcile.outputs.exit != '0' || needs.eval-slices.result != 'success')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TITLE="Weekly marathon evals: red lane needs triage"
+          BODY_FILE=/tmp/marathon-report.md
+          [ -s "$BODY_FILE" ] || echo "Marathon report missing; run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" > "$BODY_FILE"
+          EXISTING=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --search "in:title \"$TITLE\"" --json number --jq '.[0].number // empty')
+          if [ -n "$EXISTING" ]; then
+            gh issue comment "$EXISTING" --repo "$GITHUB_REPOSITORY" --body-file "$BODY_FILE"
+            echo "commented on #$EXISTING"
+          else
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "$TITLE" --body-file "$BODY_FILE"
+          fi
+
+      - name: Close the tracking issue on a green run
+        if: always() && github.ref == 'refs/heads/main' && steps.reconcile.outputs.exit == '0' && needs.eval-slices.result == 'success'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TITLE="Weekly marathon evals: red lane needs triage"
+          EXISTING=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --search "in:title \"$TITLE\"" --json number --jq '.[0].number // empty')
+          if [ -n "$EXISTING" ]; then
+            gh issue close "$EXISTING" --repo "$GITHUB_REPOSITORY" --comment "Green marathon run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          fi
+
+      - name: Fail the workflow when reconciliation failed
+        if: always() && (steps.reconcile.outputs.exit != '0' || needs.eval-slices.result != 'success')
+        run: exit 1

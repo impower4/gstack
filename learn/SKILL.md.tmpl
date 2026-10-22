@@ -52,7 +52,7 @@ Parse the user's input to determine which command to run:
 Show the most recent 20 learnings, grouped by type.
 
 ```bash
-eval "$(~/.claude/skills/gstack/bin/gstack-slug 2>/dev/null)"
+SLUG=$(~/.claude/skills/gstack/bin/gstack-slug --get SLUG 2>/dev/null)
 ~/.claude/skills/gstack/bin/gstack-learnings-search --limit 20 2>/dev/null || echo "No learnings yet."
 ```
 
@@ -65,7 +65,7 @@ gstack will automatically capture patterns, pitfalls, and insights it discovers.
 ## Search
 
 ```bash
-eval "$(~/.claude/skills/gstack/bin/gstack-slug 2>/dev/null)"
+SLUG=$(~/.claude/skills/gstack/bin/gstack-slug --get SLUG 2>/dev/null)
 ~/.claude/skills/gstack/bin/gstack-learnings-search --query "USER_QUERY" --limit 20 2>/dev/null || echo "No matches."
 ```
 
@@ -78,7 +78,7 @@ Replace USER_QUERY with the user's search terms. Present results clearly.
 Check learnings for staleness and contradictions.
 
 ```bash
-eval "$(~/.claude/skills/gstack/bin/gstack-slug 2>/dev/null)"
+SLUG=$(~/.claude/skills/gstack/bin/gstack-slug --get SLUG 2>/dev/null)
 ~/.claude/skills/gstack/bin/gstack-learnings-search --limit 100 2>/dev/null
 ```
 
@@ -108,7 +108,7 @@ latest entry wins).
 Export learnings as markdown suitable for adding to CLAUDE.md or project documentation.
 
 ```bash
-eval "$(~/.claude/skills/gstack/bin/gstack-slug 2>/dev/null)"
+SLUG=$(~/.claude/skills/gstack/bin/gstack-slug --get SLUG 2>/dev/null)
 ~/.claude/skills/gstack/bin/gstack-learnings-search --limit 50 2>/dev/null
 ```
 
@@ -140,14 +140,14 @@ or save it as a separate file.
 Show summary statistics about the project's learnings.
 
 ```bash
-eval "$(~/.claude/skills/gstack/bin/gstack-slug 2>/dev/null)"
-eval "$(~/.claude/skills/gstack/bin/gstack-paths)"
+SLUG=$(~/.claude/skills/gstack/bin/gstack-slug --get SLUG 2>/dev/null)
+GSTACK_STATE_ROOT=$(~/.claude/skills/gstack/bin/gstack-paths --get GSTACK_STATE_ROOT); : "${GSTACK_STATE_ROOT:?gstack-paths failed; reinstall with ./setup or /gstack-upgrade}"
 LEARN_FILE="$GSTACK_STATE_ROOT/projects/$SLUG/learnings.jsonl"
 if [ -f "$LEARN_FILE" ]; then
   TOTAL=$(wc -l < "$LEARN_FILE" | tr -d ' ')
   echo "TOTAL: $TOTAL entries"
   # Count by type (after dedup)
-  cat "$LEARN_FILE" | bun -e "
+  cat "$LEARN_FILE" | bun --no-env-file --config=/dev/null -e "
     const lines = (await Bun.stdin.text()).trim().split('\n').filter(Boolean);
     const seen = new Map();
     for (const line of lines) {

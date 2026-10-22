@@ -1,0 +1,14 @@
+{
+  "recorded": "gh 2.101.0, garrytan/gstack#3010, 2026-10-02",
+  "note": "fork PR whose workflows never ran: both queries report no checks",
+  "required": {
+    "status": 1,
+    "stdout": "",
+    "stderr": "no checks reported on the 'fix/windows-autoplan' branch\n"
+  },
+  "all": {
+    "status": 1,
+    "stdout": "",
+    "stderr": "no checks reported on the 'fix/windows-autoplan' branch\n"
+  }
+}

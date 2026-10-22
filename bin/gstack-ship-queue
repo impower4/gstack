@@ -1,0 +1,179 @@
+#!/usr/bin/env -S bun --no-env-file --config=/dev/null
+/**
+ * gstack-ship-queue — the shared merge queue, one subcommand per protocol
+ * step (field list 2, W1; docs/ship-policy.md#run-a-shared-merge-queue).
+ *
+ *   gstack-ship-queue ready --pr <n> [--pregate <pregate.json>] [--gate-exit <rc> --gate-log <file>]
+ *   gstack-ship-queue stamp --pr <n> --version <X> --expect-gated <sha> --expect-base <sha>
+ *                           [--expect-order <pr,...>] [--allow-repo-commands] [--gate-exit <rc> --gate-log <file>]
+ *   gstack-ship-queue verify --pr <n> (--gated <sha> | --record <gate-ahead.json>) [--receipt <sha256>]
+ *                           [--expect-head <sha>] [--ref <ref>] [--no-fetch] [--gate-exit <rc> --gate-log <file>]
+ *   gstack-ship-queue gate-ahead --after <pr> --pr <n> [--predecessor-ref <ref>] [--allow-repo-commands]
+ *   gstack-ship-queue gate-ahead --record --pr <n> --attempt <id> --exit <rc> --log <file>
+ *   gstack-ship-queue gate-ahead --list --pr <n>
+ *   gstack-ship-queue train build|status|verdict|bisect|rebuild|prune ...   (merge trains; train --help)
+ *
+ * Every subcommand takes --base <branch> (default origin/HEAD, else main) and
+ * ends with GSTACK_RESULT: skill=ship-queue status=complete|refused run=<path>.
+ * gstack-restamp stays the primitive. Nothing here pushes, except under a
+ * ship policy with a `train` block: merge trains push train/<nonce> branches
+ * and the refs/notes/gstack-trains records, and dispatch through eval-bg.
+ * Logic: lib/ship-queue.ts, lib/ship-queue-gate.ts, lib/ship-queue-train*.ts
+ * (loaded only on the train paths).
+ */
+import { spawnSync } from 'node:child_process';
+import * as path from 'node:path';
+import { EXIT, exitTableHelp, formatResult } from '../lib/headless-artifacts';
+import { versionAtRef } from '../lib/restamp';
+import { RESULT_CODES } from '../lib/result-codes';
+import { resolveBaseBranch } from '../lib/ship-policy';
+import { loadBasePolicy, ready, stamp, verify, type QueueContext, type StepOutput } from '../lib/ship-queue';
+import { attemptFile, listAttempts, prepareGateAhead, recordGateAhead, type QueueFailure } from '../lib/ship-queue-gate';
+
+const HELP = `gstack-ship-queue — the shared merge queue's protocol steps (docs/ship-policy.md#run-a-shared-merge-queue)
+
+  ready --pr <n> [--pregate <file>] [--gate-exit <rc> --gate-log <file>]
+                                           READY #<n> <head> STAMP_VERSION=<X|unstamped>, CI at that head, PREGATE, gate state
+  stamp --pr <n> --version <X> --expect-gated <sha> --expect-base <sha> [--expect-order <pr,...>] [--allow-repo-commands]
+        [--gate-exit <rc> --gate-log <file>]
+                                           restamp, commit and prove: QUEUE_STAMP: <pr> <X> head= gated= tree= receipt=
+  verify --pr <n> --gated <sha> | --record <file> [--receipt <sha256>] [--expect-head <sha>] [--ref <ref>] [--no-fetch]
+        [--gate-exit <rc> --gate-log <file>]   (full_e2e: --gated needs the lane's passing gate run on that head)
+                                           the coordinator's check from the PR's pushed head: VERIFY: ... and MERGE_CONDITION
+  gate-ahead --after <pr> --pr <n> [--predecessor-ref <ref>] [--allow-repo-commands]
+                                           prepare an attempt: merged, stamped worktree, gated sha and the gate command
+  gate-ahead --record --pr <n> --attempt <id> --exit <rc> --log <file>
+                                           bind the gate result to that attempt's gated tree; removes its worktree
+  gate-ahead --list --pr <n>               attempts for a PR, newest last (the current one)
+  train build|status|verdict|bisect|rebuild|prune ...
+                                           merge trains, when the base policy declares a train block (train --help;
+                                           docs/ship-policy.md#run-a-merge-train); ready then takes --screen|--no-screen
+
+--base <branch>: base branch (default: origin/HEAD, else main). Nothing here pushes.
+${exitTableHelp()}`;
+
+function flag(args: string[], name: string): string | undefined {
+  const i = args.indexOf(name);
+  return i >= 0 ? args[i + 1] : undefined;
+}
+
+function finish(cmd: string, out: StepOutput): number {
+  for (const line of out.lines) process.stdout.write(line + '\n');
+  if (out.failure) {
+    const f = out.failure;
+    process.stderr.write(`gstack-ship-queue ${cmd}: ${f.message}; fix: ${f.fix ?? RESULT_CODES[f.code].fix} (${f.code})\n`);
+  }
+  process.stdout.write(formatResult('ship-queue', out.ok ? 'complete' : 'refused', out.run) + '\n');
+  if (out.ok) return EXIT.ok;
+  return out.failure && ['QUEUE_VERIFY_MISMATCH', 'QUEUE_STAMP_NOT_STAMP_ONLY'].includes(out.failure.code) ? EXIT.fail : EXIT.refused;
+}
+
+const shq = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
+
+function usage(message: string): number {
+  process.stderr.write(`gstack-ship-queue: ${message}\n${HELP}\n`);
+  return EXIT.usage;
+}
+
+function gateAhead(ctx: QueueContext, args: string[]): number {
+  const pr = flag(args, '--pr');
+  if (!pr) return usage('gate-ahead needs --pr <n> (records are keyed by PR)');
+  if (args.includes('--list')) {
+    const all = listAttempts(ctx.repoRoot, pr);
+    for (const a of all) process.stdout.write(`ATTEMPT: ${a.attempt} state=${a.state} gated_tree=${a.gated_tree} predecessor=#${a.predecessor_pr}@${a.predecessor_head.slice(0, 12)}${a.result ? ` exit=${a.result.exit}` : ''}${a === all.at(-1) ? ' current' : ''}\n`);
+    if (!all.length) process.stdout.write(`ATTEMPT: none for #${pr}\n`);
+    return EXIT.ok;
+  }
+  if (args.includes('--record')) {
+    const attempt = flag(args, '--attempt');
+    const exit = flag(args, '--exit');
+    const log = flag(args, '--log');
+    if (!attempt || exit === undefined || !/^-?\d+$/.test(exit) || !log) return usage('gate-ahead --record needs --attempt <id> --exit <rc> --log <file>');
+    const r = recordGateAhead({ repoRoot: ctx.repoRoot, pr, attempt, exit: Number(exit), log: path.resolve(log) });
+    if ('code' in r) return finish('gate-ahead', { ok: false, lines: [], failure: r, run: attemptFile(ctx.repoRoot, pr, attempt) });
+    const cur = r.current && r.current.attempt !== attempt ? `no (superseded by ${r.current.attempt})` : 'yes';
+    return finish('gate-ahead', {
+      ok: true, run: path.relative(ctx.repoRoot, r.file),
+      lines: [
+        `GATE_RECORD: pr=${pr} attempt=${attempt} exit=${r.record.result!.exit} gated_tree=${r.record.gated_tree} log_sha256=${r.record.result!.log_sha256} current=${cur}`,
+        ...(r.repeated ? ['note: identical retry; the stored result is returned'] : []),
+        `record: ${r.file}`,
+        `next: send the record file with the READY report; the coordinator runs gstack-ship-queue verify --pr ${pr} --record <file> once this PR is stamped`,
+      ],
+    });
+  }
+  const after = flag(args, '--after');
+  if (!after) return usage('gate-ahead needs --after <predecessor-pr>, --record or --list');
+  const policy = loadBasePolicy(ctx);
+  if ('message' in policy) return finish('gate-ahead', { ok: false, lines: [], failure: policy, run: 'none' });
+  const at = versionAtRef(ctx.repoRoot, 'HEAD');
+  const r = prepareGateAhead({
+    repoRoot: ctx.repoRoot, base: ctx.base, pr, after, predecessorRef: flag(args, '--predecessor-ref'), allowRepoCommands: args.includes('--allow-repo-commands'),
+    policy: policy.policy, versionRel: 'rel' in at ? at.rel : 'VERSION',
+  });
+  if ('code' in r) return finish('gate-ahead', { ok: false, lines: [], failure: r as QueueFailure, run: 'none' });
+  const rec = r.record;
+  const log = path.join(path.dirname(rec.worktree), 'gate.log');
+  const cmd = rec.gate_command ?? '<your gate command>';
+  const superseded = listAttempts(ctx.repoRoot, pr).filter(a => a.attempt !== rec.attempt && a.state === 'prepared').map(a => a.attempt);
+  return finish('gate-ahead', {
+    ok: true, run: path.relative(ctx.repoRoot, r.file),
+    lines: [
+      `GATE_AHEAD: pr=${pr} attempt=${rec.attempt} gated=${rec.gated_head} tree=${rec.gated_tree} merge_tree=${rec.merge_tree} predecessor=#${rec.predecessor_pr}@${rec.predecessor_head.slice(0, 12)} version=${rec.version}`,
+      `worktree: ${rec.worktree}`,
+      `record: ${r.file}`,
+      `GATE_COMMAND: ${rec.gate_command ?? 'none (the policy sets no gate_command; run the repo gate you would run on a PR head)'}`,
+      ...(superseded.length ? [`note: this attempt is now current; earlier unrecorded attempts (${superseded.join(', ')}) keep their worktrees until recorded`] : []),
+      `next: (cd ${shq(rec.worktree)} && ${cmd}) > ${shq(log)} 2>&1; gstack-ship-queue gate-ahead --record --pr ${pr} --attempt ${rec.attempt} --exit $? --log ${shq(log)}`,
+    ],
+  });
+}
+
+async function main(argv: string[]): Promise<number> {
+  const [cmd, ...args] = argv;
+  if (!cmd || cmd === '--help' || cmd === '-h' || cmd === 'help') { process.stdout.write(HELP + '\n'); return cmd ? EXIT.ok : EXIT.usage; }
+  const probe = spawnSync('git', ['rev-parse', '--show-toplevel'], { encoding: 'utf8', timeout: 15_000 });
+  if (probe.status !== 0) return usage('not inside a git repository');
+  const repoRoot = probe.stdout.trim();
+  const gh = (a: string[]) => { const r = spawnSync('gh', a, { cwd: repoRoot, encoding: 'utf8', timeout: 60_000 }); return { ok: r.status === 0, out: r.stdout ?? '', err: r.stderr ?? (r.error ? String(r.error.message) : '') }; };
+  const ctx: QueueContext = { repoRoot, base: resolveBaseBranch(repoRoot, flag(args, '--base')), gh };
+  const pr = flag(args, '--pr');
+  if (cmd === 'gate-ahead') return gateAhead(ctx, args);
+  if (cmd === 'train') {
+    const train = await import('../lib/ship-queue-train-cli');
+    if (!args[0] || args[0].startsWith('-')) { process.stdout.write(train.TRAIN_HELP + '\n'); return args.includes('--help') || args.includes('-h') ? EXIT.ok : EXIT.usage; }
+    return train.trainMain(ctx, args);
+  }
+  if (!pr || !/^\d+$/.test(pr)) return usage(`${cmd} needs --pr <number>`);
+  const gateExit = flag(args, '--gate-exit');
+  if (gateExit !== undefined && !/^-?\d+$/.test(gateExit)) return usage('--gate-exit needs an exit code');
+  const gate = { gateExit: gateExit === undefined ? undefined : Number(gateExit), gateLog: flag(args, '--gate-log') };
+  if (cmd === 'ready') {
+    const loaded = loadBasePolicy(ctx);
+    if (!('message' in loaded) && loaded.policy.train) return (await import('../lib/ship-queue-train-cli')).readyMain(ctx, args, { pr, pregate: flag(args, '--pregate'), ...gate });
+    if (['--screen', '--no-screen', '--broad'].some(f => args.includes(f))) process.stderr.write('gstack-ship-queue ready: --screen/--no-screen/--broad ignored: the base policy declares no train block\n');
+    return finish('ready', ready(ctx, { pr, pregate: flag(args, '--pregate'), ...gate }));
+  }
+  if (cmd === 'stamp') {
+    const version = flag(args, '--version');
+    const expectGated = flag(args, '--expect-gated');
+    const expectBase = flag(args, '--expect-base');
+    if (!version || !expectGated || !expectBase) return usage('stamp needs --version <X> --expect-gated <sha> --expect-base <sha>');
+    return finish('stamp', stamp(ctx, {
+      pr, version, expectGated, expectBase, expectOrder: flag(args, '--expect-order')?.split(',').map(s => s.trim()).filter(Boolean),
+      allowRepoCommands: args.includes('--allow-repo-commands'), ...gate,
+      failAfter: process.env.GSTACK_SHIP_QUEUE_FAIL_AFTER,
+    }));
+  }
+  if (cmd === 'verify') {
+    if (flag(args, '--train')) return (await import('../lib/ship-queue-train-cli')).verifyMain(ctx, args, pr);
+    const record = flag(args, '--record');
+    return finish('verify', verify(ctx, {
+      pr, gated: flag(args, '--gated'), record: record ? path.resolve(record) : undefined, receipt: flag(args, '--receipt'),
+      expectHead: flag(args, '--expect-head'), ref: flag(args, '--ref'), noFetch: args.includes('--no-fetch'), ...gate,
+    }));
+  }
+  return usage(`unknown subcommand ${cmd}`);
+}
+
+process.exitCode = await main(process.argv.slice(2));

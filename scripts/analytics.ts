@@ -1,4 +1,4 @@
-#!/usr/bin/env bun
+#!/usr/bin/env -S bun --no-env-file --config=/dev/null
 /**
  * analytics — CLI for viewing gstack skill usage statistics.
  *
@@ -13,7 +13,7 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
-import * as os from 'os';
+import { resolveStateRoot } from '../lib/state-root';
 
 export interface AnalyticsEvent {
   skill: string;
@@ -23,7 +23,7 @@ export interface AnalyticsEvent {
   pattern?: string;
 }
 
-const ANALYTICS_FILE = path.join(os.homedir(), '.gstack', 'analytics', 'skill-usage.jsonl');
+const ANALYTICS_FILE = path.join(resolveStateRoot(), 'analytics', 'skill-usage.jsonl');
 
 /**
  * Parse JSONL content into AnalyticsEvent[], skipping malformed lines.

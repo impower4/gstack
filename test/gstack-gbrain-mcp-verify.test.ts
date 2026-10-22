@@ -51,13 +51,20 @@ function makeFakeCurl(opts: {
 printf 'CURL_CALL '"'"'%s'"'"' ' "$@" >> "${curlCallLog}"
 echo "" >> "${curlCallLog}"
 
-# Walk argv to find -o <out> and -d <data>.
+# Walk argv to find -o <out> and the request body (-d <data> or the
+# receipted --data-binary @<payload-file> shape).
 out=""
 data=""
 while [ $# -gt 0 ]; do
   case "$1" in
     -o) out="$2"; shift 2 ;;
     -d) data="$2"; shift 2 ;;
+    --data-binary)
+      case "$2" in
+        @*) data="$(cat "\${2#@}" 2>/dev/null)" ;;
+        *) data="$2" ;;
+      esac
+      shift 2 ;;
     *) shift ;;
   esac
 done
@@ -83,8 +90,11 @@ function runVerify(token: string, url: string): { code: number; stdout: string; 
       ...process.env,
       PATH: `${fakeBinDir}:${process.env.PATH}`,
       GBRAIN_MCP_TOKEN: token,
+      // The probe writes egress receipts — keep them in the temp home.
+      GSTACK_HOME: tmpDir,
     },
     encoding: 'utf-8',
+    timeout: 30_000,
   });
   return {
     code: result.status ?? -1,
@@ -240,6 +250,7 @@ describe('gstack-gbrain-mcp-verify', () => {
     const r = spawnSync(VERIFY_BIN, ['https://example.com/mcp'], {
       env: { ...process.env, PATH: `${fakeBinDir}:${process.env.PATH}`, GBRAIN_MCP_TOKEN: '' },
       encoding: 'utf-8',
+      timeout: 30_000,
     });
     expect(r.status).toBe(2);
     expect(r.stderr).toContain('GBRAIN_MCP_TOKEN');
@@ -250,6 +261,7 @@ describe('gstack-gbrain-mcp-verify', () => {
     const r = spawnSync(VERIFY_BIN, [], {
       env: { ...process.env, PATH: `${fakeBinDir}:${process.env.PATH}`, GBRAIN_MCP_TOKEN: 'x' },
       encoding: 'utf-8',
+      timeout: 30_000,
     });
     expect(r.status).toBe(2);
   });

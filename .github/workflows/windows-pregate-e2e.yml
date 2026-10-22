@@ -1,0 +1,245 @@
+name: Windows Pregate E2E
+
+# Native proof for #3197 on windows-latest: Bun on Windows cannot execute an
+# extensionless shebang bin (bin/gstack-wtree, gstack-slug, gstack-redact),
+# so every TypeScript caller goes through lib/script-invocation.ts, which
+# hands bash bins to Git Bash and bun bins to Bun. This job drives the real
+# CLIs from TypeScript entry points against a fixture repository:
+#   - the resolver finds Git Bash from `git --exec-path`;
+#   - gstack-restamp --dry-run fingerprints the tree and stamps;
+#   - gstack-regen check (scratch worktree from the fingerprint, the entry's
+#     command through `bash -c`) and write (the no-scratch path);
+#   - gstack-evidence records a content fingerprint, its command through bash -c;
+#   - gstack-gate-diff records a candidate with a tree id, not `+nowtree`;
+#   - gstack-pregate run fingerprints the tree and runs its preflight checks
+#     (secrets through the gstack-redact bun bin, regen and guards);
+#   - a hook invocation is timed cold and warm (the cached resolution);
+#   - a missing GSTACK_GIT_BASH refuses with BASH_UNAVAILABLE, not `()`, and
+#     gstack-pregate --json refuses with one WTREE_UNAVAILABLE envelope;
+#   - the same journey under a pinned, checksum-verified PortableGit found
+#     only through `git --exec-path`.
+#
+# Runner: GitHub-hosted free windows-latest. ~4-6 min.
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'lib/script-invocation.ts'
+      - 'lib/regen.ts'
+      - 'lib/restamp.ts'
+      - 'lib/gbrain-exec.ts'
+      - 'lib/gate-diff/**'
+      - 'lib/pregate/**'
+      - 'lib/result-codes.ts'
+      - 'lib/result-codes-release.ts'
+      - 'bin/gstack-wtree'
+      - 'bin/gstack-slug'
+      - 'bin/gstack-path-spelling.sh'
+      - 'bin/gstack-restamp'
+      - 'bin/gstack-regen'
+      - 'bin/gstack-evidence'
+      - 'bin/gstack-gate-diff'
+      - 'bin/gstack-redact'
+      - 'bin/gstack-pregate'
+      - 'hosts/claude/hooks/**'
+      - '.github/workflows/windows-pregate-e2e.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: windows-pregate-e2e-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  PORTABLE_GIT_VERSION: 2.56.0.windows.2
+  PORTABLE_GIT_FILE: PortableGit-2.56.0.2-64-bit.7z.exe
+  PORTABLE_GIT_SHA256: 075e158ef8e1f0ab80b347e245405d3eca735c2dc88fd8e032e137d0ca61f61b
+
+jobs:
+  windows-pregate:
+    runs-on: windows-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.4.2
+
+      - name: Configure git identity
+        run: |
+          git config --global user.email "windows-pregate-e2e@gstack.test"
+          git config --global user.name "Windows Pregate E2E"
+          git config --global init.defaultBranch main
+          git config --global commit.gpgsign false
+        shell: bash
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+        shell: bash
+
+      - name: Build the fixture repository
+        # A VERSION + CHANGELOG + ship policy + generated-file registry, a
+        # bare origin and a feature branch with an [Unreleased] entry.
+        run: |
+          set -euo pipefail
+          T="$RUNNER_TEMP/pregate-e2e"
+          rm -rf "$T"; mkdir -p "$T/home"
+          git init -q --bare -b main "$T/origin.git"
+          git init -q -b main "$T/work"
+          cd "$T/work"
+          mkdir -p generated .gstack
+          echo 1.2.3.0 > VERSION
+          printf '{ "name": "fixture", "version": "1.2.3" }\n' > package.json
+          printf '%s\n' "const fs=require('fs');const v=fs.readFileSync('VERSION','utf8').trim();fs.writeFileSync('generated/digest.md','# digest v'+v+'\\n');" > gen.js
+          node gen.js
+          printf '# Changelog\n\n## [1.2.3.0] - 2026-10-01\n\n- base release\n' > CHANGELOG.md
+          cat > .gstack/ship-policy.json <<'JSON'
+          { "$schema": "https://github.com/garrytan/gstack/docs/ship-policy.md#schema-v1", "bump": "patch", "queue_mode": "stamp-at-merge", "release_tool": "node gen.js", "release_outputs": ["generated/**"], "stamp_paths": [], "changelog": "CHANGELOG.md", "history": "squash-ok", "stamp_sensitive_gates": [] }
+          JSON
+          cat > .gstack/generated.json <<'JSON'
+          { "$schema": "https://github.com/garrytan/gstack/docs/pregate.md#generated-v1", "entries": [ { "id": "digest", "command": "node gen.js", "outputs": ["generated/**"], "inputs": ["VERSION", "gen.js"] } ] }
+          JSON
+          git add -A && git commit -qm base
+          git remote add origin "$T/origin.git" && git push -q origin main && git remote set-head origin main
+          git checkout -qb feature
+          echo feature > feature.txt
+          printf '# Changelog\n\n## [Unreleased]\n\n- feature change\n\n## [1.2.3.0] - 2026-10-01\n\n- base release\n' > CHANGELOG.md
+          git add -A && git commit -qm feature
+        shell: bash
+
+      - name: The resolver finds the runner's Git Bash from git --exec-path
+        run: |
+          set -euo pipefail
+          git --version
+          OUT=$(bun -e 'import { resolveWindowsBash } from "./lib/script-invocation"; const r = resolveWindowsBash(); console.log(JSON.stringify(r)); process.exit(r.ok ? 0 : 1);')
+          echo "$OUT"
+          echo "$OUT" | grep -q '"source":"git --exec-path"' || (echo "Git Bash was not found through git --exec-path" && exit 1)
+          echo "$OUT" | grep -qiE '"bash":"[^"]*/(usr/)?bin/bash\.exe"' || (echo "the resolved bash is not a Git Bash bash.exe" && exit 1)
+        shell: bash
+
+      - name: A hook invocation, timed cold and warm (cached Git Bash resolution)
+        run: |
+          set -euo pipefail
+          T="$RUNNER_TEMP/hook-timing"
+          rm -rf "$T"; mkdir -p "$T"
+          PAYLOAD='{"session_id":"e2e","hook_event_name":"PostToolUse","tool_name":"AskUserQuestion","tool_use_id":"TOOL_ID","tool_input":{"questions":[{"question":"Ship it?","options":[{"label":"Ship now (recommended)"},{"label":"Hold"}]}]},"tool_response":{"answers":[{"option_label":"Ship now"}]}}'
+          run_hook() {
+            local start end
+            start=$(date +%s%3N)
+            printf '%s' "${PAYLOAD/TOOL_ID/$1}" | (cd "$T" && GSTACK_STATE_ROOT="$T" GSTACK_QUESTION_LOG_NO_DERIVE=1 bun "$GITHUB_WORKSPACE/hosts/claude/hooks/question-log-hook.ts")
+            end=$(date +%s%3N)
+            echo $((end - start))
+          }
+          COLD=$(run_hook toolu_cold)
+          test -f "$T/cache/windows-bash.json" || (echo "the hook did not cache its Git Bash resolution" && exit 1)
+          cat "$T/cache/windows-bash.json"
+          WARM=$(run_hook toolu_warm)
+          echo "question-log-hook: cold ${COLD} ms, warm ${WARM} ms"
+          echo "### question-log-hook on windows-latest: cold ${COLD} ms, warm ${WARM} ms" >> "$GITHUB_STEP_SUMMARY"
+          LOGS=$(find "$T/projects" -name question-log.jsonl | head -n 1)
+          test -n "$LOGS" || (echo "the hook wrote no question-log.jsonl" && exit 1)
+          test "$(wc -l < "$LOGS")" -eq 2 || (echo "expected two logged events" && exit 1)
+          test ! -s "$T/hook-errors.log" || { cat "$T/hook-errors.log"; echo "the hook logged errors"; exit 1; }
+        shell: bash
+
+      - name: A missing GSTACK_GIT_BASH refuses with BASH_UNAVAILABLE and names every candidate
+        run: |
+          set -uo pipefail
+          T="$RUNNER_TEMP/pregate-e2e"
+          cd "$T/work"
+          OUT=$(GSTACK_HOME="$T/home" GSTACK_GIT_BASH='C:\no-such-git\bin\bash.exe' bun "$GITHUB_WORKSPACE/bin/gstack-restamp" --base main --allow-repo-commands --next --dry-run 2>&1) && CODE=0 || CODE=$?
+          echo "$OUT" | tail -n 3
+          test "$CODE" -ne 0 || (echo "restamp passed without a bash" && exit 1)
+          echo "$OUT" | grep -q 'cannot fingerprint the working tree (gstack-wtree could not start: gstack: no Git Bash found' || (echo "the refusal does not say why" && exit 1)
+          echo "$OUT" | grep -q 'GSTACK_GIT_BASH C:/no-such-git/bin/bash.exe: does not exist' || (echo "the refusal does not list the override" && exit 1)
+          echo "$OUT" | grep -q '(BASH_UNAVAILABLE)' || (echo "the refusal has no result code" && exit 1)
+          OUT=$(GSTACK_HOME="$T/home" GSTACK_GIT_BASH='C:\no-such-git\bin\bash.exe' bun "$GITHUB_WORKSPACE/bin/gstack-pregate" run --base main --stage preflight --json 2>/dev/null) && CODE=0 || CODE=$?
+          echo "$OUT"
+          test "$CODE" -eq 3 || (echo "gstack-pregate exited $CODE, expected 3 (refused)" && exit 1)
+          echo "$OUT" | bun -e 'const j = JSON.parse(await Bun.stdin.text()); const ok = j.ok === false && j.status === "refused" && j.code === "WTREE_UNAVAILABLE" && j.detail.includes("GSTACK_GIT_BASH C:/no-such-git/bin/bash.exe: does not exist") && j.fix.includes("GSTACK_GIT_BASH"); process.exit(ok ? 0 : 1);' || (echo "gstack-pregate --json did not refuse with one WTREE_UNAVAILABLE envelope" && exit 1)
+        shell: bash
+
+      - name: Download the pinned PortableGit and verify its checksum
+        run: |
+          set -euo pipefail
+          PG="$RUNNER_TEMP/PortableGit"
+          curl -fsSL -o "$RUNNER_TEMP/$PORTABLE_GIT_FILE" "https://github.com/git-for-windows/git/releases/download/v${PORTABLE_GIT_VERSION}/${PORTABLE_GIT_FILE}"
+          echo "$PORTABLE_GIT_SHA256  $RUNNER_TEMP/$PORTABLE_GIT_FILE" | sha256sum -c -
+          "$RUNNER_TEMP/$PORTABLE_GIT_FILE" -o"$(cygpath -w "$PG")" -y
+          test -f "$PG/bin/bash.exe" || (echo "PortableGit has no bin/bash.exe" && exit 1)
+          "$PG/cmd/git.exe" --version
+        shell: bash
+
+      - name: The resolver finds the PortableGit bash through git --exec-path alone
+        run: |
+          set -euo pipefail
+          PG=$(cygpath -u "$RUNNER_TEMP/PortableGit")
+          export PATH="$PG/cmd:$PATH"
+          git --version
+          WANT=$(cygpath -m "$PG/bin/bash.exe")
+          OUT=$(bun -e 'import { resolveWindowsBash } from "./lib/script-invocation"; const r = resolveWindowsBash(); console.log(JSON.stringify(r)); process.exit(r.ok ? 0 : 1);')
+          echo "$OUT"
+          echo "$OUT" | grep -qiF "\"bash\":\"$WANT\"" || (echo "expected $WANT" && exit 1)
+          echo "$OUT" | grep -q '"source":"git --exec-path"' || (echo "PortableGit was not found through git --exec-path" && exit 1)
+        shell: bash
+
+      - name: The fixture journey (restamp, regen, evidence, gate-diff) under the runner's Git and the pinned PortableGit
+        run: |
+          set -euo pipefail
+          journey() {
+            G="$PWD"
+            T="$RUNNER_TEMP/pregate-e2e"
+            export GSTACK_HOME="$T/home" GSTACK_STATE_ROOT="$T/home"
+            cd "$T/work"
+            git reset -q --hard && git clean -fdq
+            rm -rf "$T/home/projects"
+
+            OUT=$(bun "$G/bin/gstack-restamp" --base main --allow-repo-commands --next --dry-run 2>&1) || { echo "$OUT"; echo "gstack-restamp --dry-run failed"; exit 1; }
+            echo "$OUT" | tail -n 8
+            echo "$OUT" | grep -q '^+1\.2\.4\.0$' || (echo "restamp did not stamp VERSION" && exit 1)
+            echo "$OUT" | grep -q '^+# digest v1\.2\.4\.0$' || (echo "restamp did not run the release tool" && exit 1)
+            echo "$OUT" | grep -q 'GSTACK_RESULT: skill=restamp status=complete' || (echo "restamp did not complete" && exit 1)
+            test -z "$(git status --porcelain)" || (echo "--dry-run wrote to the tree" && exit 1)
+
+            OUT=$(bun "$G/bin/gstack-regen" check --allow-repo-commands 2>&1) || { echo "$OUT"; echo "gstack-regen check failed"; exit 1; }
+            echo "$OUT"
+            echo "$OUT" | grep -q '^regen digest: fresh' || (echo "the regen command did not run fresh in the scratch worktree" && exit 1)
+            echo "$OUT" | grep -qE 'GSTACK_RESULT: skill=regen status=complete run=[0-9a-f]{40}$' || (echo "regen check has no tree fingerprint" && exit 1)
+            OUT=$(bun "$G/bin/gstack-regen" write --allow-repo-commands 2>&1) || { echo "$OUT"; echo "gstack-regen write failed"; exit 1; }
+            echo "$OUT" | grep -qE 'GSTACK_RESULT: skill=regen status=complete run=[0-9a-f]{40}$' || (echo "regen write has no tree fingerprint" && exit 1)
+
+            bun "$G/bin/gstack-evidence" run --label tests -- 'echo evidence-ok && test -f VERSION'
+            LEDGER=$(find "$T/home/projects" -name '*-evidence.jsonl' | head -n 1)
+            test -n "$LEDGER" || (echo "no evidence ledger written" && exit 1)
+            tail -n 1 "$LEDGER"
+            tail -n 1 "$LEDGER" | grep -qE '"exit":0,' || (echo "the evidence command did not exit 0 through bash -c" && exit 1)
+            tail -n 1 "$LEDGER" | grep -qE '"wtree":"[0-9a-f]{40}"' || (echo "evidence recorded no content fingerprint" && exit 1)
+
+            set +e
+            OUT=$(bun "$G/bin/gstack-gate-diff" main 2>&1)
+            CODE=$?
+            set -e
+            echo "$OUT" | tail -n 3
+            test "$CODE" -eq 0 || (echo "gstack-gate-diff exited $CODE" && exit 1)
+            ! echo "$OUT" | grep -q 'fingerprint unavailable' || (echo "gate-diff could not fingerprint the tree" && exit 1)
+            echo "$OUT" | grep -qE 'candidate=[0-9a-f]{12}\+[0-9a-f]{12} ' || (echo "gate-diff candidate has no tree id" && exit 1)
+
+            OUT=$(bun "$G/bin/gstack-pregate" run --base main --stage preflight --only regen,secrets,literals,guards --allow-repo-commands 2>&1) || { echo "$OUT"; echo "gstack-pregate run failed"; exit 1; }
+            echo "$OUT" | tail -n 10
+            echo "$OUT" | grep -qE '^preflight  secrets   pass .* added lines clean' || (echo "pregate secrets did not scan through gstack-redact" && exit 1)
+            echo "$OUT" | grep -q 'GSTACK_RESULT: skill=pregate status=complete run=' || (echo "pregate did not complete" && exit 1)
+            grep -qE '"tree": "[0-9a-f]{40}"' .gstack/tmp/pregate.json || (echo "pregate.json has no tree fingerprint" && exit 1)
+          }
+          echo "::group::runner Git for Windows ($(git --version))"
+          (journey)
+          echo "::endgroup::"
+          echo "::group::pinned PortableGit $PORTABLE_GIT_VERSION"
+          PG_CMD=$(cygpath -u "$RUNNER_TEMP/PortableGit/cmd")
+          (export PATH="$PG_CMD:$PATH"; git --version; journey)
+          echo "::endgroup::"
+        shell: bash

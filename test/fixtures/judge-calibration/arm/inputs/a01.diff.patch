@@ -1,0 +1,29 @@
+diff --git a/cmd/fetch/main.go b/cmd/fetch/main.go
+index d24bd7f..fd9f398 100644
+--- a/cmd/fetch/main.go
++++ b/cmd/fetch/main.go
+@@ -6,17 +6,22 @@ import (
+ 	"io"
+ 	"net/http"
+ 	"os"
++	"time"
+ )
+ 
+ func main() {
+ 	url := flag.String("url", "", "URL to fetch")
++	timeout := flag.Duration("timeout", 10*time.Second, "overall request timeout (e.g. 500ms, 30s)")
++	// Reserved for upcoming retry support; accepted now so scripts can start passing it.
++	_ = flag.Int("retries", 0, "number of retries on failure (not yet implemented)")
+ 	flag.Parse()
+ 	if *url == "" {
+-		fmt.Fprintln(os.Stderr, "usage: fetch -url URL")
++		fmt.Fprintln(os.Stderr, "usage: fetch -url URL [-timeout 10s]")
+ 		os.Exit(2)
+ 	}
+ 
+-	resp, err := http.Get(*url)
++	client := &http.Client{Timeout: *timeout}
++	resp, err := client.Get(*url)
+ 	if err != nil {
+ 		fmt.Fprintln(os.Stderr, "fetch:", err)
+ 		os.Exit(1)

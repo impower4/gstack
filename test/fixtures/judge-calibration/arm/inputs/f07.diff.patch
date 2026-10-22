@@ -1,0 +1,123 @@
+diff --git a/src/components/Header.tsx b/src/components/Header.tsx
+index 30af941..0fd4823 100644
+--- a/src/components/Header.tsx
++++ b/src/components/Header.tsx
+@@ -1,10 +1,12 @@
+ import Link from 'next/link';
+ import { BetaBanner } from './BetaBanner';
++import { useFlag } from '../flags/FlagContext';
+ 
+ export function Header() {
++  const showBeta = useFlag('showBeta');
+   return (
+     <header className="site-header">
+-      <BetaBanner />
++      {showBeta && <BetaBanner />}
+       <nav>
+         <Link href="/">Home</Link>
+         <Link href="/tours">Tours</Link>
+diff --git a/src/flags/FlagContext.tsx b/src/flags/FlagContext.tsx
+new file mode 100644
+index 0000000..abdc702
+--- /dev/null
++++ b/src/flags/FlagContext.tsx
+@@ -0,0 +1,19 @@
++import { createContext, useContext, useEffect, useState, type ReactNode } from 'react';
++import type { FlagName } from './FlagProvider';
++import { FlagService, flagService } from './FlagService';
++
++const FlagContext = createContext<FlagService>(flagService);
++
++export function FlagsProvider({ service = flagService, children }: { service?: FlagService; children: ReactNode }) {
++  return <FlagContext.Provider value={service}>{children}</FlagContext.Provider>;
++}
++
++export function useFlag(name: FlagName): boolean {
++  const service = useContext(FlagContext);
++  const [value, setValue] = useState(() => service.isEnabled(name));
++  useEffect(
++    () => service.subscribe((changed, next) => { if (changed === name) setValue(next); }),
++    [service, name],
++  );
++  return value;
++}
+diff --git a/src/flags/FlagProvider.ts b/src/flags/FlagProvider.ts
+new file mode 100644
+index 0000000..00f6f3e
+--- /dev/null
++++ b/src/flags/FlagProvider.ts
+@@ -0,0 +1,18 @@
++export type FlagName = 'showBeta';
++
++export interface FlagProvider {
++  /** Returns the flag value, or undefined when the provider has no opinion. */
++  get(name: FlagName): boolean | undefined;
++}
++
++const ENV_KEYS: Record<FlagName, string | undefined> = {
++  showBeta: process.env.NEXT_PUBLIC_SHOW_BETA,
++};
++
++export class EnvFlagProvider implements FlagProvider {
++  get(name: FlagName): boolean | undefined {
++    const raw = ENV_KEYS[name];
++    if (raw === undefined) return undefined;
++    return raw !== 'false';
++  }
++}
+diff --git a/src/flags/FlagService.ts b/src/flags/FlagService.ts
+new file mode 100644
+index 0000000..7b5c747
+--- /dev/null
++++ b/src/flags/FlagService.ts
+@@ -0,0 +1,33 @@
++import type { FlagName, FlagProvider } from './FlagProvider';
++import { EnvFlagProvider } from './FlagProvider';
++
++type Listener = (name: FlagName, value: boolean) => void;
++
++const DEFAULTS: Record<FlagName, boolean> = { showBeta: true };
++
++export class FlagService {
++  private cache = new Map<FlagName, boolean>();
++  private listeners = new Set<Listener>();
++
++  constructor(private readonly providers: FlagProvider[]) {}
++
++  isEnabled(name: FlagName): boolean {
++    const cached = this.cache.get(name);
++    if (cached !== undefined) return cached;
++    const value = this.providers.map((p) => p.get(name)).find((v) => v !== undefined) ?? DEFAULTS[name];
++    this.cache.set(name, value);
++    return value;
++  }
++
++  override(name: FlagName, value: boolean): void {
++    this.cache.set(name, value);
++    this.listeners.forEach((fn) => fn(name, value));
++  }
++
++  subscribe(fn: Listener): () => void {
++    this.listeners.add(fn);
++    return () => this.listeners.delete(fn);
++  }
++}
++
++export const flagService = new FlagService([new EnvFlagProvider()]);
+diff --git a/src/pages/_app.tsx b/src/pages/_app.tsx
+index 814fd45..bbe6003 100644
+--- a/src/pages/_app.tsx
++++ b/src/pages/_app.tsx
+@@ -1,6 +1,11 @@
+ import type { AppProps } from 'next/app';
++import { FlagsProvider } from '../flags/FlagContext';
+ import '../styles/globals.css';
+ 
+ export default function App({ Component, pageProps }: AppProps) {
+-  return <Component {...pageProps} />;
++  return (
++    <FlagsProvider>
++      <Component {...pageProps} />
++    </FlagsProvider>
++  );
+ }

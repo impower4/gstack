@@ -1,0 +1,12 @@
+The classifier now reads tags like `[P1]` and lines such as `P1: x`, which is
+what Codex prints. Example input it handles:
+
+```
+[P1] The cap is ignored.
+P1: The cap is ignored.
+1. **P1 — The cap is ignored.**
+```
+
+No issues found in the changed parser.
+
+Recommendation: ship because the parser handles every documented form.

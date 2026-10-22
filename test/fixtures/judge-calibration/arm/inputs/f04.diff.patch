@@ -1,0 +1,161 @@
+diff --git a/internal/billing/client.go b/internal/billing/client.go
+index 60d077e..8de3723 100644
+--- a/internal/billing/client.go
++++ b/internal/billing/client.go
+@@ -5,6 +5,9 @@ import (
+ 	"encoding/json"
+ 	"fmt"
+ 	"net/http"
++	"time"
++
++	"example.com/invoicer/internal/retry"
+ )
+ 
+ type Client struct {
+@@ -18,20 +21,29 @@ type Invoice struct {
+ }
+ 
+ func (c *Client) FetchInvoice(ctx context.Context, id string) (*Invoice, error) {
+-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.BaseURL+"/invoices/"+id, nil)
+-	if err != nil {
+-		return nil, err
+-	}
+-	resp, err := c.HTTP.Do(req)
+-	if err != nil {
+-		return nil, err
+-	}
+-	defer resp.Body.Close()
+-	if resp.StatusCode != http.StatusOK {
+-		return nil, fmt.Errorf("billing: GET invoice %s: %s", id, resp.Status)
+-	}
+ 	var inv Invoice
+-	if err := json.NewDecoder(resp.Body).Decode(&inv); err != nil {
++	err := retry.Do(ctx, func(ctx context.Context) error {
++		req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.BaseURL+"/invoices/"+id, nil)
++		if err != nil {
++			return retry.Permanent(err)
++		}
++		resp, err := c.HTTP.Do(req)
++		if err != nil {
++			return err
++		}
++		defer resp.Body.Close()
++		if resp.StatusCode >= 500 {
++			return fmt.Errorf("billing: GET invoice %s: %s", id, resp.Status)
++		}
++		if resp.StatusCode != http.StatusOK {
++			return retry.Permanent(fmt.Errorf("billing: GET invoice %s: %s", id, resp.Status))
++		}
++		return retry.Permanent(json.NewDecoder(resp.Body).Decode(&inv))
++	},
++		retry.WithMaxAttempts(3),
++		retry.WithStrategy(retry.ConstantBackoff{Wait: 200 * time.Millisecond}),
++	)
++	if err != nil {
+ 		return nil, err
+ 	}
+ 	return &inv, nil
+diff --git a/internal/retry/retry.go b/internal/retry/retry.go
+new file mode 100644
+index 0000000..0cfc502
+--- /dev/null
++++ b/internal/retry/retry.go
+@@ -0,0 +1,98 @@
++// Package retry is a small, reusable retry toolkit for outbound calls.
++package retry
++
++import (
++	"context"
++	"errors"
++	"math/rand"
++	"time"
++)
++
++// Strategy decides how long to wait before the next attempt.
++type Strategy interface {
++	Delay(attempt int) time.Duration
++}
++
++// ConstantBackoff waits the same duration between attempts.
++type ConstantBackoff struct{ Wait time.Duration }
++
++func (b ConstantBackoff) Delay(int) time.Duration { return b.Wait }
++
++// ExponentialBackoff doubles the wait each attempt up to Max.
++type ExponentialBackoff struct {
++	Base time.Duration
++	Max  time.Duration
++}
++
++func (b ExponentialBackoff) Delay(attempt int) time.Duration {
++	d := b.Base << attempt
++	if b.Max > 0 && d > b.Max {
++		return b.Max
++	}
++	return d
++}
++
++type config struct {
++	maxAttempts int
++	strategy    Strategy
++	jitter      float64
++	onRetry     func(attempt int, err error)
++}
++
++// Option configures Do.
++type Option func(*config)
++
++func WithMaxAttempts(n int) Option { return func(c *config) { c.maxAttempts = n } }
++
++func WithStrategy(s Strategy) Option { return func(c *config) { c.strategy = s } }
++
++func WithJitter(fraction float64) Option { return func(c *config) { c.jitter = fraction } }
++
++func WithOnRetry(f func(int, error)) Option { return func(c *config) { c.onRetry = f } }
++
++type permanentError struct{ err error }
++
++func (p permanentError) Error() string { return p.err.Error() }
++func (p permanentError) Unwrap() error { return p.err }
++
++// Permanent marks an error as non-retryable. Permanent(nil) is nil.
++func Permanent(err error) error {
++	if err == nil {
++		return nil
++	}
++	return permanentError{err}
++}
++
++// Do runs fn until it succeeds, returns a Permanent error, or attempts run out.
++func Do(ctx context.Context, fn func(context.Context) error, opts ...Option) error {
++	cfg := config{maxAttempts: 3, strategy: ConstantBackoff{Wait: 100 * time.Millisecond}}
++	for _, opt := range opts {
++		opt(&cfg)
++	}
++	var err error
++	for attempt := 0; attempt < cfg.maxAttempts; attempt++ {
++		if err = fn(ctx); err == nil {
++			return nil
++		}
++		var perm permanentError
++		if errors.As(err, &perm) {
++			return perm.err
++		}
++		if attempt == cfg.maxAttempts-1 {
++			break
++		}
++		if cfg.onRetry != nil {
++			cfg.onRetry(attempt+1, err)
++		}
++		wait := cfg.strategy.Delay(attempt)
++		if cfg.jitter > 0 {
++			wait += time.Duration(rand.Float64() * cfg.jitter * float64(wait))
++		}
++		select {
++		case <-ctx.Done():
++			return ctx.Err()
++		case <-time.After(wait):
++		}
++	}
++	return err
++}

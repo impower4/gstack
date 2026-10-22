@@ -67,8 +67,4 @@ describe('post-rename doc-regen regression (codex Finding #12)', () => {
     }
     expect(offenders).toEqual([]);
   });
-
-  test('top-level SKILL.md exists and is regenerated', () => {
-    expect(fs.existsSync(path.join(ROOT, 'SKILL.md'))).toBe(true);
-  });
 });

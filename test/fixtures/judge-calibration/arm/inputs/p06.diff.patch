@@ -1,0 +1,21 @@
+diff --git a/styles.css b/styles.css
+index 87adc0d..92a66ad 100644
+--- a/styles.css
++++ b/styles.css
+@@ -33,6 +33,14 @@ body {
+   white-space: nowrap;
+ }
+ 
+-.signup button:focus {
+-  outline: none;
++.signup button:focus-visible {
++  outline: 3px solid var(--brand);
++  outline-offset: 2px;
++}
++
++@media (max-width: 480px) {
++  .signup button {
++    width: 100%;
++    padding-inline: 0;
++  }
+ }

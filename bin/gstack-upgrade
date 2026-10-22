@@ -1,0 +1,204 @@
+#!/usr/bin/env bash
+# gstack-upgrade — move this gstack checkout to the tip of its remote default
+# branch, unattended and fast-forward only. The deterministic twin of the
+# /gstack-upgrade skill's git fast path, for parent agents and fix lines.
+#
+# Usage:
+#   gstack-upgrade --check   fetch (refs only) and print `gstack-upgrade: current <ver>`
+#                            (exit 0) or `gstack-upgrade: behind <installed> -> <remote>
+#                            (<n> commits)` (exit 1); changes nothing else
+#   gstack-upgrade           fast-forward, then reinstall: bin/gstack-capy-install on a
+#                            Capy install (the marker it writes in the git dir),
+#                            else ./setup --refresh-registered (setup runs migrations)
+#   gstack-upgrade --ff-only-no-reinstall
+#                            fast-forward with every refusal below, print the upgraded
+#                            line and exit 0 without reinstalling (for a caller about
+#                            to run the installer itself: bin/gstack-capy-session)
+#
+# Refuses with exit 3 and changes nothing (UPGRADE_REFUSED) when the directory
+# is not a gstack checkout, HEAD is detached or not on the remote default
+# branch (a pin), any tracked byte is dirty, a local commit diverged, the
+# incoming release's Bun floor holds, or another updater holds the setup
+# lock; never stashes, never resets. An unreachable remote is
+# UPGRADE_FETCH_FAILED (exit 3). While another live session holds a workflow
+# lease on this installation (bin/gstack-lease live) it refuses with
+# UPGRADE_BUSY (exit 3); GSTACK_UPGRADE_FORCE=1 overrides. Prints
+# `gstack-upgrade: upgraded <old> -> <new>` before reinstalling; a failed
+# reinstall exits 1 and the next run completes it (a pending marker in the git
+# dir, kept only for setup or install failures).
+#
+# Every success path (already current, fast-forwarded, a completed pending
+# reinstall) then certifies the caller's project: the git toplevel of the
+# directory gstack-upgrade was started in, captured before any cd. On Capy
+# that is bin/gstack-capy-install --project <it> (it installs the project's
+# pinned Bun when that pin is a verified version); elsewhere gstack-doctor
+# --check --require runtime,pins. A failure prints the standard trailer
+# (`gstack: fail pins`) and exits 1; the checkout move is kept and no pending
+# marker is left. Outside a project, or with --check, nothing is certified.
+# Bash 3.2 plus git; the fetch is bounded by `timeout` when present.
+set -u
+BASH_COMPAT=50
+
+ROOT="$(cd "$(dirname "$0")/.." && pwd -P)"
+CALLER=$(pwd -P)
+CALLER_PROJECT=$(git rev-parse --show-toplevel 2>/dev/null) && CALLER_PROJECT=$(cd "$CALLER_PROJECT" && pwd -P) || CALLER_PROJECT=""
+[ "$CALLER_PROJECT" = "$ROOT" ] && CALLER_PROJECT=""
+CHECK=0 REINSTALL=1
+case "${1:-}" in
+  --check) CHECK=1 ;;
+  --ff-only-no-reinstall) REINSTALL=0 ;;
+  '') ;;
+  -h|--help) sed -n '2,38p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+  *) echo "gstack-upgrade: unknown argument '$1'" >&2; exit 2 ;;
+esac
+
+refuse() { echo "gstack-upgrade: $1; nothing was changed; fix: $2 (UPGRADE_REFUSED)" >&2; exit 3; }
+fetch_failed() { echo "gstack-upgrade: could not reach origin ($1); fix: check network access to $(git -C "$ROOT" remote get-url origin 2>/dev/null || echo origin), then re-run $ROOT/bin/gstack-upgrade (UPGRADE_FETCH_FAILED)" >&2; exit 3; }
+bounded() { if command -v timeout >/dev/null 2>&1; then timeout "${GSTACK_UPGRADE_FETCH_TIMEOUT:-60}" "$@"; else "$@"; fi; }
+# Egress receipts (_receipted_git), fail-open like the session-start updater:
+# a user-run upgrade must not die over an audit-log hiccup.
+# shellcheck source=bin/gstack-egress-lib.sh
+. "$ROOT/bin/gstack-egress-lib.sh" 2>/dev/null || _receipted_git() { shift 5; "$@"; }
+
+# Git for Windows answers --show-toplevel as C:/x while pwd -P in Git Bash is
+# /c/x; compare the paths, not their spellings.
+# shellcheck source=bin/gstack-path-spelling.sh
+. "$ROOT/bin/gstack-path-spelling.sh" 2>/dev/null || gstack_path_same() { [ "$1" = "$2" ]; }
+TOPLEVEL=$(git -C "$ROOT" rev-parse --show-toplevel 2>/dev/null)
+[ -f "$ROOT/VERSION" ] && [ -f "$ROOT/setup" ] && [ -n "$TOPLEVEL" ] && gstack_path_same "$TOPLEVEL" "$ROOT" \
+  || refuse "$ROOT is not a gstack checkout" "run gstack-upgrade from a git checkout of https://github.com/garrytan/gstack"
+export GIT_TERMINAL_PROMPT=0
+HOST=$(git -C "$ROOT" remote get-url origin 2>/dev/null); HOST="${HOST#*://}"; HOST="${HOST#*@}"; HOST="${HOST%%[/:]*}"
+R="user ran gstack-upgrade"
+INSTALLED=$(head -1 "$ROOT/VERSION")
+BRANCH=$(git -C "$ROOT" symbolic-ref -q --short HEAD) \
+  || refuse "HEAD is detached at $(git -C "$ROOT" rev-parse --short HEAD) (a pinned revision)" "git -C $ROOT checkout <default branch>, then re-run"
+DEFAULT=$(_receipted_git open gstack-upgrade "${HOST:-unknown}" gstack-self-update-pull "$R" bounded git -C "$ROOT" ls-remote --symref origin HEAD 2>/dev/null | sed -n 's|^ref: refs/heads/\([^[:space:]]*\)[[:space:]]*HEAD$|\1|p' | head -1)
+[ -n "$DEFAULT" ] || fetch_failed "git ls-remote origin HEAD failed"
+[ "$BRANCH" = "$DEFAULT" ] || refuse "on branch $BRANCH, not the remote default branch $DEFAULT (a pin)" "git -C $ROOT checkout $DEFAULT, then re-run"
+_receipted_git open gstack-upgrade "${HOST:-unknown}" gstack-self-update-pull "$R" bounded git -C "$ROOT" fetch --quiet origin "$DEFAULT" 2>/dev/null || fetch_failed "git fetch origin $DEFAULT failed"
+INCOMING=$(git -C "$ROOT" rev-parse FETCH_HEAD)
+REMOTE_VER=$(git -C "$ROOT" show FETCH_HEAD:VERSION 2>/dev/null | head -1)
+PENDING="$(git -C "$ROOT" rev-parse --absolute-git-dir)/gstack-upgrade.pending"
+CAPY=0
+[ -f "$(git -C "$ROOT" rev-parse --absolute-git-dir)/gstack-capy-install.state" ] && [ -x "$ROOT/bin/gstack-capy-install" ] && CAPY=1
+# Run outside a Capy session, the installer this script starts is the
+# checkout's own; say so, so the doctor's wrapper row judges that copy.
+if [ "$CAPY" -eq 1 ] && [ -z "${GSTACK_CAPY_WRAPPER_REV:-}" ] && [ -f "$ROOT/capy/skill/gstack/scripts/install.sh" ]; then
+  GSTACK_CAPY_WRAPPER_REV=$(sed -n 's/^GSTACK_CAPY_WRAPPER=\([0-9][0-9]*\).*/\1/p' "$ROOT/capy/skill/gstack/scripts/install.sh" | head -1)
+  [ -n "$GSTACK_CAPY_WRAPPER_REV" ] && export GSTACK_CAPY_WRAPPER_REV GSTACK_CAPY_WRAPPER_PATH="$ROOT/capy/skill/gstack/scripts/install.sh"
+fi
+# stop_trailer ERRFILE — an installer stop line (exit 3, before ./setup) as a
+# trailer: a RUNTIME_PIN_CONFLICT is `gstack: fail pins`, any other stop
+# `gstack: fail runtime`.
+stop_trailer() {
+  _stop=$(grep -E '^gstack-capy-install: .*\([A-Z][A-Z_]*;' "$1" | tail -1)
+  case "$_stop" in
+    '') ;;
+    *'(RUNTIME_PIN_CONFLICT;'*) echo "gstack: fail pins — ${_stop#gstack-capy-install: }" ;;
+    *) echo "gstack: fail runtime — ${_stop#gstack-capy-install: }" ;;
+  esac
+}
+# certify — the caller's project (see the header); exits with its outcome.
+certify() {
+  [ -n "$CALLER_PROJECT" ] && [ "$REINSTALL" -eq 1 ] || exit 0
+  if [ "$CAPY" -eq 1 ]; then
+    _err=$(mktemp "${TMPDIR:-/tmp}/gstack-upgrade.XXXXXX")
+    (cd "$CALLER" && "$ROOT/bin/gstack-capy-install" --project "$CALLER_PROJECT" </dev/null 2>"$_err")
+    _rc=$?
+    cat "$_err" >&2
+    [ "$_rc" -eq 0 ] && { rm -f "$_err"; exit 0; }
+    [ "$_rc" -eq 3 ] && stop_trailer "$_err"
+    rm -f "$_err"
+    exit 1
+  fi
+  (cd "$CALLER" && "$ROOT/bin/gstack-doctor" --check --require runtime,pins --project "$CALLER_PROJECT" </dev/null) && exit 0
+  exit 1
+}
+reinstall() { # FROM — run the install step; a pending marker survives a failure.
+  # With a project to certify next, the installer's own trailer is held back
+  # (printed only when the reinstall fails), so no ok precedes a pins failure.
+  printf '%s\n' "$1" > "$PENDING"
+  _held=$(mktemp "${TMPDIR:-/tmp}/gstack-upgrade.XXXXXX") _ierr=$(mktemp "${TMPDIR:-/tmp}/gstack-upgrade.XXXXXX")
+  if [ "$CAPY" -eq 1 ]; then
+    (cd "$ROOT" && GSTACK_CAPY_UPGRADED_FROM="$1" "$ROOT/bin/gstack-capy-install" </dev/null 2>"$_ierr") | while IFS= read -r _line; do
+      case "$_line" in "gstack: "*) printf '%s\n' "$_line" > "$_held"; continue ;; esac
+      printf '%s\n' "$_line"
+    done
+    _rc=${PIPESTATUS[0]}
+    cat "$_ierr" >&2
+  else
+    (cd "$ROOT" && ./setup --refresh-registered </dev/null)
+    _rc=$?
+  fi
+  # The wrapper row is an owner action on the Drive copy, never a reinstall
+  # failure: no pending marker for it.
+  if [ "$_rc" -ne 0 ] && [ "$(cat "$_held")" = "gstack: fail wrapper" ]; then
+    rm -f "$PENDING"
+    echo "gstack-upgrade: reinstalled $(head -1 "$ROOT/VERSION"); only the wrapper row failed (an owner action on the Drive copy, CAPY_WRAPPER_STALE), so no reinstall is pending"
+  fi
+  if [ "$_rc" -eq 0 ]; then
+    [ -n "$CALLER_PROJECT" ] || cat "$_held"
+    rm -f "$PENDING" "$_held" "$_ierr"; certify
+  fi
+  [ -s "$_held" ] && cat "$_held"
+  [ "$_rc" -eq 3 ] && [ ! -s "$_held" ] && stop_trailer "$_ierr"
+  rm -f "$_held" "$_ierr"
+  [ -f "$PENDING" ] || exit 1
+  echo "gstack-upgrade: the checkout is at $(head -1 "$ROOT/VERSION") but its reinstall failed (exit $_rc); fix: re-run $ROOT/bin/gstack-upgrade (it completes the pending reinstall)" >&2
+  exit 1
+}
+if [ "$INCOMING" = "$(git -C "$ROOT" rev-parse HEAD)" ] || git -C "$ROOT" merge-base --is-ancestor FETCH_HEAD HEAD 2>/dev/null; then
+  if [ -f "$PENDING" ]; then
+    echo "gstack-upgrade: current $INSTALLED; reinstall pending from $(head -1 "$PENDING")"
+    [ "$CHECK" -eq 1 ] && exit 1
+    reinstall "$(head -1 "$PENDING")"
+  fi
+  echo "gstack-upgrade: current $INSTALLED"
+  [ "$CHECK" -eq 1 ] && exit 0
+  certify
+fi
+if [ "$CHECK" -eq 1 ]; then
+  echo "gstack-upgrade: behind $INSTALLED -> ${REMOTE_VER:-unknown} ($(git -C "$ROOT" rev-list --count HEAD..FETCH_HEAD 2>/dev/null || echo '?') commits)"
+  exit 1
+fi
+
+DIRTY=$(git -C "$ROOT" status --porcelain --untracked-files=no 2>/dev/null | cut -c4- | tr '\n' ' ' | sed 's/ $//')
+[ -z "$DIRTY" ] || refuse "tracked files changed: $DIRTY" "commit or move those changes (git -C $ROOT status --short), then re-run"
+if ! git -C "$ROOT" merge-base --is-ancestor HEAD FETCH_HEAD 2>/dev/null; then
+  _receipted_git open gstack-upgrade "${HOST:-unknown}" gstack-self-update-pull "$R" git -C "$ROOT" fetch --quiet --unshallow origin "$DEFAULT" 2>/dev/null || true
+  git -C "$ROOT" merge-base --is-ancestor HEAD FETCH_HEAD 2>/dev/null \
+    || refuse "diverged: $(git -C "$ROOT" rev-list --count FETCH_HEAD..HEAD 2>/dev/null || echo '?') local commits are not on origin/$DEFAULT" "git -C $ROOT log --oneline FETCH_HEAD..HEAD shows them; move them to another branch, then re-run"
+fi
+# Workflow leases (bin/gstack-lease): sessions sharing this installation that
+# are alive and not this process's own chain. Moving the checkout under them
+# is what the lease exists to prevent; the caller's own session never counts.
+if [ "${GSTACK_UPGRADE_FORCE:-}" != 1 ] && [ -x "$ROOT/bin/gstack-lease" ] \
+  && BUSY=$("$ROOT/bin/gstack-lease" live --root "$ROOT" --exclude-ancestry-of $$ 2>/dev/null); then
+  HOLDERS=""
+  while read -r _pid _age; do HOLDERS="$HOLDERS${HOLDERS:+, }pid $_pid ($_age)"; done <<EOF_BUSY
+$BUSY
+EOF_BUSY
+  echo "gstack-upgrade: live gstack sessions hold this installation: $HOLDERS; nothing was changed; fix: wait for those sessions to finish, or re-run with GSTACK_UPGRADE_FORCE=1 when you know they are idle (UPGRADE_BUSY)" >&2
+  exit 3
+fi
+# shellcheck source=bin/gstack-bun-version.sh
+. "$ROOT/bin/gstack-bun-version.sh" 2>/dev/null && HOLD=$(gstack_bun_incoming_hold "$ROOT" "$INCOMING") \
+  && refuse "the incoming release holds: $HOLD" "install Bun $(git -C "$ROOT" show "$INCOMING:bin/gstack-bun-version.sh" 2>/dev/null | sed -n 's/^GSTACK_BUN_TESTED="\(.*\)"/\1/p') (bin/gstack-capy-install on Capy), then re-run"
+
+# The same lock directory the session-start auto-updater (bin/gstack-session-update)
+# holds while it pulls and runs setup; a live holder means refuse, never wait.
+GSTACK_STATE_ROOT=$("$ROOT/bin/gstack-paths" --get GSTACK_STATE_ROOT); : "${GSTACK_STATE_ROOT:?gstack-paths failed; reinstall with ./setup or /gstack-upgrade}"
+LOCK_DIR="$GSTACK_STATE_ROOT/.setup-lock"
+mkdir -p "$GSTACK_STATE_ROOT" 2>/dev/null
+mkdir "$LOCK_DIR" 2>/dev/null || refuse "another gstack updater holds $LOCK_DIR (pid $(cat "$LOCK_DIR/pid" 2>/dev/null || echo unknown))" "wait for it to finish, then re-run"
+echo "$$" > "$LOCK_DIR/pid"
+trap '[ "$(cat "$LOCK_DIR/pid" 2>/dev/null)" = "$$" ] && rm -rf "$LOCK_DIR" 2>/dev/null' EXIT
+
+git -C "$ROOT" merge --ff-only -q FETCH_HEAD 2>/dev/null || refuse "git merge --ff-only FETCH_HEAD failed" "git -C $ROOT status, then re-run"
+NEW=$(head -1 "$ROOT/VERSION")
+echo "gstack-upgrade: upgraded $INSTALLED -> $NEW"
+rm -rf "$LOCK_DIR"; trap - EXIT
+
+[ "$REINSTALL" -eq 1 ] || exit 0
+reinstall "$INSTALLED"

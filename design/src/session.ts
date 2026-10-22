@@ -1,9 +1,10 @@
 /**
  * Session state management for multi-turn design iteration.
- * Session files are JSON in /tmp, keyed by PID + timestamp.
+ * Session files are JSON in the OS temp directory, keyed by PID + timestamp.
  */
 
 import fs from "fs";
+import os from "os";
 import path from "path";
 
 export interface DesignSession {
@@ -27,7 +28,7 @@ export function createSessionId(): string {
  * Get the file path for a session.
  */
 export function sessionPath(sessionId: string): string {
-  return path.join("/tmp", `design-session-${sessionId}.json`);
+  return path.join(os.tmpdir(), `design-session-${sessionId}.json`);
 }
 
 /**

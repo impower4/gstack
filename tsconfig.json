@@ -1,0 +1,39 @@
+{
+  "compilerOptions": {
+    "target": "ESNext",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "lib": [
+      "ESNext",
+      "DOM"
+    ],
+    "types": [
+      "bun"
+    ],
+    "strict": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "resolveJsonModule": true,
+    "allowImportingTsExtensions": true
+  },
+  "include": [
+    "browse/src/**/*.ts",
+    "browse/scripts/**/*.ts",
+    "lib/**/*.ts",
+    "scripts/**/*.ts",
+    "make-pdf/src/**/*.ts",
+    "design/src/**/*.ts",
+    "bin/**/*.ts",
+    "autoplan/bin/**/*.ts",
+    "hosts/**/*.ts",
+    "ios-qa/daemon/src/**/*.ts",
+    "ios-qa/scripts/**/*.ts",
+    ".github/scripts/**/*.ts"
+  ],
+  "exclude": [
+    "lib/diagram-render/**",
+    "**/node_modules/**",
+    "**/dist/**",
+    "**/*.test.ts"
+  ]
+}

@@ -1,0 +1,108 @@
+{
+  "workstream": "W5 review resolvers",
+  "recordedAt": "96764e80",
+  "sources": {
+    "scripts/resolvers/review.ts": {
+      "e2e": [
+        "autoplan-dual-voice",
+        "carve-section-loading-browse",
+        "carve-section-loading-codex",
+        "carve-section-loading-design-consultation",
+        "carve-section-loading-design-html",
+        "carve-section-loading-design-shotgun",
+        "carve-section-loading-document-release",
+        "carve-section-loading-land-and-deploy",
+        "carve-section-loading-plan-design-review",
+        "carve-section-loading-plan-devex-review",
+        "carve-section-loading-plan-eng-review",
+        "carve-section-loading-qa",
+        "carve-section-loading-retro",
+        "carve-section-loading-review",
+        "carve-section-loading-setup-gbrain",
+        "carve-section-loading-spec",
+        "llm-judge-recommendation",
+        "office-hours-section-loading",
+        "outside-plan-disabled-no-fallback",
+        "outside-voice-claude-code-to-codex",
+        "outside-voice-codex-to-claude-code",
+        "plan-ceo-finding-floor",
+        "plan-ceo-review-plan-mode",
+        "plan-ceo-review-prosons-cadence",
+        "plan-ceo-section-loading",
+        "plan-ceo-split-overflow",
+        "plan-design-finding-floor",
+        "plan-design-review-plan-mode",
+        "plan-devex-finding-floor",
+        "plan-devex-review-plan-mode",
+        "plan-eng-coverage-audit",
+        "plan-eng-finding-floor",
+        "plan-eng-multi-finding-batching",
+        "plan-eng-review",
+        "plan-eng-review-artifact",
+        "plan-eng-review-format-coverage",
+        "plan-eng-review-format-kind",
+        "plan-eng-review-plan-mode",
+        "plan-mode-no-op",
+        "plan-review-prosons-format",
+        "plan-review-report",
+        "review-army-delivery-audit",
+        "review-dashboard-via",
+        "review-exploratory-small-cli",
+        "shared-libs-review-index-flags",
+        "shared-libs-review-lifecycle",
+        "shared-libs-review-path-eligibility",
+        "shared-libs-review-prior-coverage",
+        "shared-libs-review-revalidation",
+        "ship-exploratory-late-input",
+        "ship-exploratory-plan-checks",
+        "ship-exploratory-small-cli",
+        "ship-exploratory-unavailable",
+        "ship-skipped-queued-finding"
+      ],
+      "llmJudge": [
+        "plan-design-review/SKILL.md passes",
+        "plan-eng-review/SKILL.md sections",
+        "review/SKILL.md workflow",
+        "ship/SKILL.md workflow"
+      ]
+    },
+    "scripts/resolvers/design.ts": {
+      "e2e": [
+        "autoplan-dual-voice",
+        "design-consultation-core",
+        "design-consultation-research",
+        "design-html-slop-gate",
+        "design-review-detector-shim",
+        "design-review-detector-shim-dom",
+        "design-review-fix",
+        "design-review-plugin-handoff",
+        "plan-design-with-ui-scope"
+      ],
+      "llmJudge": [
+        "design-consultation/SKILL.md research",
+        "plan-design-review/SKILL.md passes"
+      ]
+    }
+  },
+  "modules": {
+    "scripts/resolvers/review-dashboard.ts": [
+      "scripts/resolvers/review.ts"
+    ],
+    "scripts/resolvers/plan-gates.ts": [
+      "scripts/resolvers/review.ts"
+    ],
+    "scripts/resolvers/spec-review.ts": [
+      "scripts/resolvers/review.ts"
+    ],
+    "scripts/resolvers/outside-voice-steps.ts": [
+      "scripts/resolvers/review.ts"
+    ],
+    "scripts/resolvers/review-scope.ts": [
+      "scripts/resolvers/review.ts"
+    ],
+    "scripts/resolvers/outside-voice.ts": [
+      "scripts/resolvers/review.ts",
+      "scripts/resolvers/design.ts"
+    ]
+  }
+}

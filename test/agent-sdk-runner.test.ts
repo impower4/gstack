@@ -35,6 +35,8 @@ import {
   fanoutPass,
   type OverlayFixture,
 } from '../test/fixtures/overlay-nudges';
+import { firstAssistantMessageToolCount } from './helpers/overlay-measurement';
+import { CLAUDE_CAPTURE_EVAL_MODEL } from '../lib/eval-model';
 
 // ---------------------------------------------------------------------------
 // Stub SDK event builders
@@ -45,7 +47,7 @@ function uuid(): string {
   return `00000000-0000-0000-0000-${String(++uuidCounter).padStart(12, '0')}`;
 }
 
-function systemInit(model = 'claude-opus-4-7', version = '2.1.117'): SDKMessage {
+function systemInit(model = CLAUDE_CAPTURE_EVAL_MODEL, version = '2.1.117'): SDKMessage {
   return {
     type: 'system',
     subtype: 'init',
@@ -77,7 +79,7 @@ function assistantTurn(
       id: 'msg_' + uuid(),
       type: 'message',
       role: 'assistant',
-      model: 'claude-opus-4-7',
+      model: 'claude-sonnet-4-6',
       content: blocks.map((b) => ({ ...b })),
       stop_reason: 'end_turn',
       stop_sequence: null,
@@ -259,7 +261,7 @@ describe('runAgentSdkTest — happy path', () => {
     expect(result.turnsUsed).toBe(2);
     expect(result.costUsd).toBe(0.05);
     expect(result.sdkClaudeCodeVersion).toBe('2.1.117');
-    expect(result.model).toBe('claude-opus-4-7');
+    expect(result.model).toBe(CLAUDE_CAPTURE_EVAL_MODEL);
     expect(result.firstResponseMs).toBeGreaterThanOrEqual(0);
   });
 
@@ -311,6 +313,98 @@ describe('runAgentSdkTest — happy path', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Terminal usage, including SDK errors thrown after a terminal event
+// ---------------------------------------------------------------------------
+
+describe('runAgentSdkTest — terminal usage', () => {
+  for (const throwsAfterTerminal of [false, true]) {
+    test(`preserves max-turns terminal usage through serialization (${throwsAfterTerminal ? 'then throws' : 'EOF'})`, async () => {
+      freshSem();
+      const terminal = {
+        ...resultRateLimit(), subtype: 'error_max_turns', num_turns: 26,
+        total_cost_usd: 0.5610850000000001,
+        errors: ['Reached maximum number of turns (25)'],
+      } as SDKMessage;
+      // Assistant event chunks are not the SDK's authoritative turn count.
+      const stream = [systemInit(), assistantTurn([{ type: 'text', text: 'working' }]),
+        assistantTurn([{ type: 'text', text: 'still working' }]), terminal];
+      let calls = 0;
+      const queryProvider: QueryProvider = () => {
+        calls++;
+        return (async function* () {
+          yield* stream;
+          if (throwsAfterTerminal) throw new Error('Reached maximum number of turns (25)');
+        })() as unknown as Query;
+      };
+      const result = await runAgentSdkTest({ ...BASE_OPTS, queryProvider });
+      expect(calls).toBe(1);
+      expect(result.exitReason).toBe('error_max_turns');
+      expect(result.assistantTurns).toHaveLength(2);
+      expect({ turnsUsed: result.turnsUsed, costUsd: result.costUsd })
+        .toEqual({ turnsUsed: 26, costUsd: 0.5610850000000001 });
+      expect(result.events).toEqual(stream);
+      const stored = JSON.parse(JSON.stringify(toSkillTestResult(result)));
+      expect(stored.exitReason).toBe('error_max_turns');
+      expect(stored.costEstimate.turnsUsed).toBe(26);
+      expect(stored.costEstimate.estimatedCost).toBe(0.5610850000000001);
+      expect(stored.transcript.at(-1)).toEqual(terminal);
+    });
+  }
+
+  for (const subtype of ['error_during_execution', 'error_max_budget_usd']) {
+    test(`preserves non-rate-limit ${subtype} terminal fields`, async () => {
+      freshSem();
+      const terminal = { ...resultRateLimit(), subtype, num_turns: 3,
+        total_cost_usd: 0.25, errors: ['model execution stopped'] } as SDKMessage;
+      const stub: StubConfig = { streams: [[systemInit(), terminal]], calls: [] };
+      const result = await runAgentSdkTest({ ...BASE_OPTS, queryProvider: makeStubProvider(stub) });
+      expect(stub.calls).toHaveLength(1);
+      expect(result.exitReason).toBe(subtype);
+      expect(result.turnsUsed).toBe(3);
+      expect(result.costUsd).toBe(0.25);
+      expect(result.events.at(-1)).toEqual(terminal);
+    });
+  }
+
+  test('keeps the existing unknown-usage fallback when max turns throws without a terminal', async () => {
+    freshSem();
+    const queryProvider: QueryProvider = () => (async function* () {
+      yield systemInit();
+      yield assistantTurn([{ type: 'text', text: 'partial output' }]);
+      throw new Error('Reached maximum number of turns (25)');
+    })() as unknown as Query;
+    const result = await runAgentSdkTest({ ...BASE_OPTS, queryProvider });
+    expect(result.exitReason).toBe('error_max_turns');
+    expect(result.turnsUsed).toBe(1);
+    expect(result.costUsd).toBe(0); // Still unknown, not a zero-cost billing claim.
+    expect(result.output).toBe('partial output');
+    expect(result.events.some(event => event.type === 'result')).toBe(false);
+  });
+
+  test('does not swallow a generic error after a terminal event', async () => {
+    freshSem();
+    const failure = new Error('stream transport failed after terminal');
+    const queryProvider: QueryProvider = () => (async function* () {
+      yield resultSuccess(0.1, 2);
+      throw failure;
+    })() as unknown as Query;
+    await expect(runAgentSdkTest({ ...BASE_OPTS, queryProvider })).rejects.toBe(failure);
+  });
+
+  test('a max-turns throw remains an error even after a prior success terminal', async () => {
+    freshSem();
+    const queryProvider: QueryProvider = () => (async function* () {
+      yield resultSuccess(0.1, 2);
+      throw new Error('Reached maximum number of turns (2)');
+    })() as unknown as Query;
+    const result = await runAgentSdkTest({ ...BASE_OPTS, queryProvider });
+    expect(result.exitReason).toBe('error_max_turns');
+    expect(result.turnsUsed).toBe(2);
+    expect(result.costUsd).toBe(0.1);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Options propagation
 // ---------------------------------------------------------------------------
 
@@ -347,7 +441,13 @@ describe('runAgentSdkTest — options propagation', () => {
     expect(opts.permissionMode).toBe('bypassPermissions');
     expect(opts.allowDangerouslySkipPermissions).toBe(true);
     expect(opts.settingSources).toEqual([]);
-    expect(opts.env).toEqual({ ANTHROPIC_API_KEY: 'fake' });
+    // env is the COMPLETE hermetic env with the per-test override merged
+    // last — partial pass-through was the documented SDK auth-breaker
+    // (Options.env replaces the child's entire environment).
+    expect(opts.env?.ANTHROPIC_API_KEY).toBe('fake');
+    expect(opts.env?.PATH).toBeTruthy();
+    expect(opts.env?.CLAUDE_CONFIG_DIR).toMatch(/\/\.claude$/);
+    expect(opts.env?.GSTACK_HOME).toContain('gstack-home');
     expect(opts.pathToClaudeCodeExecutable).toBe('/fake/path/claude');
   });
 
@@ -638,6 +738,58 @@ describe('rate-limit detectors', () => {
 // ---------------------------------------------------------------------------
 
 describe('runAgentSdkTest — concurrency', () => {
+  test('admission runs only once across a rate-limit retry', async () => {
+    __resetSemaphoreForTests(1);
+    let admissions = 0;
+    const stub: StubConfig = {
+      streams: [[systemInit(), resultRateLimit()], [systemInit(), resultSuccess()]], calls: [],
+    };
+    await runAgentSdkTest({ ...BASE_OPTS, queryProvider: makeStubProvider(stub), maxRetries: 1,
+      onAdmission: () => { admissions++; } });
+    expect(admissions).toBe(1);
+    expect(stub.calls).toHaveLength(2);
+  });
+
+  test.each(['throw', 'abort'] as const)('admission %s prevents transport creation and releases its slot', async mode => {
+    __resetSemaphoreForTests(1);
+    const controller = new AbortController(), failure = new Error(`admission ${mode}`);
+    const stub: StubConfig = { streams: [[systemInit(), resultSuccess()]], calls: [] };
+    const queryProvider = makeStubProvider(stub);
+    const failed = runAgentSdkTest({ ...BASE_OPTS, queryProvider, signal: controller.signal,
+      onAdmission: () => { if (mode === 'throw') throw failure; controller.abort(failure); } });
+    const sibling = runAgentSdkTest({ ...BASE_OPTS, queryProvider });
+    const results = await Promise.allSettled([failed, sibling]);
+    expect(results[0]).toEqual({ status: 'rejected', reason: failure });
+    expect(results[1].status).toBe('fulfilled');
+    expect(stub.calls).toHaveLength(1);
+  });
+
+  test('queued cancellation never calls admission or transport and leaves later siblings runnable', async () => {
+    __resetSemaphoreForTests(1);
+    const controller = new AbortController(), reason = new Error('queued cancellation');
+    let unblock!: () => void, started!: () => void;
+    const held = new Promise<void>(resolve => { unblock = resolve; });
+    const ready = new Promise<void>(resolve => { started = resolve; });
+    const provider: QueryProvider = () => (async function* () {
+      started(); await held; yield resultSuccess();
+    })() as unknown as Query;
+    const occupying = runAgentSdkTest({ ...BASE_OPTS, queryProvider: provider });
+    await ready;
+    let admissions = 0;
+    const stub: StubConfig = { streams: [[resultSuccess()]], calls: [] };
+    const queryProvider = makeStubProvider(stub);
+    const queued = runAgentSdkTest({ ...BASE_OPTS, queryProvider, signal: controller.signal,
+      onAdmission: () => { admissions++; } });
+    const sibling = runAgentSdkTest({ ...BASE_OPTS, queryProvider });
+    controller.abort(reason);
+    const cancelled = await Promise.allSettled([queued]);
+    expect(cancelled[0]).toEqual({ status: 'rejected', reason });
+    expect(admissions).toBe(0); expect(stub.calls).toHaveLength(0);
+    unblock();
+    await Promise.all([occupying, sibling]);
+    expect(stub.calls).toHaveLength(1);
+  });
+
   test('process-level semaphore caps concurrent queries', async () => {
     __resetSemaphoreForTests(2);
     let inFlight = 0;
@@ -693,7 +845,7 @@ describe('toSkillTestResult', () => {
     expect(s.output).toBe('hi');
     expect(s.costEstimate.estimatedCost).toBe(0.02);
     expect(s.costEstimate.turnsUsed).toBe(1);
-    expect(s.model).toBe('claude-opus-4-7');
+    expect(s.model).toBe(CLAUDE_CAPTURE_EVAL_MODEL);
     expect(s.firstResponseMs).toBeNumber();
     expect(s.maxInterTurnMs).toBeNumber();
     expect(s.transcript).toBeArray();
@@ -709,7 +861,7 @@ describe('validateFixtures', () => {
     return {
       id: 'test-fixture',
       overlayPath: 'model-overlays/opus-4-7.md',
-      model: 'claude-opus-4-7',
+      model: 'claude-sonnet-4-6',
       trials: 10,
       setupWorkspace: () => {},
       userPrompt: 'go',
@@ -797,6 +949,54 @@ describe('validateFixtures', () => {
 // ---------------------------------------------------------------------------
 // fanoutPass predicate
 // ---------------------------------------------------------------------------
+
+describe('overlay first logical message metric', () => {
+  // Public SDK shape: separate assistant events share one message.id, and
+  // tool results may arrive between them. The initial empty public event
+  // carries no inspected private content. All IDs here are synthetic.
+  function splitResponse(): AgentSdkResult {
+    const initial = systemInit();
+    const event = (messageId: string, id?: string) => {
+      const e = assistantTurn(id ? [{ type: 'tool_use', name: 'Read', input: {} }] : []) as any;
+      e.message.id = messageId;
+      if (id) e.message.content[0].id = id;
+      return e;
+    };
+    const turns = [event('first'), event('first', 'alpha'), event('first', 'beta'), event('first', 'gamma'), event('later', 'later-tool')];
+    const result = { type: 'user', session_id: 'test-session', parent_tool_use_id: null,
+      message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'alpha', content: 'Alpha' }] } };
+    return { events: [initial, turns[0], turns[1], result, ...turns.slice(2)], assistantTurns: turns } as unknown as AgentSdkResult;
+  }
+  test('counts one split first response across interleaved results independently of paid fixture registration', () => {
+    expect(firstAssistantMessageToolCount(splitResponse())).toBe(3);
+  });
+  test('a combined message and repeated tool ID have the same count', () => {
+    for (const combined of [false, true]) {
+      const r = splitResponse();
+      if (combined) {
+        (r.assistantTurns[0]!.message.content as any[]).push(...r.assistantTurns.slice(1, 4).flatMap(e => e.message.content as any[]));
+      } else r.assistantTurns.splice(3, 0, structuredClone(r.assistantTurns[1]!));
+      expect(firstAssistantMessageToolCount(r)).toBe(3);
+    }
+  });
+  test('child, foreign-session and later-response tools cannot inflate the first response', () => {
+    const r = splitResponse();
+    const foreign = structuredClone(r.assistantTurns[1]!) as any;
+    foreign.session_id = 'other-session'; foreign.message.content[0].id = 'foreign';
+    const child = structuredClone(r.assistantTurns[1]!) as any;
+    child.parent_tool_use_id = 'agent-tool'; child.message.content[0].id = 'child';
+    r.assistantTurns.unshift(child, foreign);
+    expect(firstAssistantMessageToolCount(r)).toBe(3);
+  });
+  test('missing first-response identity cannot borrow a later response', () => {
+    for (const field of ['id', 'session_id']) {
+      const r = splitResponse();
+      if (field === 'id') (r.assistantTurns[0]!.message as any).id = '';
+      else (r.events[0] as any).session_id = '';
+      expect(() => firstAssistantMessageToolCount(r)).toThrow(field === 'id' ? 'message.id' : 'session_id');
+    }
+  });
+});
 
 describe('fanoutPass predicate', () => {
   test('accepts mean lift >= 0.5 AND >=3/10 overlay trials >= 2', () => {

@@ -1,0 +1,29 @@
+[
+  {
+    "run": "38336400566",
+    "lane": "pr",
+    "outcome": "failed",
+    "series_identity": "e6ab470e42c602d1",
+    "artifact": "native-captures-ci-38336400566-1-eval-slices-14",
+    "available": true,
+    "entry": "38336400566-t1-fail.json"
+  },
+  {
+    "run": "38829994639",
+    "lane": "pr",
+    "outcome": "passed",
+    "series_identity": "fa9565c296b25b9f",
+    "artifact": "native-captures-ci-38829994639-1-eval-slices-14",
+    "available": true,
+    "entry": "38829994639-t1-pass.json"
+  },
+  {
+    "run": "38972920715",
+    "lane": "pr",
+    "outcome": "passed",
+    "series_identity": "fa9565c296b25b9f",
+    "artifact": "native-captures-ci-38972920715-1-eval-slices-14",
+    "available": true,
+    "entry": "38972920715-t1-pass.json"
+  }
+]

@@ -3,7 +3,7 @@
  */
 
 import { describe, test, expect, beforeAll, afterAll } from 'bun:test';
-import { generateGalleryHtml } from '../src/gallery';
+import { generateGalleryHtml, listVariantImages } from '../src/gallery';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -135,5 +135,39 @@ describe('Gallery generation', () => {
     expect(html).not.toContain('<link');
     // All images are base64
     expect(html).toContain('data:image/png;base64,');
+  });
+});
+
+describe('Gallery with never-overwrite rounds', () => {
+  const setMtime = (file: string, seconds: number) => fs.utimesSync(file, seconds, seconds);
+
+  // Value: protects=bumped names (variant-A-2.png) are listed and approved_path marks the exact image, not the letter;
+  //   fails_when=the regex drops -N suffixes or marking falls back to the letter when approved_path exists; why_new=#1529 gallery gap; seam=none
+  test('lists bumped variants and marks the one approved_path names', () => {
+    const session = path.join(tmpDir, 'bumped', 'home-20261003');
+    fs.mkdirSync(session, { recursive: true });
+    createTestPng(path.join(session, 'variant-A.png'));
+    createTestPng(path.join(session, 'variant-A-2.png'));
+    fs.writeFileSync(path.join(session, 'approved.json'), JSON.stringify({ approved_variant: 'A', approved_path: 'variant-A-2.png' }));
+    expect(listVariantImages(session).map(f => path.basename(f)).sort()).toEqual(['variant-A-2.png', 'variant-A.png']);
+    const html = generateGalleryHtml(path.join(tmpDir, 'bumped'));
+    expect(html.match(/class="gallery-variant approved"/g)).toHaveLength(1);
+    expect(html).toMatch(/class="gallery-variant approved">\s*<img[^>]+alt="Variant A-2"/);
+    expect(html).toContain('letters do not identify rounds');
+  });
+
+  // Value: protects=history order is mtime then name, and the current board follows in board-images.json order even when files finished out of order;
+  //   fails_when=the gallery sorts by name only or ignores board-images.json; why_new=eng gallery semantics; seam=none
+  test('orders history by mtime then name, then the board in board-images.json order', () => {
+    const session = path.join(tmpDir, 'ordered');
+    fs.mkdirSync(session, { recursive: true });
+    for (const f of ['variant-B.png', 'variant-A.png']) { createTestPng(path.join(session, f)); setMtime(path.join(session, f), 1_000); }
+    const round2 = ['variant-A-2.png', 'variant-B-2.png', 'variant-C-2.png'];
+    [3_000, 2_500, 2_000].forEach((t, i) => { createTestPng(path.join(session, round2[i])); setMtime(path.join(session, round2[i]), t); });
+    expect(listVariantImages(session).map(f => path.basename(f))).toEqual(
+      ['variant-A.png', 'variant-B.png', 'variant-C-2.png', 'variant-B-2.png', 'variant-A-2.png']);
+    fs.writeFileSync(path.join(session, 'board-images.json'), JSON.stringify(round2.map(f => path.join(session, f))));
+    expect(listVariantImages(session).map(f => path.basename(f))).toEqual(
+      ['variant-A.png', 'variant-B.png', 'variant-A-2.png', 'variant-B-2.png', 'variant-C-2.png']);
   });
 });

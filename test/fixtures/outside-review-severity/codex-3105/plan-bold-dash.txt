@@ -1,0 +1,11 @@
+Found six P1/P2 issues. The plan is close, but the scanner still has gaps.
+
+1. **P1 — Shell heredocs behind reserved words escape scanning.** `bin/gstack-redact-prepush:546`
+   A heredoc opened after `then` or `do` is never handed to the scanner.
+2. **P2 — Expanding heredocs lose the preceding failure context.** `bin/gstack-redact-prepush:562`
+3. **P1 — The allowlist matches by basename.** `bin/gstack-redact-prepush:310`
+4. **P2 — The fixture never exercises CRLF input.** `test/redact-prepush.test.ts:88`
+5. **P2 — The message omits the fix command.** `bin/gstack-redact-prepush:601`
+6. **P1 — A failed scan still exits 0 under `set +e`.** `bin/gstack-redact-prepush:640`
+
+Verdict: not ready (6 P1/P2)

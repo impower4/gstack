@@ -1,0 +1,6 @@
+The change is small; one advisory issue.
+
+Review comment:
+
+- [P2] Retry helper ignores the attempt cap — /repo/retry.js:1-1
+  retry() increments without checking the configured maximum, so callers can loop past it.

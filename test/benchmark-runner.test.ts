@@ -14,6 +14,8 @@ import { test, expect } from 'bun:test';
 import { formatTable, formatJson, formatMarkdown, type BenchmarkReport } from './helpers/benchmark-runner';
 import { estimateCostUsd, PRICING } from './helpers/pricing';
 import { missingTools, TOOL_COMPATIBILITY } from './helpers/tool-map';
+import { CLAUDE_CAPTURE_EVAL_MODEL, CLAUDE_JUDGE_EVAL_MODEL } from '../lib/eval-model';
+import { CODEX_FRONTIER_MODEL } from '../scripts/resolvers/constants';
 
 test('estimateCostUsd returns 0 for unknown model (no crash)', () => {
   const cost = estimateCostUsd({ input: 1000, output: 500 }, 'unknown-model-7b');
@@ -21,20 +23,37 @@ test('estimateCostUsd returns 0 for unknown model (no crash)', () => {
 });
 
 test('estimateCostUsd computes correctly for known Claude model', () => {
-  // claude-opus-4-7: $15/MTok input, $75/MTok output
-  // 1M input + 0.5M output = $15 + $37.50 = $52.50
+  // claude-opus-4-7: $5/MTok input, $25/MTok output (platform.claude.com pricing, fetched 2026-10-12)
+  // 1M input + 0.5M output = $5 + $12.50 = $17.50
   const cost = estimateCostUsd({ input: 1_000_000, output: 500_000 }, 'claude-opus-4-7');
-  expect(cost).toBeCloseTo(52.50, 2);
+  expect(cost).toBeCloseTo(17.50, 2);
+});
+
+// Opus 5.5 costs $4/MTok input and $20/MTok output; Fable 5.1 (the judge) and Astra $10 and $50.
+for (const [model, usd] of [[CLAUDE_CAPTURE_EVAL_MODEL, 0.008], [CLAUDE_JUDGE_EVAL_MODEL, 0.02], [CODEX_FRONTIER_MODEL, 0.02]] as const) {
+  test(`estimateCostUsd prices the current ${model} default at its standard rate`, () => {
+    expect(estimateCostUsd({ input: 1000, output: 200 }, model)).toBe(usd);
+  });
+}
+
+test('Fable cache reads use its explicit rate alongside uncached input and output', () => {
+  expect(estimateCostUsd({ input: 0, output: 0, cached: 1_000_000 }, 'claude-fable-5-1')).toBe(0.25);
+  // $0.01 uncached + $0.01 output + $0.001 cache reads, not the legacy 10% rate.
+  expect(estimateCostUsd({ input: 1000, output: 200, cached: 4000 }, 'claude-fable-5-1')).toBe(0.021);
+});
+
+test('Astra cache reads use its standard cached-input rate', () => {
+  expect(estimateCostUsd({ input: 0, output: 0, cached: 1_000_000 }, 'gpt-6-astra')).toBe(1);
 });
 
 test('estimateCostUsd applies cached input discount alongside uncached input', () => {
   // tokens.input is uncached-only; tokens.cached is disjoint cache-reads at 10%.
-  // 0 uncached input, 1M cached → 10% of 15 = $1.50
+  // 0 uncached input, 1M cached → 10% of 5 = $0.50
   const cost1 = estimateCostUsd({ input: 0, output: 0, cached: 1_000_000 }, 'claude-opus-4-7');
-  expect(cost1).toBeCloseTo(1.50, 2);
-  // 500K uncached input + 500K cached → $7.50 + $0.75 = $8.25
+  expect(cost1).toBeCloseTo(0.50, 2);
+  // 500K uncached input + 500K cached → $2.50 + $0.25 = $2.75
   const cost2 = estimateCostUsd({ input: 500_000, output: 0, cached: 500_000 }, 'claude-opus-4-7');
-  expect(cost2).toBeCloseTo(8.25, 2);
+  expect(cost2).toBeCloseTo(2.75, 2);
 });
 
 test('PRICING table covers the key model families', () => {

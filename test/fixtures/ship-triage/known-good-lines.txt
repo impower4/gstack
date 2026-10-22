@@ -1,0 +1,4 @@
+## Triage
+- FAIL: truncate(null, 5) — **IN-BRANCH**: src/string.js was added on feature/string-utils.
+- FAIL: divide — **PRE-EXISTING**: src/math.js is identical on main.
+Recommendation (solo repo): fix the pre-existing failure now as well.

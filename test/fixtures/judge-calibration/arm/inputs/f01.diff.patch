@@ -1,0 +1,117 @@
+diff --git a/app.js b/app.js
+index d211058..8c92d60 100644
+--- a/app.js
++++ b/app.js
+@@ -1,26 +1,30 @@
+ // Tiny in-memory notes API. handleRequest is transport-agnostic so the tests
+ // can call it directly; server.js wires it to node:http.
+-let nextId = 1;
+-const notes = new Map();
++const { createNotesRepository } = require('./notes-repository');
++
++const repo = createNotesRepository(process.env.NOTES_STORE || 'memory');
+ 
+ function handleRequest(method, path, body) {
+   if (method === 'GET' && path === '/notes') {
+-    return { status: 200, body: [...notes.values()] };
++    return { status: 200, body: repo.findAll() };
+   }
+   if (method === 'POST' && path === '/notes') {
+     if (!body || typeof body.text !== 'string' || !body.text.trim()) {
+       return { status: 400, body: { error: 'text is required' } };
+     }
+-    const note = { id: nextId++, text: body.text.trim() };
+-    notes.set(note.id, note);
+-    return { status: 201, body: note };
++    return { status: 201, body: repo.create({ text: body.text.trim() }) };
++  }
++  const match = /^\/notes\/(\d+)$/.exec(path);
++  if (method === 'DELETE' && match) {
++    return repo.deleteById(Number(match[1]))
++      ? { status: 204, body: undefined }
++      : { status: 404, body: { error: 'not found' } };
+   }
+   return { status: 404, body: { error: 'not found' } };
+ }
+ 
+ function resetForTests() {
+-  nextId = 1;
+-  notes.clear();
++  repo.clear();
+ }
+ 
+ module.exports = { handleRequest, resetForTests };
+diff --git a/notes-repository.js b/notes-repository.js
+new file mode 100644
+index 0000000..ce12933
+--- /dev/null
++++ b/notes-repository.js
+@@ -0,0 +1,55 @@
++// Storage abstraction so the API can swap backends (memory, sqlite, redis)
++// without touching request handling.
++class NotesRepository {
++  findAll() { throw new Error('not implemented'); }
++  findById(_id) { throw new Error('not implemented'); }
++  create(_fields) { throw new Error('not implemented'); }
++  update(_id, _fields) { throw new Error('not implemented'); }
++  deleteById(_id) { throw new Error('not implemented'); }
++  clear() { throw new Error('not implemented'); }
++}
++
++class InMemoryNotesRepository extends NotesRepository {
++  constructor() {
++    super();
++    this.nextId = 1;
++    this.notes = new Map();
++  }
++
++  findAll() { return [...this.notes.values()]; }
++
++  findById(id) { return this.notes.get(id) ?? null; }
++
++  create(fields) {
++    const note = { id: this.nextId++, ...fields };
++    this.notes.set(note.id, note);
++    return note;
++  }
++
++  update(id, fields) {
++    const existing = this.findById(id);
++    if (!existing) return null;
++    const updated = { ...existing, ...fields, id };
++    this.notes.set(id, updated);
++    return updated;
++  }
++
++  deleteById(id) { return this.notes.delete(id); }
++
++  clear() {
++    this.nextId = 1;
++    this.notes.clear();
++  }
++}
++
++const REPOSITORIES = {
++  memory: () => new InMemoryNotesRepository(),
++};
++
++function createNotesRepository(kind = 'memory') {
++  const factory = REPOSITORIES[kind];
++  if (!factory) throw new Error(`unknown notes store: ${kind}`);
++  return factory();
++}
++
++module.exports = { NotesRepository, InMemoryNotesRepository, createNotesRepository };
+diff --git a/run-tests.js b/run-tests.js
+index 3278093..d1d19c1 100644
+--- a/run-tests.js
++++ b/run-tests.js
+@@ -14,4 +14,8 @@ assert.strictEqual(listed.body.length, 1);
+ assert.strictEqual(handleRequest('POST', '/notes', {}).status, 400);
+ assert.strictEqual(handleRequest('GET', '/nope', null).status, 404);
+ 
++assert.strictEqual(handleRequest('DELETE', `/notes/${created.body.id}`, null).status, 204);
++assert.strictEqual(handleRequest('GET', '/notes', null).body.length, 0);
++assert.strictEqual(handleRequest('DELETE', '/notes/42', null).status, 404);
++
+ console.log('all notes tests passed');

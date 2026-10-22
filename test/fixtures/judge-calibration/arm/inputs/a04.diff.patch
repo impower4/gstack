@@ -1,0 +1,46 @@
+diff --git a/src/settings.js b/src/settings.js
+index 92fc33c..a4684af 100644
+--- a/src/settings.js
++++ b/src/settings.js
+@@ -4,8 +4,22 @@ export const DEFAULT_SETTINGS = {
+   recentTrails: [],
+ };
+ 
++function deepClone(value) {
++  if (value === null || typeof value !== 'object') return value;
++  if (value instanceof Date) return new Date(value.getTime());
++  if (value instanceof Map) {
++    return new Map([...value].map(([k, v]) => [deepClone(k), deepClone(v)]));
++  }
++  if (Array.isArray(value)) return value.map(deepClone);
++  const copy = {};
++  for (const key of Object.keys(value)) {
++    copy[key] = deepClone(value[key]);
++  }
++  return copy;
++}
++
+ export function applyOverrides(settings, overrides) {
+-  const next = settings;
++  const next = deepClone(settings);
+   for (const [key, value] of Object.entries(overrides)) {
+     if (value && typeof value === 'object' && !Array.isArray(value)) {
+       Object.assign(next[key], value);
+diff --git a/src/settings.test.js b/src/settings.test.js
+new file mode 100644
+index 0000000..bcbddc1
+--- /dev/null
++++ b/src/settings.test.js
+@@ -0,0 +1,12 @@
++import { test } from 'node:test';
++import assert from 'node:assert/strict';
++import { DEFAULT_SETTINGS, applyOverrides } from './settings.js';
++
++test('applyOverrides leaves its input untouched', () => {
++  const before = JSON.stringify(DEFAULT_SETTINGS);
++  const next = applyOverrides(DEFAULT_SETTINGS, { units: 'imperial', theme: { mode: 'dark' } });
++  assert.equal(JSON.stringify(DEFAULT_SETTINGS), before);
++  assert.equal(next.units, 'imperial');
++  assert.deepEqual(next.theme, { mode: 'dark', accent: '#2f5d50' });
++  assert.notEqual(next.theme, DEFAULT_SETTINGS.theme);
++});

@@ -14,8 +14,8 @@
  *
  * Why this skill is special: unlike plan-eng-review / plan-design-review /
  * plan-devex-review (whose smokes accept either 'asked' or 'plan_ready'),
- * plan-ceo-review's template mandates Step 0A premise challenge (3 baked-in
- * questions) AND Step 0F mode selection BEFORE any plan write. There is no
+ * plan-ceo-review's template mandates the Step 0 question flow, including
+ * Step 0E mode selection, BEFORE proceeding with the review. There is no
  * legitimate path to plan_ready that does not first emit a skill-question
  * numbered prompt.
  *
@@ -33,44 +33,81 @@
  * See test/helpers/claude-pty-runner.ts for runner internals.
  */
 
-import { describe, test } from 'bun:test';
+import { test } from 'bun:test';
+import { CAPTURE_LONG_MS } from './helpers/eval-budgets';
+import { describeE2ETier } from './helpers/e2e-gate';
+import { createPlanCountFixture } from './helpers/plan-count-fixture';
 import {
   runPlanSkillObservation,
   assertReportAtBottomIfPlanWritten,
 } from './helpers/claude-pty-runner';
 
-const shouldRun = !!process.env.EVALS && process.env.EVALS_TIER === 'gate';
-const describeE2E = shouldRun ? describe : describe.skip;
+const describeE2E = describeE2ETier('gate');
+
+// This smoke measures the first review question, so give it a small product
+// plan instead of making the checkout that supplies skills its review target.
+const PLAN = `# Plan: Archive completed tasks
+
+## Goal
+Tiny Tasks is a personal task tracker. Completed tasks stay in the main list,
+making it harder to find unfinished work after a busy week. Let users archive
+completed tasks without permanently deleting their history.
+
+## Proposed change
+- Add an optional archivedAt field to the existing task model in src/tasks.ts.
+- Add an Archive completed action; unfinished tasks remain in the active list.
+- Add an archive view with a Restore action for accidentally archived tasks.
+- Keep older saved tasks compatible when archivedAt is absent.
+
+## Validation
+Test mixed active/completed tasks, an empty archive, restoring a task, and
+loading existing saved tasks. Pilot with five users and check whether they
+can find their next unfinished task more easily.
+`;
 
 describeE2E('plan-ceo-review plan-mode smoke (gate)', () => {
   test('first terminal outcome is asked (Step 0 fires before any plan write)', async () => {
-    const obs = await runPlanSkillObservation({
-      skillName: 'plan-ceo-review',
-      inPlanMode: true,
-      timeoutMs: 300_000,
-      env: { QUESTION_TUNING: 'false', EXPLAIN_LEVEL: 'default' },
-    });
+    const fixture = createPlanCountFixture(PLAN, { files: {
+      'README.md': '# Tiny Tasks\n\nA personal task tracker; src/tasks.ts owns the task model and list filtering.\n',
+      'src/tasks.ts': 'export type Task = { id: string; title: string; completed: boolean };\n' +
+        'export function visibleTasks(tasks: Task[]): Task[] { return tasks; }\n',
+    } });
+    try {
+      const obs = await runPlanSkillObservation({
+        skillName: 'plan-ceo-review',
+        inPlanMode: true,
+        cwd: fixture.cwd,
+        // 420s, not 300s: measured 2026-08-11, a clean isolated pass took
+        // 295.7s (80s on a quiet main run) — 4s under the old budget — and the
+        // same run timed out at ~308s three times under concurrent eval load.
+        // Same runner-contention class as review-dashboard-via/retro-base-
+        // branch; headroom instead of a budget-edge flake in the gate lane.
+        timeoutMs: 420_000,
+        env: { ...fixture.env, QUESTION_TUNING: 'false', EXPLAIN_LEVEL: 'default' },
+      });
 
-    if (obs.outcome !== 'asked') {
-      const diagnosis =
-        obs.outcome === 'plan_ready'
-          ? `'plan_ready' first means the agent skipped Step 0 entirely and went straight to ExitPlanMode without asking.`
-          : obs.outcome === 'timeout'
-            ? `Timeout means the agent neither asked nor completed within the budget — likely hung mid-question or stuck on a permission dialog.`
-            : obs.outcome === 'silent_write'
-              ? `Silent Write/Edit fired to an unsanctioned path before any AskUserQuestion — also a Step 0 skip.`
-              : `Outcome '${obs.outcome}' is unexpected; investigate the evidence below.`;
-      throw new Error(
-        `plan-ceo-review smoke FAILED: outcome=${obs.outcome}\n` +
-          `${diagnosis}\n` +
-          `Expected 'asked'. See plan-ceo-review/SKILL.md.tmpl: the Step 0 STOP rules ` +
-          `and the "One issue = one AskUserQuestion call" rule under "CRITICAL RULE — ` +
-          `How to ask questions".\n` +
-          `summary: ${obs.summary}\n` +
-          `elapsed: ${obs.elapsedMs}ms\n` +
-          `--- evidence (last 2KB visible) ---\n${obs.evidence}`,
-      );
+      if (obs.outcome !== 'asked') {
+        const diagnosis =
+          obs.outcome === 'plan_ready'
+            ? `'plan_ready' first means the agent skipped Step 0 entirely and went straight to ExitPlanMode without asking.`
+            : obs.outcome === 'timeout'
+              ? `Timeout means the agent neither asked nor completed within the budget — likely hung mid-question or stuck on a permission dialog.`
+              : obs.outcome === 'silent_write'
+                ? `Silent Write/Edit fired to an unsanctioned path before any AskUserQuestion — also a Step 0 skip.`
+                : `Outcome '${obs.outcome}' is unexpected; investigate the evidence below.`;
+        throw new Error(
+          `plan-ceo-review smoke FAILED: outcome=${obs.outcome}\n` +
+            `${diagnosis}\n` +
+            `Expected 'asked'. See plan-ceo-review/SKILL.md.tmpl: the Step 0 STOP rules ` +
+            `and the "One decision unit = one AskUserQuestion call" rule under "How to ask questions".\n` +
+            `summary: ${obs.summary}\n` +
+            `elapsed: ${obs.elapsedMs}ms\n` +
+            `--- evidence (last 2KB visible) ---\n${obs.evidence}`,
+        );
+      }
+      assertReportAtBottomIfPlanWritten(obs);
+    } finally {
+      fixture.cleanup();
     }
-    assertReportAtBottomIfPlanWritten(obs);
-  }, 360_000);
+  }, CAPTURE_LONG_MS);
 });

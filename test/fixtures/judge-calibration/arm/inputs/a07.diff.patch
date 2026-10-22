@@ -1,0 +1,62 @@
+diff --git a/pricing.css b/pricing.css
+index e42ef7f..64ba7fb 100644
+--- a/pricing.css
++++ b/pricing.css
+@@ -1,8 +1,35 @@
++:root {
++  --page-bg: #ffffff;
++  --text: #1d1d1f;
++  --muted: #6e6e73;
++  --card-bg: #f7f7f9;
++  --card-border: #e3e3e8;
++}
++
++@media (prefers-color-scheme: dark) {
++  :root {
++    --page-bg: #121214;
++    --text: #f2f2f5;
++    --muted: #a1a1a8;
++    --card-bg: #1e1e22;
++    --card-border: #2e2e34;
++  }
++}
++
++/* Manual override hook for a future theme toggle. */
++:root[data-theme="dark"] {
++  --page-bg: #121214;
++  --text: #f2f2f5;
++  --muted: #a1a1a8;
++  --card-bg: #1e1e22;
++  --card-border: #2e2e34;
++}
++
+ body {
+   margin: 0;
+   font-family: system-ui, sans-serif;
+-  background: #ffffff;
+-  color: #1d1d1f;
++  background: var(--page-bg);
++  color: var(--text);
+ }
+ 
+ .plans {
+@@ -14,9 +41,9 @@ body {
+ 
+ .plan {
+   padding: 1.5rem;
+-  border: 1px solid #e3e3e8;
++  border: 1px solid var(--card-border);
+   border-radius: 12px;
+-  background: #f7f7f9;
++  background: var(--card-bg);
+ }
+ 
+ .plan .price {
+@@ -25,6 +52,6 @@ body {
+ }
+ 
+ .plan .fine-print {
+-  color: #6e6e73;
++  color: var(--muted);
+   font-size: 0.85rem;
+ }

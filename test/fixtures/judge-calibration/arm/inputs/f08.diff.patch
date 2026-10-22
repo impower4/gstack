@@ -1,0 +1,106 @@
+diff --git a/jobs/nightly.py b/jobs/nightly.py
+index fe76237..ebb225a 100644
+--- a/jobs/nightly.py
++++ b/jobs/nightly.py
+@@ -1,6 +1,7 @@
+ import logging
+ 
+ from exporter import run_export
++from notifications import get_notifier
+ 
+ log = logging.getLogger("nightly")
+ 
+@@ -8,8 +9,9 @@ log = logging.getLogger("nightly")
+ def main() -> None:
+     try:
+         run_export()
+-    except Exception:
++    except Exception as exc:
+         log.exception("nightly export failed")
++        get_notifier("slack").send(f":rotating_light: nightly export failed: {exc}")
+         raise
+ 
+ 
+diff --git a/notifications/__init__.py b/notifications/__init__.py
+new file mode 100644
+index 0000000..a8c1ef9
+--- /dev/null
++++ b/notifications/__init__.py
+@@ -0,0 +1,4 @@
++from notifications.base import Notifier
++from notifications.factory import get_notifier, register_notifier
++
++__all__ = ["Notifier", "get_notifier", "register_notifier"]
+diff --git a/notifications/base.py b/notifications/base.py
+new file mode 100644
+index 0000000..51bb91d
+--- /dev/null
++++ b/notifications/base.py
+@@ -0,0 +1,9 @@
++from abc import ABC, abstractmethod
++
++
++class Notifier(ABC):
++    """A destination for operational alerts (Slack, email, PagerDuty, ...)."""
++
++    @abstractmethod
++    def send(self, message: str) -> None:
++        """Deliver `message`. Implementations must never raise."""
+diff --git a/notifications/factory.py b/notifications/factory.py
+new file mode 100644
+index 0000000..b077bcc
+--- /dev/null
++++ b/notifications/factory.py
+@@ -0,0 +1,19 @@
++from typing import Callable
++
++from notifications.base import Notifier
++from notifications.slack import SlackNotifier
++
++_REGISTRY: dict[str, Callable[[], Notifier]] = {
++    "slack": SlackNotifier,
++}
++
++
++def register_notifier(kind: str, factory: Callable[[], Notifier]) -> None:
++    _REGISTRY[kind] = factory
++
++
++def get_notifier(kind: str) -> Notifier:
++    try:
++        return _REGISTRY[kind]()
++    except KeyError:
++        raise ValueError(f"unknown notifier: {kind}") from None
+diff --git a/notifications/slack.py b/notifications/slack.py
+new file mode 100644
+index 0000000..2c735df
+--- /dev/null
++++ b/notifications/slack.py
+@@ -0,0 +1,27 @@
++import json
++import logging
++import os
++import urllib.request
++
++from notifications.base import Notifier
++
++log = logging.getLogger(__name__)
++
++
++class SlackNotifier(Notifier):
++    def __init__(self, webhook_url: str | None = None, timeout: float = 5.0):
++        self.webhook_url = webhook_url or os.environ.get("SLACK_WEBHOOK_URL")
++        self.timeout = timeout
++
++    def send(self, message: str) -> None:
++        if not self.webhook_url:
++            return
++        req = urllib.request.Request(
++            self.webhook_url,
++            data=json.dumps({"text": message}).encode(),
++            headers={"Content-Type": "application/json"},
++        )
++        try:
++            urllib.request.urlopen(req, timeout=self.timeout).close()
++        except OSError:
++            log.warning("slack notification failed", exc_info=True)

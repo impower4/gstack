@@ -1,4 +1,4 @@
-#!/usr/bin/env bun
+#!/usr/bin/env -S bun --no-env-file --config=/dev/null
 /**
  * Generate gstack/llms.txt — a single discoverable index of every gstack
  * capability for AI agents.
@@ -11,6 +11,10 @@
  *
  * Output: gstack/llms.txt at repo root.
  *
+ * Skill links point at the Claude host's generated SKILL.md (the files this
+ * checkout ships). Skills the Claude host skips (claude-code) have no such
+ * file, so they are left out of the index rather than linked to a template.
+ *
  * Refresh: invoked from scripts/gen-skill-docs.ts after SKILL.md generation
  * so it regenerates automatically on every skill change.
  *
@@ -19,7 +23,9 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
-import { discoverTemplates } from './discover-skills';
+import { mkdirpSync } from '../lib/fs-utils';
+import { discoverTemplates, includesSkill } from './discover-skills';
+import claudeHost from '../hosts/claude';
 import { COMMAND_DESCRIPTIONS as BROWSE_COMMANDS } from '../browse/src/commands';
 
 const ROOT = path.resolve(import.meta.dir, '..');
@@ -28,6 +34,7 @@ const OUTPUT = path.join(ROOT, 'gstack', 'llms.txt');
 interface SkillEntry {
   name: string;
   description: string;
+  output: string;
 }
 
 /**
@@ -35,7 +42,7 @@ interface SkillEntry {
  * `name` and `description`. description: | followed by indented lines is
  * the gstack convention; we collapse those into a single paragraph.
  */
-function parseSkillFrontmatter(filePath: string): SkillEntry | null {
+function parseSkillFrontmatter(filePath: string): Omit<SkillEntry, 'output'> | null {
   const content = fs.readFileSync(filePath, 'utf-8');
   if (!content.startsWith('---')) return null;
   const end = content.indexOf('\n---', 3);
@@ -135,6 +142,7 @@ export async function generateLlmsTxt(opts: GenerateOptions = {}): Promise<Gener
   const templates = discoverTemplates(root);
   const skills: SkillEntry[] = [];
   for (const t of templates) {
+    if (!includesSkill(claudeHost, path.dirname(t.tmpl))) continue;
     const filePath = path.join(root, t.tmpl);
     const entry = parseSkillFrontmatter(filePath);
     if (!entry) {
@@ -144,7 +152,7 @@ export async function generateLlmsTxt(opts: GenerateOptions = {}): Promise<Gener
       }
       continue;
     }
-    skills.push(entry);
+    skills.push({ ...entry, output: t.output });
   }
   skills.sort((a, b) => a.name.localeCompare(b.name));
 
@@ -167,7 +175,7 @@ export async function generateLlmsTxt(opts: GenerateOptions = {}): Promise<Gener
   lines.push('');
   for (const skill of skills) {
     const summary = oneLine(skill.description);
-    lines.push(`- [/${skill.name}](${skill.name}/SKILL.md): ${summary}`);
+    lines.push(`- [/${skill.name}](${skill.output}): ${summary}`);
   }
   lines.push('');
 
@@ -224,7 +232,7 @@ export async function generateLlmsTxt(opts: GenerateOptions = {}): Promise<Gener
 export async function writeLlmsTxt(opts: GenerateOptions & { outputPath?: string } = {}): Promise<GenerateResult> {
   const result = await generateLlmsTxt(opts);
   const outputPath = opts.outputPath ?? OUTPUT;
-  fs.mkdirSync(path.dirname(outputPath), { recursive: true });
+  mkdirpSync(path.dirname(outputPath));
   fs.writeFileSync(outputPath, result.content, { encoding: 'utf-8' });
   return result;
 }

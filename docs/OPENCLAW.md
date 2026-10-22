@@ -110,17 +110,63 @@ Published to ClawHub. Install with `clawhub install`:
 
 Source lives in `openclaw/skills/` in the gstack repo. These are hand-crafted
 adaptations of the gstack methodology for OpenClaw's conversational context.
-No gstack infrastructure (no browse, no telemetry, no preamble).
+No gstack infrastructure (no browser, no telemetry, no preamble).
 
 ## Spawned session detection
 
 When Claude Code runs inside a session spawned by OpenClaw, the `OPENCLAW_SESSION`
 environment variable should be set. gstack detects this and adjusts:
-- Skips interactive prompts (auto-chooses recommended options)
-- Skips upgrade checks and telemetry prompts
+- Skips interactive prompts (auto-chooses recommended options; destructive or
+  irreversible options are never auto-chosen — the conservative choice wins
+  and gets recorded in the completion report)
+- Suppresses interactive-onboarding instruction blocks at emission (upgrade
+  checks, telemetry prompts, feature discovery, routing injection, tips), so
+  one-time prompts survive intact for the next human session
+- Suppresses the Conductor prose signal (`CONDUCTOR_SESSION: true`) — a
+  spawned session inside a Conductor workspace auto-chooses instead of
+  rendering prose to nobody
 - Focuses on task completion and prose reporting
 
-Set the env var in sessions_spawn: `env: { OPENCLAW_SESSION: "1" }`
+`sessions_spawn` has no per-spawn environment argument
+([openclaw/openclaw#51654](https://github.com/openclaw/openclaw/issues/51654)
+was closed without adding one), so an `env` field in the tool call is ignored.
+Set `OPENCLAW_SESSION=1` in the environment of the Claude ACP harness or the
+Gateway service instead, keep credentials out of that wrapper, and confirm the
+variable from inside the spawned process (for example `echo $OPENCLAW_SESSION`)
+rather than trusting the session's final message.
+
+### Explicit override: GSTACK_SESSION_KIND
+
+`GSTACK_SESSION_KIND=spawned` is the explicit per-command marker for the same
+classification, outranking every ambient env marker (including
+`OPENCLAW_SESSION` and `GSTACK_HEADLESS`). It exists because Claude Code
+subagents inherit the parent session's env byte-for-byte (#2733) — a
+dispatching skill marks its subagent by prefixing the preamble invocation on
+the same command line:
+
+```bash
+GSTACK_SESSION_KIND=spawned "$_SS" --skill "document-release" ...
+```
+
+gstack itself uses this: `/ship` Step 14.5 dispatches the `/document-release`
+subagent with this prefix before final commit, verification and publication.
+Its ship-owned scope overrides generic spawned auto-choice: risky or uncertain
+documentation changes return as blockers for the parent, without interactive
+questions or automatic approval. Deliberately narrow: only `spawned` is honored — `headless`
+already has `GSTACK_HEADLESS`, and letting an env var force `interactive`
+over CI markers would be a misclassification footgun. Empty or other values
+are reserved and ignored (fall through to ambient detection). Note that hook
+processes inherit the harness env, so a per-command prefix never reaches
+PreToolUse/PostToolUse hooks — the hook texts carry a spawned escape sentence
+for that topology (`hosts/claude/hooks/spawned-directive.ts`).
+
+**Tamper visibility.** Any mechanism that injects session-wide env (a cloned
+repo's `.claude/settings.json` env block, direnv, a CI wrapper) could set
+`GSTACK_SESSION_KIND=spawned` for a real human's session and silently flip
+its confirmation gates to auto-choose. When the env override drives the
+classification, the preamble emits a loud `SPAWNED_OVERRIDE: env` status line
+so the transcript shows WHY the session is spawned — audit
+`.claude/settings.json` env blocks in untrusted repos (/cso covers this).
 
 ## Installation
 

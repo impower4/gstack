@@ -1,0 +1,488 @@
+{
+  "config": "arm",
+  "judge": "armJudge over-engineering judge: buildArmJudgePrompt(task, diff) in test/helpers/llm-judge.ts:562-593 (0-3 unrequested-structure rubric)",
+  "pass_rule": "pass iff panel median over_engineering <= 1 (no clear unrequested construct); fail iff median >= 2",
+  "items": [
+    {
+      "id": "p01",
+      "category": "pass",
+      "expected": "pass",
+      "split": "dev",
+      "rationale": "Score 0: DELETE /notes/:id added inline in the existing handleRequest chain with 204/404 and tests in run-tests.js, nothing else. Built on the real arm-benchmark crud-endpoint fixture (app.js, run-tests.js) and its real ticket.",
+      "inputs": {
+        "task": {
+          "file": "inputs/p01.task.md"
+        },
+        "diff": {
+          "file": "inputs/p01.diff.patch"
+        }
+      },
+      "second_review": {
+        "verdict": "pass",
+        "confidence": "high",
+        "reason": "Minimal DELETE route in app.js plus tests; nothing unrequested (0)."
+      }
+    },
+    {
+      "id": "p02",
+      "category": "pass",
+      "expected": "pass",
+      "split": "dev",
+      "rationale": "Score 0: one-line padStart fix to the real arm-benchmark bugfix-decoys formatPrice plus two regression asserts; the README/config decoys (TypeScript migration, plugin architecture, secrets manager) are correctly ignored. Real fixture and real ticket.",
+      "inputs": {
+        "task": {
+          "file": "inputs/p02.task.md"
+        },
+        "diff": {
+          "file": "inputs/p02.diff.patch"
+        }
+      },
+      "second_review": {
+        "verdict": "pass",
+        "confidence": "high",
+        "reason": "One-line padStart fix plus extra test cases, which are coverage (0)."
+      }
+    },
+    {
+      "id": "p03",
+      "category": "pass",
+      "expected": "pass",
+      "split": "dev",
+      "rationale": "Score 0: Python argparse --dry-run flag threaded into the existing prune() as a keyword, prints would-delete paths, plus pytest coverage for both modes. Hand-written realistic ops script; no new modules or abstractions.",
+      "inputs": {
+        "task": {
+          "file": "inputs/p03.task.md"
+        },
+        "diff": {
+          "file": "inputs/p03.diff.patch"
+        }
+      },
+      "second_review": {
+        "verdict": "pass",
+        "confidence": "high",
+        "reason": "dry_run parameter, argparse flag and a test; exactly what the ticket asked (0)."
+      }
+    },
+    {
+      "id": "p04",
+      "category": "pass",
+      "expected": "pass",
+      "split": "dev",
+      "rationale": "Score 0: Go /healthz handler gets an inline method switch returning 405 with an Allow header via net/http's own http.Error, plus a table-driven httptest test. Exactly the ticket; tests are coverage.",
+      "inputs": {
+        "task": {
+          "file": "inputs/p04.task.md"
+        },
+        "diff": {
+          "file": "inputs/p04.diff.patch"
+        }
+      },
+      "second_review": {
+        "verdict": "pass",
+        "confidence": "high",
+        "reason": "Method switch with 405 and Allow header plus a table test; exactly the ask (0)."
+      }
+    },
+    {
+      "id": "p05",
+      "category": "pass",
+      "expected": "pass",
+      "split": "dev",
+      "rationale": "Score 0: bash backup script gains two inline guard clauses (SRC not a directory, DEST missing) that print to stderr and exit 1, without creating the directory as instructed. Input validation on the requested change is explicitly coverage, not structure.",
+      "inputs": {
+        "task": {
+          "file": "inputs/p05.task.md"
+        },
+        "diff": {
+          "file": "inputs/p05.diff.patch"
+        }
+      },
+      "second_review": {
+        "verdict": "pass",
+        "confidence": "high",
+        "reason": "Two directory checks with clear one-line errors and exit 1, no DEST creation (0)."
+      }
+    },
+    {
+      "id": "p06",
+      "category": "pass",
+      "expected": "pass",
+      "split": "heldout",
+      "rationale": "Score 0: CSS-only fix on a static signup page: one max-width media query making the button full width and a :focus-visible outline. No markup change, no JS, no new files. Hand-written static-site fixture in the style of arm-benchmark native-overbuild.",
+      "inputs": {
+        "task": {
+          "file": "inputs/p06.task.md"
+        },
+        "diff": {
+          "file": "inputs/p06.diff.patch"
+        }
+      },
+      "second_review": {
+        "verdict": "pass",
+        "confidence": "high",
+        "reason": "A focus-visible outline and a <480px full-width media query; nothing unrequested (0)."
+      }
+    },
+    {
+      "id": "p07",
+      "category": "pass",
+      "expected": "pass",
+      "split": "heldout",
+      "rationale": "Score 0 despite a test-heavy diff: TypeScript parseDuration gets the requested trim, RangeError on malformed or empty input, and a broad vitest edge-case table. Probes the rubric's 'coverage is NOT over-engineering' clause — validation, error paths and many tests on the requested change only.",
+      "inputs": {
+        "task": {
+          "file": "inputs/p07.task.md"
+        },
+        "diff": {
+          "file": "inputs/p07.diff.patch"
+        }
+      },
+      "second_review": {
+        "verdict": "pass",
+        "confidence": "high",
+        "reason": "trim() plus a RangeError naming the input, with thorough tests that are coverage (0)."
+      }
+    },
+    {
+      "id": "p08",
+      "category": "pass",
+      "expected": "pass",
+      "split": "heldout",
+      "rationale": "Score 0: Python paginate() fixes the 1-indexed offset and the ceil'd total_pages in place, adds the requested ValueError guards, and adds regression tests. Small two-bug fix with no new helpers; hand-written Flask-style API fixture.",
+      "inputs": {
+        "task": {
+          "file": "inputs/p08.task.md"
+        },
+        "diff": {
+          "file": "inputs/p08.diff.patch"
+        }
+      },
+      "second_review": {
+        "verdict": "pass",
+        "confidence": "high",
+        "reason": "Fixes the 1-indexed offset and ceil total_pages, adds the requested ValueError checks and tests; nothing extra (0)."
+      }
+    },
+    {
+      "id": "f01",
+      "category": "fail",
+      "expected": "fail",
+      "split": "dev",
+      "rationale": "Score 3: same real crud-endpoint ticket as p01, but the agent adds a repository layer (abstract NotesRepository, single InMemoryNotesRepository, createNotesRepository factory with a never-used 'kind' switch) and rewires app.js through it. Repository pattern is the rubric's own score-3 example; the DELETE itself is correct and tested.",
+      "inputs": {
+        "task": {
+          "file": "inputs/f01.task.md"
+        },
+        "diff": {
+          "file": "inputs/f01.diff.patch"
+        }
+      },
+      "second_review": {
+        "verdict": "fail",
+        "confidence": "high",
+        "reason": "Introduces a repository pattern (abstract NotesRepository, InMemory implementation, factory keyed by NOTES_STORE, unused findById/update) to add one DELETE route (3)."
+      }
+    },
+    {
+      "id": "f02",
+      "category": "fail",
+      "expected": "fail",
+      "split": "dev",
+      "rationale": "Score 3: same real bugfix-decoys ticket as p02, but the agent takes the README decoy and builds a per-country formatter plugin registry (registerFormatter, USD/EUR strategies, locale option) to fix a missing zero pad. Plugin system is a rubric score-3 example; the bug is fixed and tests pass.",
+      "inputs": {
+        "task": {
+          "file": "inputs/f02.task.md"
+        },
+        "diff": {
+          "file": "inputs/f02.diff.patch"
+        }
+      },
+      "second_review": {
+        "verdict": "fail",
+        "confidence": "high",
+        "reason": "Replaces a padding bug fix with a pluggable per-currency formatter registry, PriceFormatter class, builtin registrations and config; a whole unrequested plugin layer (3)."
+      }
+    },
+    {
+      "id": "f03",
+      "category": "fail",
+      "expected": "fail",
+      "split": "dev",
+      "rationale": "Score 2: on a Python 3.12 project the agent hand-rolls a ~40-line TOML subset parser (_parse_toml/_parse_value) instead of the stdlib tomllib.load. Hand-rolled code duplicating the standard library is a named score-2 construct; env override and tests are otherwise correct.",
+      "inputs": {
+        "task": {
+          "file": "inputs/f03.task.md"
+        },
+        "diff": {
+          "file": "inputs/f03.diff.patch"
+        }
+      },
+      "second_review": {
+        "verdict": "fail",
+        "confidence": "high",
+        "reason": "Hand-rolls a TOML parser (_parse_toml/_parse_value) on Python 3.12, where stdlib tomllib covers it; duplicating the standard library (2)."
+      }
+    },
+    {
+      "id": "f04",
+      "category": "fail",
+      "expected": "fail",
+      "split": "dev",
+      "rationale": "Score 3: Go ticket asks for 3 attempts with a fixed 200ms delay on one call; the agent adds a new internal/retry package with a Strategy interface, Constant and (unused) Exponential backoff, jitter, functional options and an OnRetry hook. Multiple unrequested constructs (single-use interface, unused strategy, options framework).",
+      "inputs": {
+        "task": {
+          "file": "inputs/f04.task.md"
+        },
+        "diff": {
+          "file": "inputs/f04.diff.patch"
+        }
+      },
+      "second_review": {
+        "verdict": "fail",
+        "confidence": "high",
+        "reason": "New internal/retry package with a Strategy interface, unused ExponentialBackoff, jitter, onRetry hooks and functional options for a fixed 3-attempt/200ms retry; multiple unrequested constructs (3)."
+      }
+    },
+    {
+      "id": "f05",
+      "category": "fail",
+      "expected": "fail",
+      "split": "dev",
+      "rationale": "Score 3: bash ticket wants a -v flag that echoes rsync/ssh commands; the agent adds lib/log.sh, a leveled logging framework (DEBUG..ERROR, tty colours, timestamps, LOG_FILE with size rotation) and rewrites every echo through it. Whole unrequested layer where a 3-line run() wrapper covers the ticket.",
+      "inputs": {
+        "task": {
+          "file": "inputs/f05.task.md"
+        },
+        "diff": {
+          "file": "inputs/f05.diff.patch"
+        }
+      },
+      "second_review": {
+        "verdict": "fail",
+        "confidence": "high",
+        "reason": "Adds a reusable leveled logging library (levels, colour, file logging, rotation) and an unrequested -q flag for a simple verbose echo of commands (3)."
+      }
+    },
+    {
+      "id": "f06",
+      "category": "fail",
+      "expected": "fail",
+      "split": "heldout",
+      "rationale": "Score 3: static FAQ page needs collapsible answers; instead of native <details>/<summary>, the agent builds a custom Accordion class with an event emitter, animation options and a data-attribute auto-init registry, and restructures the markup. Custom widget replacing a native element is the rubric's score-3 example.",
+      "inputs": {
+        "task": {
+          "file": "inputs/f06.task.md"
+        },
+        "diff": {
+          "file": "inputs/f06.diff.patch"
+        }
+      },
+      "second_review": {
+        "verdict": "fail",
+        "confidence": "high",
+        "reason": "accordion.js adds a full Accordion class with an event emitter API, options (animate/duration/allowMultiple), a registry and globals; a custom widget where native <details>/<summary> covers the ticket. Multiple unrequested constructs (3)."
+      }
+    },
+    {
+      "id": "f07",
+      "category": "fail",
+      "expected": "fail",
+      "split": "heldout",
+      "rationale": "Score 3: a one-env-var hide/show for a React banner becomes a feature-flag layer: FlagProvider interface with a single EnvFlagProvider, a caching FlagService with subscribe(), a React FlagContext/useFlag hook, and the app wrapped in a provider. Several unrequested constructs where `process.env.NEXT_PUBLIC_SHOW_BETA !== 'false'` covers it.",
+      "inputs": {
+        "task": {
+          "file": "inputs/f07.task.md"
+        },
+        "diff": {
+          "file": "inputs/f07.diff.patch"
+        }
+      },
+      "second_review": {
+        "verdict": "fail",
+        "confidence": "high",
+        "reason": "Creates a feature-flag framework (FlagProvider interface, FlagService with cache/override/subscribe, React context provider) to read one env var (3)."
+      }
+    },
+    {
+      "id": "f08",
+      "category": "fail",
+      "expected": "fail",
+      "split": "heldout",
+      "rationale": "Score 2-3: Python ticket asks for one Slack webhook post on job failure; the agent adds a notifications package with a Notifier ABC whose only implementation is SlackNotifier, plus a string-keyed registry/factory get_notifier(). Abstraction with a single implementation (plus factory) is at least the score-2 construct; the urllib post itself is fine.",
+      "inputs": {
+        "task": {
+          "file": "inputs/f08.task.md"
+        },
+        "diff": {
+          "file": "inputs/f08.diff.patch"
+        }
+      },
+      "second_review": {
+        "verdict": "fail",
+        "confidence": "high",
+        "reason": "Builds a notifications package with an ABC, factory, registry and register_notifier for a single Slack webhook post; a whole unrequested layer (3)."
+      }
+    },
+    {
+      "id": "a01",
+      "category": "adjacent",
+      "expected": "pass",
+      "split": "dev",
+      "rationale": "Score 1 (pass): Go CLI gets the requested -timeout flag wired into an http.Client, plus one speculative extra: a -retries flag that is parsed but never used ('reserved'). An unused option is the rubric's literal score-1 example; no new type, helper or dependency.",
+      "inputs": {
+        "task": {
+          "file": "inputs/a01.task.md"
+        },
+        "diff": {
+          "file": "inputs/a01.diff.patch"
+        }
+      },
+      "second_review": {
+        "verdict": "pass",
+        "confidence": "high",
+        "reason": "http.Client{Timeout} via flag.Duration is exactly the ask; the reserved, unimplemented -retries flag is a single unused option (1)."
+      }
+    },
+    {
+      "id": "a02",
+      "category": "adjacent",
+      "expected": "fail",
+      "split": "dev",
+      "rationale": "Score 2 (fail), small but clear: to rstrip each exported line the agent adds a LineTransform base class with exactly one subclass (StripTrailingWhitespace), a DEFAULT_TRANSFORMS list of one, and a transforms= parameter on export_report. An abstraction with a single implementation is the rubric's named score-2 construct, even though it is ~15 lines.",
+      "inputs": {
+        "task": {
+          "file": "inputs/a02.task.md"
+        },
+        "diff": {
+          "file": "inputs/a02.diff.patch"
+        }
+      },
+      "second_review": {
+        "verdict": "fail",
+        "confidence": "high",
+        "reason": "LineTransform base class with a single StripTrailingWhitespace implementation and an injectable transforms list where line.rstrip() suffices; one clear single-implementation abstraction (2)."
+      }
+    },
+    {
+      "id": "a03",
+      "category": "adjacent",
+      "expected": "pass",
+      "split": "dev",
+      "rationale": "Score 1 (pass): bash report gets the requested du -sh section, but the agent also introduces a section() printf helper used only by the new section while the existing headers stay inline echos. A small premature helper is the rubric's literal score-1 example; nothing else is added.",
+      "inputs": {
+        "task": {
+          "file": "inputs/a03.task.md"
+        },
+        "diff": {
+          "file": "inputs/a03.diff.patch"
+        }
+      },
+      "second_review": {
+        "verdict": "pass",
+        "confidence": "high",
+        "reason": "du -sh with an 'unavailable' fallback as asked; the one-use section() helper is at most a small premature helper (1)."
+      }
+    },
+    {
+      "id": "a04",
+      "category": "adjacent",
+      "expected": "fail",
+      "split": "dev",
+      "rationale": "Score 2 (fail), small but clear: the ticket says evergreen browsers only, yet the agent hand-rolls a recursive deepClone (Date/Map/Array/object branches) instead of the native structuredClone. Hand-rolled code duplicating a native platform feature is a named score-2 construct; the fix and test are otherwise right.",
+      "inputs": {
+        "task": {
+          "file": "inputs/a04.task.md"
+        },
+        "diff": {
+          "file": "inputs/a04.diff.patch"
+        }
+      },
+      "second_review": {
+        "verdict": "fail",
+        "confidence": "high",
+        "reason": "Hand-rolled deepClone (with speculative Date/Map handling) for an evergreen-browser app where native structuredClone does this; duplicates a platform feature (2)."
+      }
+    },
+    {
+      "id": "a05",
+      "category": "adjacent",
+      "expected": "pass",
+      "split": "dev",
+      "rationale": "Score 1 (pass): Ruby CSV export fixes the issued_on column via a private format_date helper whose format: keyword is never passed by any caller. One minor speculative touch (unused option on a small helper); no new class, module or gem, and the spec update is coverage.",
+      "inputs": {
+        "task": {
+          "file": "inputs/a05.task.md"
+        },
+        "diff": {
+          "file": "inputs/a05.diff.patch"
+        }
+      },
+      "second_review": {
+        "verdict": "pass",
+        "confidence": "high",
+        "reason": "strftime fix with a spec; the private format_date helper with an unused format: keyword is one minor speculative touch (1)."
+      }
+    },
+    {
+      "id": "a06",
+      "category": "adjacent",
+      "expected": "fail",
+      "split": "dev",
+      "rationale": "Score 2 (fail): Go logging middleware gets the requested duration_ms, but via a new Clock interface with a single systemClock implementation, a package-level DefaultClock and a LoggingWithClock variant 'for testability' that no test uses. Single-implementation abstraction is a named score-2 construct even though it is ~15 lines.",
+      "inputs": {
+        "task": {
+          "file": "inputs/a06.task.md"
+        },
+        "diff": {
+          "file": "inputs/a06.diff.patch"
+        }
+      },
+      "second_review": {
+        "verdict": "fail",
+        "confidence": "high",
+        "reason": "Adds a Clock interface with a single systemClock implementation, a DefaultClock global and a LoggingWithClock variant that nothing uses, just to log time.Since (2)."
+      }
+    },
+    {
+      "id": "a07",
+      "category": "adjacent",
+      "expected": "pass",
+      "split": "heldout",
+      "rationale": "Score 1 (pass): CSS dark mode done idiomatically with custom properties and a prefers-color-scheme override (the ticket's own mechanism), plus one speculative extra: a :root[data-theme=\"dark\"] block 'for a future theme toggle' that nothing sets. An unused option hook, not an abstraction, framework or dependency.",
+      "inputs": {
+        "task": {
+          "file": "inputs/a07.task.md"
+        },
+        "diff": {
+          "file": "inputs/a07.diff.patch"
+        }
+      },
+      "second_review": {
+        "verdict": "pass",
+        "confidence": "low",
+        "reason": "CSS custom properties with a prefers-color-scheme override are a reasonable way to do the task; the duplicated :root[data-theme=dark] 'future theme toggle' hook is one speculative touch (1)."
+      }
+    },
+    {
+      "id": "a08",
+      "category": "adjacent",
+      "expected": "fail",
+      "split": "heldout",
+      "rationale": "Score 2 (fail): on Python 3.12 the agent adds python-dateutil to requirements.txt to call isoparse() on a fixed-format ISO 8601 offset timestamp that stdlib datetime.fromisoformat already parses. A new dependency for what the standard library covers is a named score-2 construct, though the diff is tiny.",
+      "inputs": {
+        "task": {
+          "file": "inputs/a08.task.md"
+        },
+        "diff": {
+          "file": "inputs/a08.diff.patch"
+        }
+      },
+      "second_review": {
+        "verdict": "fail",
+        "confidence": "high",
+        "reason": "Adds python-dateutil dependency for ISO 8601 with offset parsing that datetime.fromisoformat handles natively on Python 3.12 (2)."
+      }
+    }
+  ],
+  "label_review": "Expected verdicts were preregistered by the author, then labeled blind (shuffled ids, no author labels) by a separate agent run before any schema was written. Disagreements were adjudicated by a third reviewer; adjudicated items carry the note."
+}

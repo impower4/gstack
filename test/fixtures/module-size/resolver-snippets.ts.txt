@@ -1,0 +1,44 @@
+// Ratchet (c) counter self-test input. Template text below is copied from
+// scripts/resolvers/review.ts (dashboard, design-board reload) and
+// scripts/resolvers/design.ts (sketch code fences). Read as text, never run.
+import { toShellPath, type TemplateContext } from './types';
+
+export function generateDashboardLike(ctx: TemplateContext): string {
+  return `## Review dashboard
+${ctx.skillName === 'ship' ? `**REVIEW READINESS DASHBOARD**
+
+| Review | Runs | Last run | Status | Required |
+|---|---:|---|---|---|
+| {row and suffix} | {count} | {timestamp or —} | {actual status and reason} | {yes/no} |
+
+VERDICT: {CLEARED or NOT CLEARED} — {reason}` : `\`\`\`
++====================================================================+
+|                    REVIEW READINESS DASHBOARD                       |
++====================================================================+
+\`\`\``}
+
+   \`jq -nc --arg html "$_DESIGN_DIR/design-board.html" '{html: $html}' | curl -sS -X POST "\${BOARD_URL}api/reload" -H 'Content-Type: application/json' --data-binary @-\`
+`;
+}
+
+export function generateDesignSketchLike(ctx: TemplateContext): string {
+  const fence = '```';
+  return `Create a private directory for it first:
+\`\`\`bash
+mktemp -d "\${TMPDIR:-/tmp}/gstack-sketch.XXXXXX"
+\`\`\`
+\`\`\`bash
+bun run ${toShellPath(ctx.paths.binDir)}/gstack-render.ts <sketch-dir>/sketch.html --screenshot <sketch-dir>/sketch.png --width 1280
+\`\`\`
+${fence} { unbalanced { braces in prose ${fence}`;
+}
+
+const arrowWithRegex = (value: string): string =>
+  value.replace(/[{}]/g, '').split(/\}/).join('{');
+
+export const handlerTable = [
+  { path: '/x', handler: async (req: Request) => {
+    const body = `{"ok": ${JSON.stringify(req.url)}}`;
+    return new Response(body);
+  } },
+];

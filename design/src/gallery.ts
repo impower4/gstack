@@ -6,6 +6,7 @@
 
 import fs from "fs";
 import path from "path";
+import { approvedImagePath } from "./approval";
 
 export interface GalleryOptions {
   designsDir: string; // ~/.gstack/projects/$SLUG/designs/
@@ -18,6 +19,32 @@ interface SessionData {
   date: string;
   approved: any | null;
   variants: string[]; // paths to variant PNGs
+}
+
+const VARIANT_IMAGE = [/^variant-[A-Z](-\d+)?\.png$/i, /^variant-\d+(-\d+)?\.png$/i];
+
+/**
+ * Variant images in a session directory as chronological history, not rounds:
+ * names not on the current board sort by mtime then name, followed by the
+ * board's images in board-images.json order. Never-overwrite means one
+ * letter can appear in several rounds (variant-A.png, variant-A-2.png).
+ */
+export function listVariantImages(sessionDir: string): string[] {
+  const found = fs.readdirSync(sessionDir)
+    .filter(f => VARIANT_IMAGE.some(re => re.test(f)))
+    .map(f => path.join(sessionDir, f));
+
+  let board: string[] = [];
+  try {
+    const parsed = JSON.parse(fs.readFileSync(path.join(sessionDir, "board-images.json"), "utf-8"));
+    if (Array.isArray(parsed)) board = parsed.filter((p): p is string => typeof p === "string").map(p => path.resolve(sessionDir, p));
+  } catch {}
+
+  const mtime = new Map(found.map(f => [f, fs.statSync(f).mtimeMs]));
+  const history = found
+    .filter(f => !board.includes(f))
+    .sort((a, b) => (mtime.get(a)! - mtime.get(b)!) || a.localeCompare(b));
+  return [...history, ...board.filter(f => found.includes(f))];
 }
 
 export function generateGalleryHtml(designsDir: string): string {
@@ -44,16 +71,9 @@ export function generateGalleryHtml(designsDir: string): string {
       }
     }
 
-    // Find variant PNGs
-    const variants: string[] = [];
+    let variants: string[] = [];
     try {
-      const files = fs.readdirSync(sessionDir);
-      for (const f of files) {
-        if (f.match(/variant-[A-Z]\.png$/i) || f.match(/variant-\d+\.png$/i)) {
-          variants.push(path.join(sessionDir, f));
-        }
-      }
-      variants.sort();
+      variants = listVariantImages(sessionDir);
     } catch {
       // Can't read directory, skip
     }
@@ -81,12 +101,13 @@ export function generateGalleryHtml(designsDir: string): string {
   sessions.sort((a, b) => b.date.localeCompare(a.date));
 
   const sessionCards = sessions.map(session => {
+    const approvedTarget = session.approved ? approvedImagePath(session.approved, session.dir) : null;
     const variantImgs = session.variants.map((vPath, i) => {
       try {
         const imgData = fs.readFileSync(vPath).toString("base64");
         const ext = path.extname(vPath).slice(1) || "png";
         const label = path.basename(vPath, `.${ext}`).replace("variant-", "");
-        const isApproved = session.approved?.approved_variant === label;
+        const isApproved = approvedTarget?.path === vPath;
         return `
         <div class="gallery-variant ${isApproved ? "approved" : ""}">
           <img src="data:image/${ext};base64,${imgData}" alt="Variant ${label}" />
@@ -200,7 +221,7 @@ export function generateGalleryHtml(designsDir: string): string {
 <body>
 <div class="header">
   <h1>Design History</h1>
-  <div class="meta">${sessions.length} exploration${sessions.length === 1 ? "" : "s"}</div>
+  <div class="meta">${sessions.length} exploration${sessions.length === 1 ? "" : "s"} · images oldest to newest; letters do not identify rounds</div>
 </div>
 <div class="gallery">
   ${sessionCards}

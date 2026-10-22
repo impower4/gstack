@@ -1,0 +1,617 @@
+name: Windows Setup E2E
+
+# End-to-end fresh-install gate for Windows. Builds a clean windows-latest
+# checkout and asserts the build completes, binaries resolve via
+# find-browse, and the gstack-paths state root resolves cleanly. Catches Bun
+# shell-parser regressions in package.json's build chain (#1538, #1537,
+# #1530, #1457, #1561) before they reach users. Then it runs `./setup` into
+# an isolated HOME and drives the installed runtime root's browse from an
+# unrelated directory: a piped two-command `chain` flow must print the page
+# text (the runtime root has no node_modules, so this is the checkout-bundle
+# path from #3026, and the piped-stdin path from #3039). Every compiled
+# binary must answer the side-effect-free --version that setup's Smart App
+# Control probe runs (#2595). Last, two forced CSO failures: fatal under
+# GSTACK_STRICT_BUILD=1, and a completed setup with the failure reported
+# under GSTACK_STRICT_BUILD=0 (#3071). Git Bash path spelling (#3088,
+# #3100): the hook check passes on this checkout, /gstack-upgrade's checkout
+# guard passes at its root, and an install stuck on a release whose checker
+# had the false positive recovers with the documented
+# `git pull --ff-only --autostash && ./setup`.
+#
+# setup.ps1 under Windows PowerShell 5.1 (powershell.exe, #3130): its cases
+# in test/setup-ps1.test.ts run with a space in the temp path, and a real
+# install runs from a checkout path with a space. The held-install job
+# (#3184) builds a prefix-mode v1.91.101.0 install behind this PR's tree in
+# three states (clean, dirty-conflicting, already-unmerged): the old updater
+# must log `HELD hook-check-unavailable`, the PowerShell recovery form that
+# docs/troubleshooting.md publishes must reach the PR's tree with every
+# local edit in a rescue ref, the trial and go-back forms must move the
+# install, and the new updater must then take a later release whose symlink
+# sorts before its target. Each job asserts the exact list of cases it ran.
+#
+# Separate from windows-free-tests.yml because that one runs a curated
+# unit-test subset; this one exercises the install path itself.
+#
+# Runner: GitHub-hosted free windows-latest, two parallel jobs. ~10-25 min.
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'package.json'
+      - 'scripts/build.sh'
+      - 'scripts/build-cso.sh'
+      - 'scripts/build-cso-windows.ps1'
+      - 'scripts/write-version-files.sh'
+      - 'setup'
+      - 'setup.ps1'
+      - 'test/setup-ps1.test.ts'
+      - 'docs/troubleshooting.md'
+      - 'browse/src/cli.ts'
+      - 'browse/src/find-browse.ts'
+      - 'browse/src/server.ts'
+      - 'browse/src/meta-commands.ts'
+      - 'browse/scripts/build-node-server.sh'
+      - 'design/src/cli.ts'
+      - 'make-pdf/src/cli.ts'
+      - 'bin/gstack-global-discover.ts'
+      - 'bin/gstack-paths'
+      - 'bin/gstack-doctor'
+      - 'bin/gstack-launch-probe.sh'
+      - 'bin/gstack-hook-check'
+      - 'bin/gstack-session-update'
+      - 'bin/gstack-ff-update'
+      - 'bin/gstack-claude-root.sh'
+      - 'bin/gstack-browser-ensure'
+      - 'bin/gstack-path-spelling.sh'
+      - 'lib/path-spelling.ts'
+      - 'hosts/claude/hooks/**'
+      - 'gstack-upgrade/**'
+      - '.github/workflows/windows-setup-e2e.yml'
+  workflow_dispatch:
+
+concurrency:
+  # PR-number keyed: head_ref carries no fork prefix, so same-name branches
+  # from two forks would share one group and cancel each other's runs.
+  group: windows-setup-e2e-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
+# Install-path exercise only — no token writes.
+permissions:
+  contents: read
+
+jobs:
+  windows-setup:
+    runs-on: windows-latest
+    timeout-minutes: 35
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.4.2
+
+      # Same lockfile-keyed install cache as windows-free-tests.yml (install
+      # was 45s of a 64s job, all network).
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: ~/.bun/install/cache
+          key: windows-bun-${{ hashFiles('bun.lock') }}
+          # A lockfile bump starts from the previous cache instead of cold
+          # (restore alone costs ~43s; without this a bump pays it for nothing).
+          restore-keys: |
+            windows-bun-
+
+      - name: Configure git identity
+        run: |
+          git config --global user.email "windows-setup-e2e@gstack.test"
+          git config --global user.name "Windows Setup E2E"
+          git config --global init.defaultBranch main
+        shell: bash
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+        shell: bash
+
+      - name: setup.ps1 cases under Windows PowerShell 5.1 with a space in the temp path (#3130)
+        # test/setup-ps1.test.ts runs powershell.exe on Windows: argv forwarding
+        # with adversarial arguments, the empty-argument refusal, and pwsh. The
+        # skips are its Linux-only cases: a missing prerequisite, and the Git
+        # Bash resolution table, whose locations are injected into pwsh.
+        run: |
+          set -euo pipefail
+          : > "$RUNNER_TEMP/setup-cases"
+          # shellcheck disable=SC2016
+          MAJOR=$(powershell.exe -NoProfile -NonInteractive -Command '$PSVersionTable.PSVersion.Major' | tr -d '\r')
+          test "$MAJOR" = 5 || (echo "powershell.exe is PowerShell '$MAJOR', not Windows PowerShell 5.1" && exit 1)
+          echo ps51 >> "$RUNNER_TEMP/setup-cases"
+          SPACED="$RUNNER_TEMP/tmp with space"
+          mkdir -p "$SPACED"
+          TEMP="$(cygpath -w "$SPACED")"
+          export TEMP TMP="$TEMP"
+          set +e
+          OUT=$(bun test test/setup-ps1.test.ts 2>&1)
+          CODE=$?
+          set -e
+          echo "$OUT"
+          test "$CODE" -eq 0 || (echo "test/setup-ps1.test.ts exited $CODE" && exit 1)
+          grep -qE '^ *4 pass$' <<< "$OUT" || (echo "expected exactly 4 executed setup.ps1 cases" && exit 1)
+          grep -qE '^ *0 fail$' <<< "$OUT" || (echo "a setup.ps1 case failed" && exit 1)
+          grep -qE '^ *31 skip$' <<< "$OUT" || (echo "expected exactly 31 skipped setup.ps1 cases (the Linux-only prerequisite case, the 14 pwsh-on-Linux Git Bash resolution rows and the 16 shared-table rows from test/fixtures/windows-bash-resolution.json)" && exit 1)
+          echo setup-ps1-cases >> "$RUNNER_TEMP/setup-cases"
+        shell: bash
+
+      - name: Run bun run build (the previously-broken path)
+        # This is the regression gate. Bun's Windows shell parser rejected
+        # multiple constructs the old inline build chain used; the wave
+        # moved the build to scripts/build.sh. If this step fails on
+        # Windows, the build chain regressed.
+        run: bun run build
+        shell: bash
+        env:
+          GSTACK_SKIP_PLAYWRIGHT: '1'
+          GSTACK_STRICT_BUILD: '1'
+
+      - name: Verify binaries exist (with .exe extension on Windows)
+        run: |
+          set -e
+          test -f browse/dist/browse.exe || test -f browse/dist/browse || (echo "MISSING: browse" && exit 1)
+          test -f browse/dist/find-browse.exe || test -f browse/dist/find-browse || (echo "MISSING: find-browse" && exit 1)
+          test -f design/dist/design.exe || test -f design/dist/design || (echo "MISSING: design" && exit 1)
+          test -f bin/gstack-global-discover.exe || test -f bin/gstack-global-discover || (echo "MISSING: gstack-global-discover" && exit 1)
+          echo "All binaries present"
+        shell: bash
+
+      - name: 'Every compiled binary launches with --version (Smart App Control probe, #2595)'
+        run: |
+          set -euo pipefail
+          . bin/gstack-launch-probe.sh
+          gstack_launch_probe_all "$PWD" .exe
+          printf 'blocked: %s\nbroken: %s\nmissing: %s\n' "$_glp_blocked" "$_glp_broken" "$_glp_missing"
+          test -z "$_glp_blocked$_glp_broken$_glp_missing" || (echo "a compiled binary did not answer --version" && exit 1)
+        shell: bash
+
+      - name: Verify find-browse resolves to the .exe variant
+        run: |
+          set -e
+          OUT=$(bun browse/src/find-browse.ts 2>&1) || true
+          echo "find-browse output: $OUT"
+          # On Windows, find-browse should successfully resolve to a binary,
+          # whether or not it has the .exe extension on disk. Empty output
+          # or "not found" means the .exe extension resolver regressed.
+          echo "$OUT" | grep -qE '(browse\.exe|browse)$' || (echo "find-browse failed to resolve binary on Windows" && exit 1)
+        shell: bash
+
+      - name: Verify gstack-paths state root resolves
+        run: |
+          set -e
+          eval "$(bash bin/gstack-paths)"
+          test -n "$GSTACK_STATE_ROOT" || (echo "GSTACK_STATE_ROOT empty" && exit 1)
+          test -n "$PLAN_ROOT" || (echo "PLAN_ROOT empty" && exit 1)
+          test -n "$TMP_ROOT" || (echo "TMP_ROOT empty" && exit 1)
+          echo "GSTACK_STATE_ROOT=$GSTACK_STATE_ROOT"
+          echo "PLAN_ROOT=$PLAN_ROOT"
+          echo "TMP_ROOT=$TMP_ROOT"
+        shell: bash
+
+      - name: Install with ./setup into an isolated HOME
+        # A real install: the codex host's runtime root is a copy of the
+        # runtime files with no node_modules beside it. setup installs
+        # Playwright's Chromium (best-effort) for the journey below.
+        run: |
+          set -euo pipefail
+          E2E_HOME="$RUNNER_TEMP/gstack-e2e-home"
+          mkdir -p "$E2E_HOME"
+          HOME="$E2E_HOME" USERPROFILE="$(cygpath -w "$E2E_HOME")" GSTACK_STRICT_BUILD=1 ./setup --host codex
+          ROOT="$E2E_HOME/.codex/skills/gstack"
+          test -f "$ROOT/.source-path" || (echo "MISSING: $ROOT/.source-path" && exit 1)
+          test ! -e "$ROOT/node_modules" || (echo "UNEXPECTED: $ROOT/node_modules (the journey must exercise the copy without it)" && exit 1)
+          echo "runtime root: $ROOT -> source $(cat "$ROOT/.source-path")"
+        shell: bash
+
+      - name: .\setup.ps1 installs from a checkout path with a space under Windows PowerShell 5.1 (#3130)
+        # A copy of this built checkout (build outputs keep their mtimes, so
+        # setup does not rebuild; node_modules is reinstalled) under a path
+        # with a space, installed through powershell.exe into an isolated HOME.
+        # -h stores symlinks as their targets: MSYS tar cannot extract a
+        # symlink that precedes its target (connect-chrome, #3184).
+        run: |
+          set -euo pipefail
+          SPACED="$(cygpath -u "$RUNNER_TEMP")/gstack checkout"
+          mkdir -p "$SPACED"
+          tar --exclude=./node_modules -chf - . | tar -xpf - -C "$SPACED"
+          E2E_HOME="$RUNNER_TEMP/gstack-ps1-home"
+          mkdir -p "$E2E_HOME"
+          set +e
+          OUT=$(HOME="$E2E_HOME" USERPROFILE="$(cygpath -w "$E2E_HOME")" GSTACK_SKIP_PLAYWRIGHT=1 GSTACK_STRICT_BUILD=0 \
+            powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$(cygpath -w "$SPACED/setup.ps1")" --host codex 2>&1)
+          CODE=$?
+          set -e
+          echo "$OUT" | tail -n 40
+          test "$CODE" -eq 0 || (echo ".\\setup.ps1 exited $CODE" && exit 1)
+          ! grep -q 'unexpected EOF' <<< "$OUT" || (echo "bash read a broken -c script (#3130)" && exit 1)
+          ROOT="$E2E_HOME/.codex/skills/gstack"
+          test -f "$ROOT/.source-path" || (echo "MISSING: $ROOT/.source-path" && exit 1)
+          grep -q 'gstack checkout' "$ROOT/.source-path" || (echo "the runtime root does not come from the spaced checkout: $(cat "$ROOT/.source-path")" && exit 1)
+          echo setup-ps1-install >> "$RUNNER_TEMP/setup-cases"
+        shell: bash
+
+      - name: Installed browse runs a piped chain flow from an unrelated directory
+        run: |
+          set -euo pipefail
+          E2E_HOME="$RUNNER_TEMP/gstack-e2e-home"
+          USERPROFILE="$(cygpath -w "$E2E_HOME")"
+          export HOME="$E2E_HOME" USERPROFILE
+          BROWSE="$E2E_HOME/.codex/skills/gstack/browse/dist/browse.exe"
+          [ -f "$BROWSE" ] || BROWSE="$E2E_HOME/.codex/skills/gstack/browse/dist/browse"
+          test -f "$BROWSE" || (echo "MISSING: installed browse" && exit 1)
+          bun -e 'Bun.serve({ hostname: "127.0.0.1", port: 47123, fetch: () => new Response("<title>gstack e2e</title><h1>gstack-windows-chain-ok</h1>", { headers: { "content-type": "text/html" } }) }); setInterval(() => {}, 1 << 30);' &
+          PAGE_PID=$!
+          trap 'kill "$PAGE_PID" 2>/dev/null || true; "$BROWSE" stop >/dev/null 2>&1 || true' EXIT
+          UNRELATED="$RUNNER_TEMP/unrelated-dir"
+          mkdir -p "$UNRELATED" && cd "$UNRELATED"
+          set +e
+          OUT=$(printf '%s\n' '[["goto","http://127.0.0.1:47123/"],["text"]]' | "$BROWSE" chain 2>&1)
+          CODE=$?
+          set -e
+          echo "$OUT"
+          if [ "$CODE" -ne 0 ]; then
+            echo "browse chain exited $CODE; server logs:"
+            find "$UNRELATED" "$E2E_HOME" -maxdepth 4 \( -name 'browse-daemon.log' -o -name 'browse-startup-error.log' \) -print -exec tail -n 60 {} \; 2>/dev/null || true
+            cat "$E2E_HOME/.codex/skills/gstack/.source-path" 2>/dev/null || true
+            exit 1
+          fi
+          echo "$OUT" | grep -q 'gstack-windows-chain-ok' || (echo "chain output lacks the page text: the flow did not run" && exit 1)
+          # Empty piped input is a usage error, never a silent exit 0.
+          set +e
+          EMPTY_OUT=$(printf '' | "$BROWSE" chain 2>&1)
+          EMPTY_CODE=$?
+          set -e
+          echo "$EMPTY_OUT"
+          test "$EMPTY_CODE" -eq 1 || (echo "empty chain exited $EMPTY_CODE, expected 1" && exit 1)
+          echo "$EMPTY_OUT" | grep -q 'no flow to run' || (echo "empty chain lacks the usage error" && exit 1)
+        shell: bash
+
+      - name: The hook check passes on this checkout under Git Bash (#3088, #3100)
+        run: |
+          set -uo pipefail
+          OUT=$(bash bin/gstack-hook-check "$PWD" 2>&1)
+          CODE=$?
+          echo "$OUT"
+          test "$CODE" -eq 0 || (echo "gstack-hook-check exited $CODE" && exit 1)
+          ! echo "$OUT" | grep -q '^fail ' || (echo "gstack-hook-check reported a fail line" && exit 1)
+          echo "$OUT" | grep -q '^ok hosts/claude/hooks/question-log-hook$' || (echo "the TypeScript hooks were not checked" && exit 1)
+        shell: bash
+
+      - name: /gstack-upgrade's checkout guard passes at the checkout root and refuses below it
+        run: |
+          set -euo pipefail
+          GUARD=$(grep -m1 -- '--show-prefix' gstack-upgrade/SKILL.md.tmpl)
+          echo "guard: $GUARD"
+          INSTALL_DIR="$PWD" bash -c "cd \"\$INSTALL_DIR\" && $GUARD && echo GUARD_OK" | grep -q GUARD_OK || (echo "the guard refused the checkout root" && exit 1)
+          if INSTALL_DIR="$PWD/bin" bash -c "cd \"\$INSTALL_DIR\" && $GUARD && echo GUARD_OK" 2>/dev/null | grep -q GUARD_OK; then
+            echo "the guard accepted a directory below the root" && exit 1
+          fi
+        shell: bash
+
+      - name: An install stuck on the false positive recovers with the documented command (#3088, #3100)
+        # A release whose bin/gstack-hook-check had the Git Bash false positive
+        # (v1.91.83.0's checker on this tree), then this revision on top. The
+        # recovery is the one docs/troubleshooting.md gives.
+        run: |
+          set -euo pipefail
+          OLD_RELEASE=5cb5e1cfc115e82388df07896664640a1224fe5d
+          T="$RUNNER_TEMP/recovery"
+          E2E_HOME="$T/home"
+          INSTALL="$E2E_HOME/.claude/skills/gstack"
+          mkdir -p "$E2E_HOME/.claude/skills" "$T"
+          git fetch -q --no-tags --depth=1 origin "$OLD_RELEASE"
+          git show "$OLD_RELEASE:bin/gstack-hook-check" > "$T/old-check"
+          git init -q --bare -b main "$T/origin.git"
+          git -C "$T/origin.git" config receive.shallowUpdate true
+          git clone -q --no-local "$PWD" "$T/work"
+          cp "$T/old-check" "$T/work/bin/gstack-hook-check"
+          git -C "$T/work" commit -qam "release with the false positive"
+          STUCK=$(git -C "$T/work" rev-parse HEAD)
+          git -C "$T/work" checkout -q HEAD~1 -- bin/gstack-hook-check
+          git -C "$T/work" commit -qm "this revision"
+          git -C "$T/work" push -q "$T/origin.git" HEAD:refs/heads/main
+          git clone -q "$T/origin.git" "$INSTALL"
+          git -C "$INSTALL" reset -q --hard "$STUCK"
+          set +e
+          BEFORE=$(bash "$INSTALL/bin/gstack-hook-check" "$INSTALL" 2>&1)
+          set -e
+          echo "$BEFORE"
+          echo "$BEFORE" | grep -q 'bun could not bundle the TypeScript entry' || (echo "the old release's checker did not show the false positive" && exit 1)
+          set +e
+          OUT=$(cd "$INSTALL" && git pull --ff-only --autostash && HOME="$E2E_HOME" USERPROFILE="$(cygpath -w "$E2E_HOME")" \
+            GSTACK_SKIP_PLAYWRIGHT=1 GSTACK_STRICT_BUILD=0 ./setup 2>&1)
+          CODE=$?
+          set -e
+          echo "$OUT" | tail -n 40
+          test "$CODE" -eq 0 || (echo "the documented recovery exited $CODE" && exit 1)
+          ! echo "$OUT" | grep -q 'refusing to register hooks' || (echo "setup still refused hooks after the recovery" && exit 1)
+          test "$(git -C "$INSTALL" rev-parse HEAD)" != "$STUCK" || (echo "the recovery did not move the checkout" && exit 1)
+        shell: bash
+
+      - name: A forced CSO failure is fatal under GSTACK_STRICT_BUILD=1 (#3071)
+        run: |
+          set -uo pipefail
+          rm -f browse/dist/.build-complete
+          set +e
+          GSTACK_SKIP_PLAYWRIGHT=1 GSTACK_STRICT_BUILD=1 GSTACK_CSO_BUILD_TESTING=1 GSTACK_CSO_BUILD_TEST_FAIL_AFTER=core bun run build > strict.log 2>&1
+          CODE=$?
+          set -e
+          tail -n 20 strict.log
+          test "$CODE" -ne 0 || (echo "strict build passed despite the injected CSO failure" && exit 1)
+          grep -q 'GSTACK_STRICT_BUILD=1 makes it fatal' strict.log || (echo "strict failure lacks its message" && exit 1)
+        shell: bash
+
+      - name: A forced CSO publish failure still completes setup (#3071)
+        run: |
+          set -euo pipefail
+          E2E_HOME="$RUNNER_TEMP/gstack-e2e-cso-fail"
+          mkdir -p "$E2E_HOME"
+          rm -f browse/dist/.build-complete
+          set +e
+          OUT=$(HOME="$E2E_HOME" USERPROFILE="$(cygpath -w "$E2E_HOME")" GSTACK_SKIP_PLAYWRIGHT=1 GSTACK_STRICT_BUILD=0 \
+            GSTACK_CSO_BUILD_TESTING=1 GSTACK_CSO_BUILD_TEST_FAIL_AFTER=publish-core ./setup --host codex 2>&1)
+          CODE=$?
+          set -e
+          echo "$OUT" | tail -n 40
+          test "$CODE" -eq 0 || (echo "setup exited $CODE after an optional CSO failure" && exit 1)
+          echo "$OUT" | grep -qE 'CSO publish step failed \(exit 86\).*previous CSO kept|CSO unavailable: the native helper.s publish step failed' || (echo "setup did not report the CSO publish failure" && exit 1)
+          grep -q '^result=failed' bin/.gstack-cso-build-result
+          grep -q '^stage=publish' bin/.gstack-cso-build-result
+          test -f browse/dist/.build-complete || (echo "the build stopped at CSO" && exit 1)
+          DOCTOR=$(HOME="$E2E_HOME" bash bin/gstack-doctor 2>&1 || true)
+          echo "$DOCTOR"
+          echo "$DOCTOR" | grep -qE '^warn +cso +' || (echo "doctor did not report the CSO failure" && exit 1)
+        shell: bash
+
+      - name: Every setup.ps1 case ran
+        run: |
+          set -euo pipefail
+          cat "$RUNNER_TEMP/setup-cases"
+          test "$(cat "$RUNNER_TEMP/setup-cases")" = "$(printf 'ps51\nsetup-ps1-cases\nsetup-ps1-install')" || (echo "a setup.ps1 case did not run" && exit 1)
+        shell: bash
+
+  held-install-journey:
+    # #3184: MSYS tar cannot extract a symlink that precedes its target, so
+    # every v1.91.101.0 install on Windows holds every release. The Git Bash
+    # forms of the recovery run in test/held-install-recovery.test.ts; this
+    # job runs the PowerShell forms under powershell.exe, verbatim from
+    # docs/troubleshooting.md, against the runner's real ~/.claude install
+    # path ($HOME in PowerShell). GSTACK_E2E_POWERSHELL and
+    # GSTACK_E2E_UPDATER_PATH_PREFIX exist only to run these steps off Windows.
+    runs-on: windows-latest
+    timeout-minutes: 50
+    env:
+      GSTACK_SKIP_PLAYWRIGHT: '1'
+      GSTACK_STRICT_BUILD: '0'
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.4.2
+
+      - name: Configure git identity
+        run: |
+          git config --global user.email "windows-setup-e2e@gstack.test"
+          git config --global user.name "Windows Setup E2E"
+          git config --global init.defaultBranch main
+        shell: bash
+
+      - name: Build the held-install fixture (v1.91.101.0 behind this PR's tree)
+        # origin's main carries this PR's tree on top of the v1.91.101.0
+        # release tree (commits built from the two trees, so the shallow
+        # checkout's history is never needed); fix-branch adds one file for
+        # the trial form.
+        run: |
+          set -euo pipefail
+          OLD_RELEASE=47d639abffa882b8cbb641d7d1dedf08ecada9ec # v1.91.101.0
+          T="$RUNNER_TEMP/held"
+          rm -rf "$T" && mkdir -p "$T"
+          git cat-file -e "$OLD_RELEASE^{commit}" 2>/dev/null || git fetch -q --no-tags --depth=1 origin "$OLD_RELEASE"
+          c() { git commit-tree "$@"; }
+          HELD=$(c -m "v1.91.101.0" "$OLD_RELEASE^{tree}")
+          MAIN=$(c -p "$HELD" -m "this PR's tree" 'HEAD^{tree}')
+          export GIT_INDEX_FILE="$T/fix.index"
+          git read-tree "$MAIN"
+          git update-index --add --cacheinfo "100644,$(printf 'trial\n' | git hash-object -w --stdin),e2e-trial-marker"
+          FIX=$(c -p "$MAIN" -m "a fix branch to try" "$(git write-tree)")
+          unset GIT_INDEX_FILE
+          test "$(git show "$HELD:VERSION")" = 1.91.101.0 || (echo "the held tree is not v1.91.101.0" && exit 1)
+          git ls-tree "$MAIN" connect-chrome | grep -q '^120000 ' || (echo "this PR's tree has no connect-chrome symlink to reproduce the hold" && exit 1)
+          git init -q --bare -b main "$T/origin.git"
+          git push -q "$T/origin.git" "$MAIN:refs/heads/main" "$FIX:refs/heads/fix-branch"
+          printf 'HELD=%s\nMAIN=%s\nFIX=%s\n' "$HELD" "$MAIN" "$FIX" > "$T/vars"
+          : > "$T/cases"
+          cat > "$T/lib.sh" <<'LIB'
+          T="$RUNNER_TEMP/held"
+          . "$T/vars"
+          INSTALL="$HOME/.claude/skills/gstack"
+          STATE="$HOME/.gstack"
+          LOG="$STATE/analytics/session-update.log"
+          PS="${GSTACK_E2E_POWERSHELL:-powershell.exe}"
+          w() { if command -v cygpath >/dev/null 2>&1; then cygpath -w "$1"; else printf '%s\n' "$1"; fi; }
+          die() { echo "FAIL: $*" >&2; [ ! -f "$LOG" ] || { echo "--- updater log" && cat "$LOG"; } >&2; exit 1; }
+          case_ok() { echo "$1" >> "$T/cases"; echo "CASE OK: $1"; }
+          # The command docs/troubleshooting.md publishes under <!-- form:NAME -->.
+          form() { awk -v m="<!-- form:$1 -->" '$0 == m { f = 1; next } f && /^```/ { if (o) exit; o = 1; next } f && o { print }' "$GITHUB_WORKSPACE/docs/troubleshooting.md"; }
+          # run_ps_form NAME [REPLACEMENT-FOR-.\setup.ps1] [BRANCH]: the form,
+          # verbatim, as a script under powershell.exe; prints its output.
+          run_ps_form() {
+            f=$(form "$1")
+            case "$f" in *'{ .\setup.ps1 }') ;; *) die "form $1 is missing or does not end in .\setup.ps1: $f" ;; esac
+            [ -z "${2:-}" ] || f="${f%'.\setup.ps1 }'}$2 }"
+            [ -z "${3:-}" ] || f=${f//'<branch>'/$3}
+            printf '%s\r\nexit $LASTEXITCODE\r\n' "$f" > "$T/form.ps1"
+            "$PS" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$(w "$T/form.ps1")" 2>&1
+          }
+          # run_updater PATTERN [SECONDS]: one session-start check with the
+          # throttle cleared, waiting for its background run to log PATTERN.
+          run_updater() {
+            rm -f "$STATE/.last-session-update"
+            n0=$( { cat "$LOG" 2>/dev/null || true; } | wc -l)
+            ( cd "$T" && PATH="${GSTACK_E2E_UPDATER_PATH_PREFIX:+$GSTACK_E2E_UPDATER_PATH_PREFIX:}$PATH" bash "$INSTALL/bin/gstack-session-update" ) || die "the updater exited $?"
+            i=0
+            until tail -n +"$((n0 + 1))" "$LOG" 2>/dev/null | grep -E "$1" > "$T/updater-line"; do
+              i=$((i + 1)); [ "$i" -le "${2:-180}" ] || die "no updater log line matching '$1' within ${2:-180}s"
+              sleep 1
+            done
+            cat "$T/updater-line"
+            i=0; while [ -d "$STATE/.setup-lock" ] && [ "$i" -lt 120 ]; do i=$((i + 1)); sleep 1; done
+          }
+          # install_state clean|dirty|unmerged: a prefix-mode v1.91.101.0
+          # install one release behind origin's main.
+          install_state() {
+            rm -rf "$INSTALL" "$STATE"
+            mkdir -p "$(dirname "$INSTALL")"
+            git clone -q "$T/origin.git" "$INSTALL"
+            git -C "$INSTALL" reset -q --hard "$HELD"
+            GSTACK_SETUP_RUNNING=1 bash "$INSTALL/bin/gstack-config" set auto_upgrade true
+            GSTACK_SETUP_RUNNING=1 bash "$INSTALL/bin/gstack-config" set skill_prefix true
+            bash "$INSTALL/bin/gstack-patch-names" "$INSTALL" true >/dev/null
+            ! git -C "$INSTALL" diff --quiet -- SKILL.md '*/SKILL.md' || die "prefix mode left no footprint"
+            case "$1" in
+              dirty)
+                git -C "$INSTALL" diff -U0 "$HELD" "$MAIN" -- docs/troubleshooting.md > "$T/upstream.diff"
+                L=$(sed -n 's/^-\([^-]\)/\1/p' "$T/upstream.diff" | sed -n 1p)
+                [ -n "$L" ] || die "docs/troubleshooting.md has no upstream change to conflict with"
+                L="$L" awk '!d && $0 == ENVIRON["L"] { print $0 " LOCAL-EDIT"; d = 1; next } { print }' "$INSTALL/docs/troubleshooting.md" > "$T/edited"
+                cat "$T/edited" > "$INSTALL/docs/troubleshooting.md"
+                grep -q 'LOCAL-EDIT' "$INSTALL/docs/troubleshooting.md" || die "the local edit did not apply"
+                ;;
+              unmerged)
+                b=$(printf 'base\n' | git -C "$INSTALL" hash-object -w --stdin)
+                o=$(printf 'ours LOCAL-EDIT\n' | git -C "$INSTALL" hash-object -w --stdin)
+                t=$(printf 'theirs\n' | git -C "$INSTALL" hash-object -w --stdin)
+                git -C "$INSTALL" update-index --force-remove README.md
+                printf '100644 %s 1\tREADME.md\n100644 %s 2\tREADME.md\n100644 %s 3\tREADME.md\n' "$b" "$o" "$t" | git -C "$INSTALL" update-index --index-info
+                printf '<<<<<<< ours\nours LOCAL-EDIT\n=======\ntheirs\n>>>>>>> theirs\n' > "$INSTALL/README.md"
+                [ -n "$(git -C "$INSTALL" ls-files -u)" ] || die "the install has no unmerged files"
+                ;;
+            esac
+          }
+          # check_recovered STATE: at origin's main, nothing unmerged, and
+          # every local edit (only those) in one rescue ref.
+          check_recovered() {
+            [ "$(git -C "$INSTALL" rev-parse HEAD)" = "$MAIN" ] || die "$1: the install is at $(git -C "$INSTALL" rev-parse HEAD), not $MAIN"
+            [ -z "$(git -C "$INSTALL" ls-files -u)" ] || die "$1: unmerged files remain"
+            [ -f "$INSTALL/bin/gstack-ff-update" ] || die "$1: bin/gstack-ff-update is missing"
+            refs=$(git -C "$INSTALL" for-each-ref --format='%(refname)' refs/gstack/rescue)
+            if [ "$1" = clean ]; then
+              [ -z "$refs" ] || die "clean: a rescue ref was made: $refs"
+              return 0
+            fi
+            [ "$(printf '%s\n' "$refs" | grep -c .)" = 1 ] || die "$1: expected one rescue ref, got: $refs"
+            file=docs/troubleshooting.md; [ "$1" != unmerged ] || file=README.md
+            git -C "$INSTALL" show "$refs:$file" > "$T/rescued"
+            grep -q 'LOCAL-EDIT' "$T/rescued" || die "$1: the rescue ref lacks the local edit to $file"
+            [ "$(git -C "$INSTALL" diff --name-only "$refs^" "$refs")" = "$file" ] || die "$1: the rescue ref holds more than the user's edit"
+          }
+          LIB
+          bash -n "$T/lib.sh"
+        shell: bash
+
+      - name: 'Held clean and already-unmerged installs: v1.91.101.0 holds, the PowerShell recovery form recovers'
+        # The form's last step (.\setup.ps1) is replaced by a marker here; the
+        # dirty-conflicting state below runs it verbatim.
+        run: |
+          set -euo pipefail
+          . "$RUNNER_TEMP/held/lib.sh"
+          for state in clean unmerged; do
+            install_state "$state"
+            run_updater '^[^ ]+ HELD hook-check-unavailable'
+            case_ok "$state/v1.91.101.0-held"
+            CODE=0
+            OUT=$(run_ps_form recovery-powershell 'Write-Output SETUP_WOULD_RUN') || CODE=$?
+            echo "$OUT"
+            [ "$CODE" -eq 0 ] || die "$state: the recovery form exited $CODE"
+            grep -q '^SETUP_WOULD_RUN' <<< "$OUT" || die "$state: the recovery form did not reach its setup step"
+            check_recovered "$state"
+            case_ok "$state/recovered"
+          done
+        shell: bash
+
+      - name: 'Held dirty-conflicting install: the PowerShell recovery form, verbatim with .\setup.ps1'
+        run: |
+          set -euo pipefail
+          . "$RUNNER_TEMP/held/lib.sh"
+          install_state dirty
+          run_updater '^[^ ]+ HELD hook-check-unavailable'
+          case_ok dirty/v1.91.101.0-held
+          set +e
+          OUT=$(run_ps_form recovery-powershell)
+          CODE=$?
+          set -e
+          echo "$OUT" | tail -n 60
+          [ "$CODE" -eq 0 ] || die "dirty: the recovery form exited $CODE"
+          check_recovered dirty
+          case_ok dirty/recovered-and-set-up
+        shell: bash
+
+      - name: The PowerShell trial and go-back forms move the install
+        run: |
+          set -euo pipefail
+          . "$RUNNER_TEMP/held/lib.sh"
+          set +e
+          OUT=$(run_ps_form trial-powershell '' fix-branch)
+          CODE=$?
+          set -e
+          echo "$OUT" | tail -n 30
+          [ "$CODE" -eq 0 ] || die "the trial form exited $CODE"
+          [ "$(git -C "$INSTALL" rev-parse HEAD)" = "$FIX" ] || die "the trial form did not check out fix-branch"
+          ! git -C "$INSTALL" symbolic-ref -q HEAD >/dev/null || die "the trial form left HEAD on a branch"
+          case_ok trial
+          set +e
+          OUT=$(run_ps_form goback-powershell)
+          CODE=$?
+          set -e
+          echo "$OUT" | tail -n 30
+          [ "$CODE" -eq 0 ] || die "the go-back form exited $CODE"
+          [ "$(git -C "$INSTALL" symbolic-ref --short HEAD)" = main ] || die "the go-back form did not return to main"
+          [ "$(git -C "$INSTALL" rev-parse HEAD)" = "$MAIN" ] || die "main is not at $MAIN"
+          case_ok goback
+        shell: bash
+
+      - name: The new updater takes a later release whose symlink sorts before its target
+        # Pushed only now (after recovery), so the hold above is
+        # connect-chrome's alone. The old updater's archive | tar extraction is
+        # what MSYS tar failed; the new one extracts without tar.
+        run: |
+          set -euo pipefail
+          . "$RUNNER_TEMP/held/lib.sh"
+          export GIT_INDEX_FILE="$T/synth.index"
+          git read-tree "$MAIN"
+          git update-index --add \
+            --cacheinfo "120000,$(printf 'b-target' | git hash-object -w --stdin),e2e-synthetic/a-link" \
+            --cacheinfo "100644,$(printf 'target\n' | git hash-object -w --stdin),e2e-synthetic/b-target"
+          SYNTH=$(git commit-tree -p "$MAIN" -m "a later release: a symlink sorted before its target" "$(git write-tree)")
+          unset GIT_INDEX_FILE
+          git push -q "$T/origin.git" "$SYNTH:refs/heads/main"
+          run_updater '^[^ ]+ (UPDATED|HELD|PULL_FAILED|SETUP_FAILED|MIGRATIONS_FAILED) ' 1800
+          grep -q ' UPDATED ' "$T/updater-line" || die "the new updater did not log UPDATED"
+          [ "$(git -C "$INSTALL" rev-parse HEAD)" = "$SYNTH" ] || die "the install is not at the later release"
+          case_ok later-release/updated
+        shell: bash
+
+      - name: Every held-install case ran
+        run: |
+          set -euo pipefail
+          cat "$RUNNER_TEMP/held/cases"
+          EXPECTED='clean/v1.91.101.0-held
+          clean/recovered
+          unmerged/v1.91.101.0-held
+          unmerged/recovered
+          dirty/v1.91.101.0-held
+          dirty/recovered-and-set-up
+          trial
+          goback
+          later-release/updated'
+          test "$(cat "$RUNNER_TEMP/held/cases")" = "$(printf '%s\n' "$EXPECTED" | sed 's/^ *//')" || (echo "a held-install case did not run" && exit 1)
+        shell: bash

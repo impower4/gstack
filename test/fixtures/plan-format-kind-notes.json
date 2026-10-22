@@ -1,0 +1,14 @@
+{
+  "_comment": "Kind-note lines from captured kind-differentiated AskUserQuestions. known_good must match KIND_NOTE_RE; known_bad must not.",
+  "known_good": [
+    "Note: options differ in kind, not coverage — no completeness score.",
+    "These choices differ in kind, so there is no completeness score.",
+    "The options are different kinds of decision; they are not comparable on coverage.",
+    "No completeness score: the options trade scope, not coverage."
+  ],
+  "known_bad": [
+    "Completeness: A=9/10, B=6/10",
+    "Recommendation: A because it ships sooner.",
+    "Both options are kind to the user."
+  ]
+}

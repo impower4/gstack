@@ -1,0 +1,55 @@
+{
+  "source": "CI E2E Evals runs 36755432181 (head 131d43be, slice 9) and 36762284181 (head 4643cb85, slice 10); exact public AskUserQuestion inputs whose Skip descriptions narrate later-pass work or prior-record replacement. Both captures remain failed.",
+  "cases": [
+    {
+      "run": "36755432181",
+      "test": "shared-libs-review-path-eligibility",
+      "scenario": "submodule",
+      "git_sha": "9045484c",
+      "input": {
+        "questions": [
+          {
+            "question": "[ADVISORY] src/retry-worker.ts:2 — the diff replaced the worker's one-line re-export of lib/retry-after with a verbatim 15-line copy of retrySeconds; modules/retry/retry-route.ts (first-party submodule, same runtime bundle per both READMEs) carries the same copy plus a new trailing comment added after the prior decision. The prior Skip is not reusable (checker: reusable:false; submodule path not snapshot-covered and changed). Proposed fix: re-export the tested lib/retry-after.ts retrySeconds from both callers (worker: 1-line re-export; submodule route: 1-line re-export via a submodule commit plus gitlink bump), keeping deployment boundaries as documented. Estimated implementation: remove 32, add 2, save ~30 lines; existing test/retry-after.test.ts covers the contract, ~2–4 optional lines to assert re-export identity. Shared-failure blast radius: scheduler and src/retry-route already depend on this helper, so worker and submodule route would join the same failure domain. RECOMMENDATION: Skip in this bounded no-edit replay (a Fix requires source and submodule edits that this replay cannot apply), and apply the extraction in a normal editing pass. How do you want to handle this advisory?",
+            "header": "Advisory",
+            "options": [
+              {
+                "label": "Skip (Recommended)",
+                "description": "Record an explicit Skip for this advisory now; no edits. The extraction can be applied in a later editing review pass."
+              },
+              {
+                "label": "Fix as recommended",
+                "description": "Approve re-exporting retrySeconds from lib/retry-after in the worker and the submodule route. This requires source and submodule edits, which this bounded no-edit replay cannot apply; the review would be reported blocked rather than completed."
+              }
+            ],
+            "multiSelect": false
+          }
+        ]
+      }
+    },
+    {
+      "run": "36762284181",
+      "test": "shared-libs-review-index-flags",
+      "scenario": "skip-worktree",
+      "git_sha": "3bbf9334",
+      "input": {
+        "questions": [
+          {
+            "question": "[ADVISORY] src/retry-worker.ts:2 — the diff replaces the worker's one-line re-export of the tested helper lib/retry-after.ts#retrySeconds (HEAD commit 'worker initially reuses the existing helper') with a byte-identical 14-line copy of that function. src/retry-route.ts:2-15 already carries the same verbatim copy, and src/scheduler.ts:1 imports the real helper. The helper's contract (null/blank fallback, integer seconds, HTTP-date parsing, 3600s ceiling, negative → 0) is covered by test/retry-after.test.ts:3-9. Proposal: revert the worker to `export { retrySeconds } from '../lib/retry-after';` and migrate the route to the same import. No behavior differences to preserve (identical bodies, same TypeScript runtime). Estimated implementation: worker -15/+1, route -17/+1, total ≈ -30 lines; existing helper tests cover the shared contract, an import smoke test could add ~0-5 lines. Shared-failure blast radius: scheduler, worker and route all depend on one parser, which is already true for the scheduler and the helper is tested. Caveat: src/retry-route.ts has the skip-worktree index flag and an uncommitted trailing edit, so the normal diff hides it and `git add` will not stage a migration there until the flag is cleared. RECOMMENDATION: Fix. Note this is a bounded no-edit replay: choosing Fix records the fix as approved but blocked, not applied. How do you want to handle this advisory?",
+            "header": "Advisory",
+            "options": [
+              {
+                "label": "Fix as recommended (Recommended)",
+                "description": "Approve reverting the worker to the helper re-export and migrating the route caller. In this no-edit replay the edit cannot be applied, so the review reports the fix as approved-but-blocked and does not claim completion."
+              },
+              {
+                "label": "Skip",
+                "description": "Keep the duplicated parser in the worker and route for now. Recorded as an explicit new Skip decision for this finding identity (worker, route, helper), replacing the invalidated prior Skip."
+              }
+            ],
+            "multiSelect": false
+          }
+        ]
+      }
+    }
+  ]
+}

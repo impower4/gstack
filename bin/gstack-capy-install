@@ -1,0 +1,586 @@
+#!/usr/bin/env bash
+# gstack-capy-install — install gstack on a Capy cloud machine (Ubuntu) and
+# certify it with one grep-able line.
+#
+# Usage:
+#   gstack-capy-install [--for <skill> | --only <skill> | --require <id,id>] [--with-browser]
+#                       [--revision <ref>] [--project <path>] [--root <dir>]
+#                       [--check] [--min-revision <v>|unknown]
+#
+# Steps: clone or reuse the checkout under a lock (never reset, never pulled
+# here; the Capy skill bootstrapper fast-forwards below-minimum checkouts and
+# hands its held lock over with GSTACK_CAPY_LOCK_HELD=1); preflight git, curl,
+# node, jq and Bun through gstack_bun_resolve (an installed Bun that satisfies
+# gstack's minimum and the project's pins is reused; otherwise the exact
+# release archive, SHA-256 verified, is published in the runtime store
+# <state root>/runtimes/bun/<version>/bun, GSTACK_BUN_INSTALL_VERSION
+# overriding the default); ./setup
+# --host claude --no-prefix; ./setup --host codex --model gpt-6-astra (both
+# skipped when this HEAD was already set up and the check passes);
+# gstack-doctor --check with the launch PATH; the install verdict
+# (bin/gstack-install-verdict.sh), keyed by checkout and project and holding
+# the resolved Bun. --check certifies only: no clone, no Bun install, no
+# setup. On a Capy machine (CAPY_MACHINE_CONFIG or ~/.capy/system) install also writes the marked
+# per-directory shims ~/.local/bin/bun and ~/.local/bin/bunx, which run the Bun
+# recorded for the project around the working directory in any fresh shell;
+# GSTACK_BUN_SHIM=0 opts out, a foreign ~/.local/bin/bun is never touched, and
+# deleting the files removes them. --for review-voice (an install profile,
+# lib/doctor-components.ts INSTALL_PROFILES) is the reviewer's shape: clone or
+# reuse, Bun at gstack's own supported minimum with the project's pins never
+# applied, no ./setup, no host profiles, no shim; the doctor certifies only the
+# read-only helpers, and an ok verdict a fuller install wrote for this HEAD is
+# kept. Without the Drive skill, gstack_capy_bootstrap_cmd prints the command
+# that clones into an explicit root and runs the checkout's own bootstrapper.
+# Chromium is lazy by default (bin/gstack-browser-ensure
+# installs it on first use); --with-browser installs it now. The last lines
+# are the GSTACK_LAUNCH line the parent supplies to every gstack command it
+# launches and the doctor's trailer (`gstack: ok ...` or `gstack: fail ...`;
+# grep that, never pipe through tail).
+# Exit: 0 ok, 1 a component failed, 2 usage, 3 preflight stopped before ./setup.
+set -u
+BASH_COMPAT=50
+
+SELF="$(cd "$(dirname "$0")/.." && pwd -P)"
+ROOT="${GSTACK_CAPY_ROOT:-$SELF}"
+REPO="${GSTACK_CAPY_REPO:-https://github.com/garrytan/gstack.git}"
+DOCS="https://github.com/garrytan/gstack/blob/main/docs/troubleshooting.md"
+FOR="" REQUIRE="" WITH_BROWSER=0 REVISION="" PROJECT="" CHECK_ONLY=0 MIN_REVISION="${GSTACK_CAPY_REMOTE_MIN:-}"
+usage() { sed -n '2,32p' "$0" | sed 's/^# \{0,1\}//'; }
+need() { [ -n "${2:-}" ] || { echo "gstack-capy-install: $1 needs a value" >&2; usage >&2; exit 2; }; }
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --for|--only) need "$1" "${2:-}"; FOR="$2"; shift ;;
+    --require) need "$1" "${2:-}"; REQUIRE="$2"; shift ;;
+    --with-browser) WITH_BROWSER=1 ;;
+    --revision) need "$1" "${2:-}"; REVISION="$2"; shift ;;
+    --project) need "$1" "${2:-}"; PROJECT="$2"; shift ;;
+    --root) need "$1" "${2:-}"; ROOT="$2"; shift ;;
+    --check) CHECK_ONLY=1 ;;
+    --min-revision) need "$1" "${2:-}"; MIN_REVISION="$2"; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "gstack-capy-install: unknown argument '$1'" >&2; usage >&2; exit 2 ;;
+  esac
+  shift
+done
+[ -n "$FOR" ] && [ -n "$REQUIRE" ] && { echo "gstack-capy-install: --for and --require are exclusive" >&2; exit 2; }
+[ -z "$FOR" ] && [ -z "$REQUIRE" ] && REQUIRE="claude,codex,patch"
+
+say() { echo "gstack-capy-install: $*"; }
+stop() { # CODE MESSAGE FIX — print and exit 3 before ./setup
+  echo "gstack-capy-install: $2; fix: $3 ($1; $DOCS#$(gstack_result_anchor "$1" 2>/dev/null || echo capy-install-preflight-failed))" >&2
+  exit 3
+}
+# Result-code anchors come from the generated table (lib/result-codes.ts).
+. "$SELF/bin/gstack-doctor-components.sh" 2>/dev/null || { gstack_result_anchor() { return 1; }; gstack_doctor_install_profile() { return 1; }; }
+PROFILE=0; [ -n "$FOR" ] && gstack_doctor_install_profile "$FOR" && PROFILE=1
+now() { date +%s; }
+T0=$(now); ORIG_PWD=$(pwd)
+
+# 1. Clone or reuse, under the same lock the user-scope skill takes.
+mkdir -p "$(dirname "$ROOT")" || stop INSTALL_PREFLIGHT_FAILED "cannot create $(dirname "$ROOT")" "choose a writable --root"
+command -v git >/dev/null 2>&1 || stop INSTALL_PREFLIGHT_FAILED "preflight: git not found" "apt-get install -y git"
+# The bootstrapper's fast-forward, this install and its check are one
+# transaction: with GSTACK_CAPY_LOCK_HELD=1 the caller already holds the lock
+# (inherited fd), so taking it again would deadlock.
+if [ "${GSTACK_CAPY_LOCK_HELD:-}" != 1 ]; then
+  exec 9>"$(dirname "$ROOT")/.gstack-capy-install.lock"
+  if command -v flock >/dev/null 2>&1; then flock -w 900 9 || stop INSTALL_PREFLIGHT_FAILED "another gstack-capy-install holds $(dirname "$ROOT")/.gstack-capy-install.lock" "wait for it to finish"; fi
+fi
+if [ "$CHECK_ONLY" -eq 1 ] && { [ ! -f "$ROOT/setup" ] || [ ! -f "$ROOT/VERSION" ]; }; then
+  echo "gstack: fail not-installed — no gstack checkout at $ROOT; fix: $(gstack_capy_bootstrap_cmd "$ROOT" "$FOR" 2>/dev/null || echo "git clone $REPO $ROOT, then $ROOT/bin/gstack-capy-install${FOR:+ --for $FOR}") (clones into $ROOT when absent, then installs)"
+  exit 1
+elif [ "$CHECK_ONLY" -eq 1 ]; then :
+elif [ ! -f "$ROOT/setup" ] || [ ! -f "$ROOT/VERSION" ]; then
+  [ -e "$ROOT" ] && [ -n "$(ls -A "$ROOT" 2>/dev/null)" ] && stop INSTALL_PREFLIGHT_FAILED "$ROOT exists but is not a gstack checkout" "remove it or pass --root <dir>"
+  say "cloning $REPO into $ROOT${REVISION:+ at $REVISION}"
+  if [ -n "$REVISION" ] && git clone --quiet --single-branch --depth 1 --branch "$REVISION" "$REPO" "$ROOT" 2>/dev/null; then :
+  elif [ -n "$REVISION" ]; then
+    git clone --quiet "$REPO" "$ROOT" && git -C "$ROOT" checkout --quiet "$REVISION" || stop INSTALL_PREFLIGHT_FAILED "could not clone $REPO at $REVISION" "check the revision and network, then re-run"
+  else
+    git clone --quiet --single-branch --depth 1 "$REPO" "$ROOT" || stop INSTALL_PREFLIGHT_FAILED "could not clone $REPO" "check network access to github.com, then re-run"
+  fi
+  say "cloned $REPO into $ROOT at $(git -C "$ROOT" rev-parse --short=12 HEAD 2>/dev/null) ($(head -1 "$ROOT/VERSION"))"
+elif [ -n "${GSTACK_CAPY_CLONED:-}" ]; then
+  say "cloned $GSTACK_CAPY_CLONED into $ROOT at $(git -C "$ROOT" rev-parse --short=12 HEAD 2>/dev/null) ($(head -1 "$ROOT/VERSION"))"
+else
+  say "reusing $ROOT ($(head -1 "$ROOT/VERSION")); never reset or pulled"
+fi
+. "$ROOT/bin/gstack-bun-version.sh" || stop INSTALL_PREFLIGHT_FAILED "$ROOT/bin/gstack-bun-version.sh is missing" "re-clone gstack"
+. "$ROOT/bin/gstack-install-verdict.sh" || stop INSTALL_PREFLIGHT_FAILED "$ROOT/bin/gstack-install-verdict.sh is missing" "re-clone gstack"
+. "$ROOT/bin/gstack-node-runtime.sh" || stop INSTALL_PREFLIGHT_FAILED "$ROOT/bin/gstack-node-runtime.sh is missing" "re-clone gstack"
+
+# 2. Preflight: tools, then Bun through the one resolution contract
+# (gstack_bun_resolve: the project's exact pin and gstack's install default in
+# the versioned runtime store, $BUN_INSTALL/bin, ~/.bun/bin, PATH; the first
+# that satisfies gstack's minimum and every project pin wins). A verified
+# archive is downloaded into the store only when no candidate qualifies; the
+# store is published atomically and ~/.bun/bin is never written. --check reads
+# the pins with the Bun the verdict recorded (any eligible Bun when that one is
+# gone; the jq subset when nothing is recorded) and reports drift from the
+# recorded resolution (BUN_RESOLUTION_DRIFT) with one converging fix.
+STATE_ROOT=$("$ROOT/bin/gstack-paths" --get GSTACK_STATE_ROOT); : "${GSTACK_STATE_ROOT:=$STATE_ROOT}"; : "${GSTACK_STATE_ROOT:?gstack-paths failed; reinstall with ./setup or /gstack-upgrade}"
+ROOT_REAL=$(cd "$ROOT" && pwd -P)
+STORE=$(gstack_bun_store "$GSTACK_STATE_ROOT")
+[ "$CHECK_ONLY" -eq 1 ] || for tool in curl node jq; do
+  command -v "$tool" >/dev/null 2>&1 || stop INSTALL_PREFLIGHT_FAILED "preflight: $tool not found" "install $tool (apt-get install -y jq; Node from https://nodejs.org or nvm), then re-run"
+done
+INSTALL_VERSION=$(gstack_bun_install_version) || stop BUN_INSTALL_VERSION_INVALID "GSTACK_BUN_INSTALL_VERSION=$INSTALL_VERSION is not a verified Bun at or above gstack's supported minimum $GSTACK_BUN_TESTED (verified archives: $GSTACK_BUN_VERIFIED)" "unset GSTACK_BUN_INSTALL_VERSION, or set it to one of: $GSTACK_BUN_VERIFIED"
+[ -n "$PROJECT" ] || { PROJECT=$(cd "$ORIG_PWD" && git rev-parse --show-toplevel 2>/dev/null || true); [ "$(cd "${PROJECT:-/nonexistent}" 2>/dev/null && pwd -P)" = "$ROOT_REAL" ] && PROJECT=""; }
+PROJECT_REAL=""; [ -n "$PROJECT" ] && PROJECT_REAL=$(cd "$PROJECT" 2>/dev/null && pwd -P)
+VERDICT=$(gstack_install_verdict_path "$GSTACK_STATE_ROOT" "$ROOT_REAL" "$PROJECT_REAL")
+REC_BUN="" REC_VER="" REC_RULE="" REC_BUN_INSTALL=""
+if [ -f "$VERDICT" ]; then
+  REC_BUN=$(gstack_install_verdict_field "$VERDICT" bun_path) REC_VER=$(gstack_install_verdict_field "$VERDICT" bun_version)
+  REC_RULE=$(gstack_install_verdict_field "$VERDICT" bun_rule) REC_BUN_INSTALL=$(gstack_install_verdict_field "$VERDICT" bun_install)
+fi
+LAUNCH_DIR="" RES_BIN="" RES_VER="" RES_RULE=""
+PINS_OUT="" PINS_MODE=none RUNNER="" PIN="" PIN_SRC="" PIN_EXACT="" PIN_ALTS=""
+# read_pins RUNNER — the project's pins through the doctor's parser
+# (lib/runtime-pins.ts: engines, packageManager, .tool-versions, .bun-version,
+# CI lanes) when RUNNER can run it, else the package.json / .bun-version subset
+# read with jq. Sets PINS_MODE (parser|jq|none) and PIN_EXACT, the exact Bun
+# to prefer: the one non-CI exact pin (two different ones conflict), else
+# among this platform's CI exact pins (alternatives; any one satisfies CI)
+# the install version when listed, else the highest verified one, else the
+# highest one.
+read_pins() {
+  RUNNER="$1" PINS_OUT="" PINS_MODE=none PIN="" PIN_SRC="" PIN_EXACT="" PIN_ALTS=""
+  [ -n "$PROJECT" ] && [ "$PROFILE" -eq 0 ] || return 0
+  [ -n "$RUNNER" ] && [ -f "$ROOT/bin/gstack-runtime-pins.ts" ] && PINS_OUT=$("$RUNNER" "$ROOT/bin/gstack-runtime-pins.ts" --project "$PROJECT" 2>/dev/null)
+  if printf '%s\n' "$PINS_OUT" | grep -q '^PINS_VERDICT: '; then
+    PINS_MODE=parser
+    _exact=$(printf '%s\n' "$PINS_OUT" | sed -n 's/^PIN_EXACT_REQUIRED: bun \([^ ]*\) \([^ ]*\)$/\1 \2/p')
+    if [ "$(printf '%s\n' "$_exact" | grep -c .)" -gt 1 ]; then
+      stop RUNTIME_PIN_CONFLICT "Bun conflict: $PROJECT pins more than one exact Bun ($(printf '%s\n' "$_exact" | sed 's/^\([^ ]*\) \(.*\)$/\2 pins \1/' | tr '\n' ';' | sed 's/;$//; s/;/; /g'))" "make the project's exact Bun pins agree"
+    fi
+    if [ -n "$_exact" ]; then
+      PIN_EXACT=${_exact%% *} PIN_SRC="$PROJECT/$(printf '%s' "${_exact#* }" | sed 's/:[0-9]*$//')"
+      return 0
+    fi
+    _alts=$(printf '%s\n' "$PINS_OUT" | sed -n 's/^PIN_CI_ALTERNATIVES: bun //p')
+    [ -n "$_alts" ] || return 0
+    case "$_alts" in *' '*) PIN_ALTS="$_alts" ;; esac
+    PIN_SRC="$PROJECT/.github/workflows (CI exact pins: $_alts)"
+    case " $_alts " in *" $INSTALL_VERSION "*) PIN_EXACT="$INSTALL_VERSION"; return 0 ;; esac
+    for _v in $(printf '%s\n' $_alts | sort -t. -k1,1nr -k2,2nr -k3,3nr); do
+      gstack_bun_archive_sha256 linux-x64 "$_v" >/dev/null && [ "$(gstack_bun_status "$_v")" = ok ] && { PIN_EXACT="$_v"; return 0; }
+    done
+    PIN_EXACT=$(printf '%s\n' $_alts | sort -t. -k1,1nr -k2,2nr -k3,3nr | head -1)
+    return 0
+  fi
+  command -v jq >/dev/null 2>&1 || return 0
+  PINS_MODE=jq
+  if [ -f "$PROJECT/package.json" ]; then
+    PIN=$(jq -r '.engines.bun // (.packageManager // "" | select(startswith("bun@")) | ltrimstr("bun@")) // empty' "$PROJECT/package.json" 2>/dev/null | head -1)
+    [ -n "$PIN" ] && PIN_SRC="$PROJECT/package.json"
+  fi
+  if [ -z "$PIN" ] && [ -s "$PROJECT/.bun-version" ]; then PIN=$(head -1 "$PROJECT/.bun-version" | tr -d ' v'); PIN_SRC="$PROJECT/.bun-version"; fi
+  case "$PIN" in
+    '') PINS_MODE=none ;;
+    [0-9]*.[0-9]*.[0-9]*) PIN_EXACT="$PIN" ;;
+    '>='*) ;;
+    *) say "note: project pin '$PIN' ($PIN_SRC) is not evaluated here; gstack-doctor's pins row checks it after install" ;;
+  esac
+}
+# pins_accept VERSION — the resolver's eligibility hook: VERSION satisfies every project pin.
+pins_accept() {
+  case "$PINS_MODE" in
+    parser) "$RUNNER" "$ROOT/bin/gstack-runtime-pins.ts" --project "$PROJECT" --bun "$1" 2>/dev/null | grep -Eq '^PINS_VERDICT: (pass|none)$' ;;
+    jq) case "$PIN" in
+          '>='*) _gstack_bun_below "$1" "${PIN#>=}"; [ $? -eq 1 ] ;;
+          [0-9]*.[0-9]*.[0-9]*) [ "$1" = "$PIN" ] ;;
+          *) return 0 ;;
+        esac ;;
+    *) return 0 ;;
+  esac
+}
+pins_text() {
+  case "$PINS_MODE" in
+    parser) printf '%s\n' "$PINS_OUT" | sed -n 's/^PIN_SUMMARY: //p' | grep '^bun' | tr '\n' ';' | sed 's/;$//; s/;/; /g' ;;
+    *) printf '%s' "${PIN:+$PIN ($PIN_SRC)}" ;;
+  esac
+}
+resolve() { # — RES_* from the contract under the project's pins
+  if gstack_bun_resolve "$STORE" "$PIN_EXACT" pins_accept; then RES_BIN="$_gb_bin" RES_VER="$_gb_ver" RES_RULE="$_gb_rule"; return 0; fi
+  RES_BIN="" RES_VER="" RES_RULE=""
+  return 1
+}
+install_bun() { # VERSION REASON — download, verify and publish Bun VERSION at $STORE/VERSION/bun
+  WANT="$1"
+  say "$2; installing bun $WANT from its release archive (SHA-256 verified) into $STORE/$WANT"
+  case "$(uname -ms)" in
+    'Linux x86_64') TARGET=linux-x64; grep -q avx2 /proc/cpuinfo 2>/dev/null || TARGET=linux-x64-baseline ;;
+    'Linux aarch64'|'Linux arm64') TARGET=linux-aarch64 ;;
+    *) stop INSTALL_PREFLIGHT_FAILED "no verified Bun $WANT archive for $(uname -ms) (this installer is for Capy cloud Ubuntu)" "install Bun $WANT by hand (https://bun.sh), then re-run" ;;
+  esac
+  SHA=$(gstack_bun_archive_sha256 "$TARGET" "$WANT") || stop INSTALL_PREFLIGHT_FAILED "no verified Bun $WANT archive for $TARGET" "install Bun $WANT by hand, then re-run"
+  mkdir -p "$STORE" || stop INSTALL_PREFLIGHT_FAILED "cannot create the runtime store $STORE" "set GSTACK_STATE_ROOT to a writable directory"
+  exec 8>"$HOME/.gstack-runtime.lock"
+  if command -v flock >/dev/null 2>&1; then flock -w 300 8 || stop INSTALL_PREFLIGHT_FAILED "another install holds $HOME/.gstack-runtime.lock" "wait for it to finish"; fi
+  if [ ! -x "$STORE/$WANT/bun" ] || [ "$("$STORE/$WANT/bun" --version 2>/dev/null | head -1)" != "$WANT" ]; then
+    TMP=$(mktemp -d "$STORE/.tmp.XXXXXX") || stop INSTALL_PREFLIGHT_FAILED "cannot create a temp dir in $STORE" "set GSTACK_STATE_ROOT to a writable directory"
+    curl --retry 3 -fsSL "https://github.com/oven-sh/bun/releases/download/bun-v$WANT/bun-$TARGET.zip" -o "$TMP/bun.zip" || { rm -rf "$TMP"; stop INSTALL_PREFLIGHT_FAILED "could not download bun-v$WANT/bun-$TARGET.zip" "check network access to github.com, then re-run"; }
+    echo "$SHA  $TMP/bun.zip" | sha256sum -c - >/dev/null 2>&1 || { rm -rf "$TMP"; stop INSTALL_PREFLIGHT_FAILED "bun-$TARGET.zip SHA-256 mismatch (expected $SHA); nothing installed" "update gstack_bun_archive_sha256 in bin/gstack-bun-version.sh only after checking the release's SHASUMS256.txt"; }
+    mkdir "$TMP/pub" && (cd "$TMP" && unzip -qo bun.zip) && install -m 0755 "$TMP/bun-$TARGET/bun" "$TMP/pub/bun" && ln -s bun "$TMP/pub/bunx" || { rm -rf "$TMP"; stop INSTALL_PREFLIGHT_FAILED "could not unpack bun into $STORE" "install unzip, or set GSTACK_STATE_ROOT to a writable directory"; }
+    _got=$("$TMP/pub/bun" --version 2>/dev/null | head -1)
+    [ "$_got" = "$WANT" ] || { rm -rf "$TMP"; stop INSTALL_PREFLIGHT_FAILED "the downloaded bun reports $_got, expected $WANT; nothing installed" "re-run; report it if it repeats"; }
+    # Publish without a window: a new version directory is renamed into
+    # place; in an existing one each file is renamed over its predecessor.
+    if [ -d "$STORE/$WANT" ] && [ ! -L "$STORE/$WANT" ]; then
+      mv -fT "$TMP/pub/bun" "$STORE/$WANT/bun" && mv -fT "$TMP/pub/bunx" "$STORE/$WANT/bunx"
+    else
+      rm -f "$STORE/$WANT" && mv -T "$TMP/pub" "$STORE/$WANT"
+    fi || { rm -rf "$TMP"; stop INSTALL_PREFLIGHT_FAILED "could not publish $STORE/$WANT" "check $STORE, then re-run"; }
+    rm -rf "$TMP"
+  fi
+  [ -e "$STORE/$WANT/bunx" ] || [ -L "$STORE/$WANT/bunx" ] || ln -s bun "$STORE/$WANT/bunx" 2>/dev/null || true
+  exec 8>&-
+  say "bun $WANT installed at $STORE/$WANT/bun"
+}
+conflict() { # DETAIL
+  stop RUNTIME_PIN_CONFLICT "Bun conflict: $1" "raise the project's pin to a verified version ($GSTACK_BUN_VERIFIED), or install gstack on a machine the project already provisions"
+}
+if [ "$CHECK_ONLY" -eq 1 ]; then
+  _runner=""
+  if [ -n "$REC_BUN" ] && [ -x "$REC_BUN" ]; then _runner="$REC_BUN"
+  elif [ -n "$REC_BUN" ] && gstack_bun_resolve "$STORE"; then _runner="$_gb_bin"
+  fi
+  read_pins "$_runner"
+  resolve || true
+else
+  # A Bun to read the pins with: the contract without project pins, else
+  # any Bun at or above the security floor (the parser runs there).
+  _runner=""
+  if gstack_bun_resolve "$STORE"; then _runner="$_gb_bin"
+  elif command -v bun >/dev/null 2>&1 && [ "$(gstack_bun_status "$(bun --version 2>/dev/null | head -1)")" = untested ]; then _runner=$(command -v bun)
+  fi
+  read_pins "$_runner"
+  if ! resolve; then
+    JUDGED="${_gb_judged:-none}"
+    if [ -n "$PIN_EXACT" ]; then
+      [ "$(gstack_bun_status "$PIN_EXACT")" = ok ] && gstack_bun_archive_sha256 linux-x64 "$PIN_EXACT" >/dev/null \
+        || conflict "gstack needs >=$GSTACK_BUN_TESTED (verified archives: $GSTACK_BUN_VERIFIED), $PIN_SRC pins exactly $PIN_EXACT"
+      WANT="$PIN_EXACT"
+    else
+      WANT="$INSTALL_VERSION"
+    fi
+    pins_accept "$WANT" || conflict "gstack needs >=$GSTACK_BUN_TESTED (verified archives: $GSTACK_BUN_VERIFIED), $PROJECT pins $(pins_text)"
+    if [ -n "$PROJECT" ] && [ "$PINS_MODE" != none ]; then
+      install_bun "$WANT" "no installed Bun satisfies gstack's supported minimum $GSTACK_BUN_TESTED and the project pins $(pins_text) (judged: $JUDGED)"
+    else
+      install_bun "$WANT" "no installed Bun satisfies gstack's supported minimum $GSTACK_BUN_TESTED (judged: $JUDGED)"
+    fi
+    [ "$PINS_MODE" = parser ] || read_pins "$STORE/$WANT/bun"
+    resolve || conflict "bun $WANT in $STORE does not satisfy $PROJECT's pins $(pins_text) (judged: ${_gb_judged:-none})"
+  fi
+  [ -n "${GSTACK_BUN_INSTALL_VERSION:-}" ] && say "install version $INSTALL_VERSION from GSTACK_BUN_INSTALL_VERSION (default $GSTACK_BUN_DEFAULT)"
+  say "bun $RES_VER at $RES_BIN ($(gstack_bun_rule_text "$RES_RULE"); satisfies gstack's supported minimum $GSTACK_BUN_TESTED$([ -n "$PIN_ALTS" ] && printf " and the project's CI pins (alternatives: %s)" "$PIN_ALTS" || printf '%s' "${PIN_EXACT:+ and the project pin $PIN_EXACT}")$([ -z "$PIN_EXACT" ] && [ -n "$PIN" ] && printf ' and the project pin %s' "$PIN")$([ -z "$PIN_EXACT" ] && [ "$PINS_MODE" = parser ] && printf ' and the project pins'))"
+fi
+[ "$PROFILE" -eq 1 ] && say "$FOR: helper runtime (bun at gstack's supported minimum $GSTACK_BUN_TESTED${PROJECT:+; the pins of $PROJECT are not applied: no repo tests run here})"
+# Drift (--check only). The recorded Bun stays certified while it exists,
+# reports the recorded version and satisfies gstack's minimum and the pins;
+# a different candidate that would now resolve first is only a note. Drift
+# (BUN_RESOLUTION_DRIFT) is the recorded Bun gone, changed or no longer
+# satisfying the pins.
+if [ "$CHECK_ONLY" -eq 1 ] && [ -n "$REC_BUN" ]; then
+  _why="" _wrapper="${GSTACK_CAPY_WRAPPER_PATH:+bash $GSTACK_CAPY_WRAPPER_PATH}"; _wrapper="${_wrapper:-$ROOT/bin/gstack-capy-install}${FOR:+ --for $FOR}"
+  _recnow=""; [ -x "$REC_BUN" ] && _recnow=$("$REC_BUN" --version 2>/dev/null | head -1)
+  if [ ! -x "$REC_BUN" ]; then _why="the recorded binary is gone"
+  elif [ "$_recnow" != "$REC_VER" ]; then _why="$REC_BUN now reports ${_recnow:-nothing} (replaced in place)"
+  elif [ "$(gstack_bun_status "$REC_VER")" != ok ] || ! pins_accept "$REC_VER"; then _why="bun $REC_VER no longer satisfies gstack's supported minimum $GSTACK_BUN_TESTED and the project pins $(pins_text)"
+  fi
+  if [ -z "$_why" ]; then
+    [ "$REC_BUN" != "$RES_BIN" ] && say "note: the recorded bun $REC_VER at $REC_BUN stays certified; ${RES_BIN:+bun $RES_VER at $RES_BIN ($RES_RULE) would now resolve first; }run $_wrapper to record the current resolution"
+    RES_BIN="$REC_BUN" RES_VER="$REC_VER" RES_RULE="$REC_RULE"
+  else
+    if [ -n "$RES_BIN" ]; then _fix="$_wrapper (records the current resolution: bun $RES_VER at $RES_BIN)"
+    else _fix="$_wrapper (reinstalls bun ${PIN_EXACT:-$INSTALL_VERSION} into $STORE)"
+    fi
+    _now="no eligible bun"; [ -n "$RES_BIN" ] && _now="bun $RES_VER at $RES_BIN ($RES_RULE)"
+    export GSTACK_DOCTOR_RUNTIME_DRIFT="recorded bun $REC_VER at $REC_BUN ($REC_RULE), now $_now; changed: $_why"
+    export GSTACK_DOCTOR_RUNTIME_DRIFT_FIX="$_fix"
+  fi
+fi
+# Node: the project's exact Node pins resolve, and install into the runtime
+# store, like Bun's (bin/gstack-node-runtime.sh): non-CI exact pins are
+# required, CI exact pins in different jobs are alternatives. Parser mode
+# only. --check keeps the recorded Node while it still reports its version and
+# satisfies the pins, and never installs.
+NODE_STORE=$(gstack_node_store "$GSTACK_STATE_ROOT")
+NODE_BIN="" NODE_VER="" NODE_RULE="" NODE_WANT=""
+node_accept() { ! "$RUNNER" "$ROOT/bin/gstack-runtime-pins.ts" --project "$PROJECT" --node "$1" 2>/dev/null | grep -q '^PIN_FAIL: node '; }
+node_pins_text() { printf '%s\n' "$PINS_OUT" | sed -n 's/^PIN_SUMMARY: //p' | grep '^node' | tr '\n' ';' | sed 's/;$//; s/;/; /g'; }
+if [ "$PINS_MODE" = parser ] && printf '%s\n' "$PINS_OUT" | grep -q '^PIN: node '; then
+  _nreq=$(printf '%s\n' "$PINS_OUT" | sed -n 's/^PIN_EXACT_REQUIRED: node \([^ ]*\) \([^ ]*\)$/\1 \2/p')
+  [ "$(printf '%s\n' "$_nreq" | grep -c .)" -gt 1 ] \
+    && stop RUNTIME_PIN_CONFLICT "Node conflict: $PROJECT pins more than one exact Node ($(printf '%s\n' "$_nreq" | sed 's/^\([^ ]*\) \(.*\)$/\2 pins \1/' | tr '\n' ';' | sed 's/;$//; s/;/; /g'))" "make the project's exact Node pins agree"
+  if [ -n "$_nreq" ]; then NODE_WANT=${_nreq%% *}
+  else NODE_WANT=$(printf '%s\n' "$PINS_OUT" | sed -n 's/^PIN_CI_ALTERNATIVES: node //p' | tr ' ' '\n' | grep . | sort -t. -k1,1nr -k2,2nr -k3,3nr | tr '\n' ' ' | sed 's/ $//')
+  fi
+  REC_NODE="" REC_NODE_VER=""
+  [ -f "$VERDICT" ] && REC_NODE=$(gstack_install_verdict_field "$VERDICT" node_path) REC_NODE_VER=$(gstack_install_verdict_field "$VERDICT" node_version)
+  if [ "$CHECK_ONLY" -eq 1 ] && [ -n "$REC_NODE" ] && [ "$(gstack_node_version "$REC_NODE")" = "$REC_NODE_VER" ] && node_accept "$REC_NODE_VER"; then
+    NODE_BIN="$REC_NODE" NODE_VER="$REC_NODE_VER" NODE_RULE=$(gstack_install_verdict_field "$VERDICT" node_rule)
+  elif gstack_node_resolve "$NODE_STORE" "$NODE_WANT" node_accept; then
+    NODE_BIN="$_gn_bin" NODE_VER="$_gn_ver" NODE_RULE="$_gn_rule"
+  elif [ "$CHECK_ONLY" -eq 0 ] && [ -n "$NODE_WANT" ]; then
+    _nv=${NODE_WANT%% *}
+    say "no installed Node satisfies the project's Node pins $(node_pins_text) (node on PATH: $(gstack_node_version "$(command -v node 2>/dev/null || echo /nonexistent)" || echo none)); installing node $_nv from its release archive (SHA-256 checked against SHASUMS256.txt) into $NODE_STORE/$_nv"
+    exec 8>"$HOME/.gstack-runtime.lock"
+    if command -v flock >/dev/null 2>&1; then flock -w 300 8 || stop INSTALL_PREFLIGHT_FAILED "another install holds $HOME/.gstack-runtime.lock" "wait for it to finish"; fi
+    _nerr=$(gstack_node_install "$NODE_STORE" "$_nv") || stop INSTALL_PREFLIGHT_FAILED "node $_nv: $_nerr" "check network access to nodejs.org, then re-run; or install node $_nv yourself (nvm install $_nv) and re-run"
+    exec 8>&-
+    gstack_node_resolve "$NODE_STORE" "$_nv" node_accept \
+      || stop RUNTIME_PIN_CONFLICT "Node conflict: node $_nv in $NODE_STORE does not satisfy $PROJECT's Node pins $(node_pins_text)" "make the project's Node pins agree"
+    NODE_BIN="$_gn_bin" NODE_VER="$_gn_ver" NODE_RULE="$_gn_rule"
+  else
+    say "note: no installed Node satisfies the project's Node pins $(node_pins_text); gstack-doctor's pins row names the fix"
+  fi
+  [ -n "$NODE_BIN" ] && say "node $NODE_VER at $NODE_BIN ($NODE_RULE; satisfies the project's Node pins $(node_pins_text))"
+fi
+
+# The launch PATH. gstack's store holds one Bun per directory, so a store Bun
+# launches from its own directory. Any other resolved Bun, and a resolved Node
+# that PATH does not already give, launch through a gstack-owned directory of
+# symlinks beside the verdict, so a shared bin directory (/usr/local/bin with
+# the image's node, $BUN_INSTALL/bin) never lands in front of PATH.
+if [ -n "$RES_BIN" ]; then
+  _launch_node=""
+  [ -n "$NODE_BIN" ] && [ "$(gstack_realpath "$(command -v node 2>/dev/null || echo /nonexistent)" 2>/dev/null)" != "$NODE_BIN" ] && _launch_node="$NODE_BIN"
+  if [ -n "$_launch_node" ] || [ "$(gstack_realpath "$(command -v bun 2>/dev/null || echo /nonexistent)" 2>/dev/null)" != "$RES_BIN" ]; then
+    _store_real=$(cd -P "$STORE" 2>/dev/null && pwd -P)
+    case "$RES_BIN" in
+      "${_store_real:-/nonexistent}"/*/bun) [ -z "$_launch_node" ] && LAUNCH_DIR=$(dirname "$RES_BIN") ;;
+    esac
+    if [ -z "$LAUNCH_DIR" ]; then
+      LAUNCH_DIR="${VERDICT%.json}.launch"
+      gstack_launch_dir "$LAUNCH_DIR" "$RES_BIN" "$_launch_node" \
+        || stop INSTALL_PREFLIGHT_FAILED "could not publish the launch directory $LAUNCH_DIR" "make $(dirname "$LAUNCH_DIR") writable, then re-run"
+    fi
+    export PATH="$LAUNCH_DIR:$PATH"
+  fi
+fi
+
+# 3. Install both host profiles; Chromium lazy unless --with-browser. Skipped
+# when this exact HEAD was set up with the same hosts, model and browser flag
+# (recorded in the git dir after a successful setup, never keyed on VERSION)
+# and the check passes; never after a fast-forward.
+cd "$ROOT" || exit 1
+export GSTACK_SKIP_COREUTILS="${GSTACK_SKIP_COREUTILS:-1}" GSTACK_SKIP_ASIDE="${GSTACK_SKIP_ASIDE:-1}"
+BROWSER_FLAG="--no-browser"; [ "$WITH_BROWSER" -eq 1 ] && BROWSER_FLAG=""
+HEAD_SHA=$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || true)
+SETUP_STATE="$(git -C "$ROOT" rev-parse --absolute-git-dir 2>/dev/null || echo "$ROOT/.git")/gstack-capy-install.state"
+SETUP_RECORD="head=$HEAD_SHA hosts=claude,codex model=gpt-6-astra browser=$WITH_BROWSER"
+if [ -n "$FOR" ]; then set -- --for "$FOR"; else set -- --require "$REQUIRE"; fi
+[ "$WITH_BROWSER" -eq 1 ] && [ -z "$FOR" ] && set -- --require "$REQUIRE,browse-bundle,browser"
+certify() { OUT=$(cd "$ORIG_PWD" && GSTACK_EPHEMERAL="${GSTACK_EPHEMERAL:-1}" "$ROOT/bin/gstack-doctor" --check "$@" ${PROJECT:+--project "$PROJECT"} ${MIN_REVISION:+--min-revision "$MIN_REVISION"} 2>&1); RC=$?; }
+record_verdict() { # TRAILER OK — --check keeps the recorded resolution (drift is reported, never re-recorded)
+  # A profile check never narrows an ok verdict a fuller install wrote for this HEAD.
+  if [ "$PROFILE" -eq 1 ] && [ -f "$VERDICT" ] && [ "$(gstack_install_verdict_field "$VERDICT" ok)" = true ] \
+     && [ "$(gstack_install_verdict_field "$VERDICT" head)" = "$HEAD_SHA" ] && ! gstack_doctor_install_profile "$(gstack_install_verdict_field "$VERDICT" for)"; then
+    say "kept the install verdict for=$(gstack_install_verdict_field "$VERDICT" for) at $VERDICT (it covers more than $FOR; the trailer below is this check's)"
+    return 0
+  fi
+  if [ "$CHECK_ONLY" -eq 1 ] && [ -n "$REC_BUN" ]; then set -- "$1" "$2" "$REC_BUN" "$REC_VER" "$REC_RULE" "$REC_BUN_INSTALL"
+  else set -- "$1" "$2" "$RES_BIN" "$RES_VER" "$RES_RULE" "${BUN_INSTALL:-}"; fi
+  gstack_install_verdict_write "$VERDICT" "$ROOT_REAL" "$HEAD_SHA" "${FOR:-}" "$(printf '%s\n' "${OUT:-}" | sed -n 's/^required: //p' | head -1)" \
+    "$(printf '%s\n' "${OUT:-}" | grep -q '^SKIP pins (planning-only' && echo 1 || echo 0)" "$2" "$1" "${MIN_REVISION:-}" "$LAUNCH_DIR" \
+    "$PROJECT_REAL" "$PIN_EXACT" "$3" "$4" "$5" "$6" "$NODE_BIN" "$NODE_VER" "$NODE_RULE" \
+    || say "could not write the install verdict $VERDICT"
+}
+setup_failed() { # MESSAGE
+  echo "gstack-capy-install: $1" >&2
+  OUT="" record_verdict "gstack: fail setup" 0
+  echo "gstack: fail setup — $1; fix: re-run the Capy skill installer or $ROOT/bin/gstack-capy-install (setup is re-run until it succeeds)"
+  exit 1
+}
+SKIPPED=0
+if [ "$CHECK_ONLY" -eq 0 ] && [ "$PROFILE" -eq 0 ] && [ -z "${GSTACK_CAPY_UPGRADED_FROM:-}" ] && [ -n "$HEAD_SHA" ] && [ "$(head -1 "$SETUP_STATE" 2>/dev/null)" = "$SETUP_RECORD" ]; then
+  certify "$@"
+  [ "$RC" -eq 0 ] && { SKIPPED=1; say "setup skipped (HEAD ${HEAD_SHA:0:12} already set up for these hosts; the check passes)"; }
+fi
+if [ "$CHECK_ONLY" -eq 0 ] && [ "$SKIPPED" -eq 0 ] && [ "$PROFILE" -eq 0 ]; then
+  T1=$(now)
+  ./setup --host claude --no-prefix $BROWSER_FLAG </dev/null || setup_failed "./setup --host claude failed (exit $?)"
+  ./setup --host codex --model gpt-6-astra $BROWSER_FLAG </dev/null || setup_failed "./setup --host codex failed (exit $?)"
+  echo "gstack ready (claude, codex)"
+  T2=$(now)
+  [ -n "$HEAD_SHA" ] && printf '%s\n' "$SETUP_RECORD" > "$SETUP_STATE" 2>/dev/null
+  say "planning-only install: $((T2 - T1))s (setup both hosts; Chromium not downloaded)"
+  if [ "$WITH_BROWSER" -eq 1 ]; then
+    T3=$(now)
+    "$ROOT/bin/gstack-browser-ensure" </dev/null | tail -1
+    say "browser bootstrap: $(( $(now) - T3 ))s"
+  else
+    echo "SKIP browser ($(. "$ROOT/bin/gstack-doctor-components.sh" && printf '%s' "$GSTACK_BROWSER_LAZY_REASON"))"
+  fi
+  certify "$@"
+fi
+[ "$CHECK_ONLY" -eq 0 ] && [ "$PROFILE" -eq 1 ] && say "$FOR: no ./setup and no host profiles; certifies only the read-only helpers ($GSTACK_DOCTOR_HELPERS)"
+{ [ "$CHECK_ONLY" -eq 1 ] || [ "$PROFILE" -eq 1 ]; } && certify "$@"
+
+# write_shim — the per-directory bun and bunx shims (Capy only, install mode).
+# The store, verdict directory, checkout and install default are baked in, so
+# a fresh shell needs no environment; rewritten when they change. Only a
+# missing file or one carrying the marker is replaced.
+shq() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }
+write_shim() {
+  local dir="$HOME/.local/bin" name tmp STORE_REAL
+  [ "${GSTACK_BUN_SHIM:-1}" != 0 ] || return 0
+  [ -n "${CAPY_MACHINE_CONFIG:-}" ] || [ -d "$HOME/.capy/system" ] || return 0
+  mkdir -p "$dir" "$STORE" || { say "could not create $dir or $STORE; no bun shim written"; return 0; }
+  STORE_REAL=$(cd -P "$STORE" && pwd -P) || return 0
+  exec 8>"$HOME/.gstack-runtime.lock"
+  command -v flock >/dev/null 2>&1 && flock -w 60 8
+  for name in bun bunx; do
+    if { [ -e "$dir/$name" ] || [ -L "$dir/$name" ]; } && ! { [ -f "$dir/$name" ] && [ ! -L "$dir/$name" ] && _gstack_bun_is_shim "$dir/$name"; }; then
+      say "$dir/$name is not gstack's shim (no marker); left untouched, so keep the GSTACK_LAUNCH prefix"
+      continue
+    fi
+    tmp="$dir/.$name.gstack.$$"
+    if [ "$name" = bunx ]; then
+      printf '#!/bin/sh\n%s\n# The Capy bunx shim: bun x through the bun shim beside it (docs/capy-install.md).\nexec %s x "$@"\n' "$GSTACK_BUN_SHIM_MARKER" "$(shq "$dir/bun")" > "$tmp"
+    else
+      {
+        printf '#!/bin/sh\n%s\n' "$GSTACK_BUN_SHIM_MARKER"
+        printf '# The Capy bun shim, written by %s.\n' "$(printf '%s' "$ROOT/bin/gstack-capy-install" | tr -d '\n')"
+        printf 'store=%s\n' "$(shq "$STORE_REAL")"
+        printf 'verdicts=%s\n' "$(shq "$(dirname "$(gstack_install_verdict_path "$GSTACK_STATE_ROOT" "$ROOT_REAL" "")")")"
+        printf 'checkout=%s\n' "$(shq "$ROOT_REAL")"
+        printf 'default=%s\nminimum=%s\nfloor=%s\n' "$(shq "$INSTALL_VERSION")" "$(shq "$GSTACK_BUN_TESTED")" "$(shq "$GSTACK_BUN_FLOOR")"
+        printf 'marker=%s\n' "$(shq "$GSTACK_BUN_SHIM_MARKER")"
+        printf 'fix=%s\n' "$(shq "${GSTACK_CAPY_WRAPPER_PATH:+bash }${GSTACK_CAPY_WRAPPER_PATH:-$ROOT/bin/gstack-capy-install} --check")"
+        cat <<'EOF_SHIM'
+# Runs the Bun recorded for the project around the working directory, or the
+# 'none' record outside a project and inside the gstack checkout; else the
+# resolver's order: the store copy of an exact project pin, the store default,
+# $BUN_INSTALL/bin, ~/.bun/bin, then PATH, first at or above the supported
+# minimum, then at or above the security floor (docs/capy-install.md).
+# GSTACK_BUN_SHIM_EXPLAIN=1 prints the project root, record, choice and rule.
+set -f
+explain() { [ "${GSTACK_BUN_SHIM_EXPLAIN:-}" = 1 ] && echo "gstack bun shim: $*" >&2; return 0; }
+sha() { if command -v sha256sum >/dev/null 2>&1; then printf '%s' "$1" | sha256sum | cut -d' ' -f1; else printf '%s' "$1" | shasum -a 256 | cut -d' ' -f1; fi; }
+is_shim() { head -c 512 "$1" 2>/dev/null | grep -aqF "$marker"; }
+ge() { # A B: version A is at or above B (a prerelease sorts below its release)
+  case "$1" in *-*) pre=1 ;; *) pre=0 ;; esac
+  gifs=$IFS; IFS=.; set -- ${1%%[-+]*} $2; IFS=$gifs
+  [ $# -eq 6 ] || return 1
+  for n in "$@"; do case "$n" in ''|*[!0-9]*) return 1 ;; esac; done
+  [ "$1" -ne "$4" ] && { [ "$1" -gt "$4" ]; return; }
+  [ "$2" -ne "$5" ] && { [ "$2" -gt "$5" ]; return; }
+  [ "$3" -ne "$6" ] && { [ "$3" -gt "$6" ]; return; }
+  [ "$pre" = 0 ]
+}
+in_store() { # VERSION: the store's VERSION/bun when VERSION is x.y.z and the file is a real binary inside the store
+  printf '%s\n' "$1" | grep -Eqx '[0-9]+\.[0-9]+\.[0-9]+' || return 1
+  d=$(cd -P "$store/$1" 2>/dev/null && pwd -P) || return 1
+  [ "$d" = "$store/$1" ] && [ -f "$d/bun" ] && [ ! -L "$d/bun" ] && [ -x "$d/bun" ] && ! is_shim "$d/bun" && printf '%s/bun' "$d"
+}
+root="" record="" chose="" rule="" pin=""
+dir=$(pwd -P 2>/dev/null) || dir=""
+while [ -n "$dir" ]; do
+  [ -e "$dir/.git" ] && { root=$dir; break; }
+  [ "$dir" = / ] && break
+  dir=${dir%/*}; [ -n "$dir" ] || dir=/
+done
+key=${root:-none}; [ "$root" = "$checkout" ] && key=none
+record="$verdicts/$(sha "$key").json"
+if [ -f "$record" ]; then
+  b=$(sed -n 's/^ "bun_path": "\(.*\)",$/\1/p' "$record" | head -1)
+  [ -n "$b" ] && [ -f "$b" ] && [ -x "$b" ] && ! is_shim "$b" && chose=$b rule=record
+else
+  record=""
+fi
+if [ -z "$chose" ] && [ "$key" != none ]; then
+  [ -f "$root/.bun-version" ] && pin=$(head -1 "$root/.bun-version" | tr -d ' v\r')
+  [ -n "$pin" ] || pin=$(sed -n 's/.*"packageManager"[[:space:]]*:[[:space:]]*"bun@\([^"]*\)".*/\1/p' "$root/package.json" 2>/dev/null | head -1)
+  [ -n "$pin" ] || pin=$(sed -n 's/.*"bun"[[:space:]]*:[[:space:]]*"v\{0,1\}\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)".*/\1/p' "$root/package.json" 2>/dev/null | head -1)
+  if [ -n "$pin" ]; then
+    if b=$(in_store "$pin"); then chose=$b rule=pin
+    else echo "gstack bun shim: $root pins bun $pin, which is not in gstack's runtime store; run $fix here" >&2
+    fi
+  else
+    explain "$root has no recorded Bun and no exact pin; run $fix here to record one"
+  fi
+fi
+[ -n "$chose" ] || { b=$(in_store "$default") && chose=$b rule=default; }
+if [ -z "$chose" ]; then
+  cands="BUN_INSTALL:${BUN_INSTALL:+$BUN_INSTALL/bin/bun}
+home:${HOME:+$HOME/.bun/bin/bun}"
+  oifs=$IFS; IFS=:
+  for d in $PATH; do [ -n "$d" ] && cands="$cands
+PATH:$d/bun"; done
+  IFS=$oifs
+  for want in "$minimum" "$floor"; do
+    nl='
+'
+    oifs=$IFS; IFS=$nl
+    for cand in $cands; do
+      r=${cand%%:*} f=${cand#*:}
+      [ -n "$f" ] && [ -f "$f" ] && [ -x "$f" ] && ! is_shim "$f" || continue
+      ge "$("$f" --version 2>/dev/null | head -1)" "$want" && { chose=$f rule=$r; break 2; }
+    done
+    IFS=$oifs
+  done
+  IFS=$oifs
+fi
+explain "project=${root:-none} record=${record:-none} chose=${chose:-none} rule=${rule:-none}"
+[ -n "$chose" ] || { echo "gstack bun shim: no bun at or above $floor found (store $store, \$BUN_INSTALL/bin, ~/.bun/bin, PATH)" >&2; exit 127; }
+exec "$chose" "$@"
+EOF_SHIM
+      } > "$tmp"
+    fi
+    chmod 0755 "$tmp" && if cmp -s "$tmp" "$dir/$name"; then rm -f "$tmp"; else mv -f "$tmp" "$dir/$name" && say "wrote $dir/$name (gstack's per-directory $name shim; GSTACK_BUN_SHIM_EXPLAIN=1 shows its choice, GSTACK_BUN_SHIM=0 opts out)"; fi
+  done
+  exec 8>&-
+}
+
+# 4. Certify. The trailer is the contract, in one grammar:
+#   gstack: ok <rev> for=<skill>[ (requested: …; pins: skipped (planning-only|no project|helper runtime); latest: <ver> available)]
+#   gstack: ok <rev> for=<skill> ([requested: …; ][pins: …; ]behind=<n> (latest: <ver>); fix: <command>)
+# Notes, in that fixed order, ride only on an ok trailer: `requested` when the
+# existing checkout is not at --revision (it is never moved here), `pins` when
+# the doctor skipped the project pins, then either `behind=<n> (latest: <ver>)`
+# and `fix: <command>` when the session ends behind origin's default branch
+# (bin/gstack-capy-session exports GSTACK_CAPY_BEHIND, _BEHIND_TO, _BEHIND_FIX), or
+# `latest` when the bootstrapper read a newer VERSION from origin in this run,
+# exported as GSTACK_CAPY_REMOTE_VERSION. The failure head (`gstack: fail <ids>`)
+# is unchanged. An install-mode session whose self-upgrade was skipped
+# (the session exports GSTACK_CAPY_BEHIND_BLOCKED) is never ok: its ok trailer becomes
+#   gstack: fail behind — installed <rev> is <n> commits behind origin (latest <ver>)
+#     and the session-start upgrade was skipped: <reason>; fix: <command> (<CODE>)
+INSTALLED=$(head -1 "$ROOT/VERSION")
+TRAILER="$(printf '%s\n' "$OUT" | grep '^gstack: ' | tail -1)"
+NOTES=""
+note() { NOTES="${NOTES:+$NOTES; }$1"; }
+if [ -n "$REVISION" ] && [ "$REVISION" != "$INSTALLED" ] && [ "$REVISION" != "v$INSTALLED" ] \
+   && [ "$(git -C "$ROOT" rev-parse --verify --quiet "$REVISION^{commit}" 2>/dev/null)" != "$(git -C "$ROOT" rev-parse HEAD 2>/dev/null)" ]; then
+  note "requested: $REVISION (run $ROOT/bin/gstack-upgrade to move)"
+fi
+if printf '%s\n' "$OUT" | grep -q '^SKIP pins (planning-only'; then note "pins: skipped (planning-only)"
+elif printf '%s\n' "$OUT" | grep -Eq '^SKIP pins \((no project|project directory )'; then note "pins: skipped (no project)"
+elif printf '%s\n' "$OUT" | grep -q '^SKIP pins (helper runtime'; then note "pins: skipped (helper runtime)"
+fi
+REMOTE_VERSION="${GSTACK_CAPY_REMOTE_VERSION:-}"
+if [ -n "${GSTACK_CAPY_BEHIND:-}" ]; then
+  note "behind=$GSTACK_CAPY_BEHIND (latest: ${GSTACK_CAPY_BEHIND_TO:-${REMOTE_VERSION:-unknown}})"
+  note "fix: ${GSTACK_CAPY_BEHIND_FIX:-bash <skill>/scripts/install.sh}"
+elif [ -n "$REMOTE_VERSION" ] && [ "$REMOTE_VERSION" != "$INSTALLED" ] \
+   && [ "$(printf '%s\n%s\n' "$INSTALLED" "$REMOTE_VERSION" | sort -V | head -1)" = "$INSTALLED" ]; then
+  note "latest: $REMOTE_VERSION available"
+fi
+BLOCKED="${GSTACK_CAPY_BEHIND_BLOCKED:-}"
+case "$TRAILER" in "gstack: ok "*) if [ -n "$BLOCKED" ]; then
+  case "$BLOCKED" in *"; fix: "*) ;; *) BLOCKED="$BLOCKED; fix: ${GSTACK_CAPY_BEHIND_FIX:-$ROOT/bin/gstack-upgrade}" ;; esac
+  case "$BLOCKED" in *"("[A-Z]*_[A-Z]*")") ;; *) BLOCKED="$BLOCKED (UPGRADE_REFUSED)" ;; esac
+  TRAILER="gstack: fail behind — installed $INSTALLED is ${GSTACK_CAPY_BEHIND:-?} commits behind origin (latest ${GSTACK_CAPY_BEHIND_TO:-unknown}) and the session-start upgrade was skipped: $BLOCKED"
+  RC=1
+elif [ -n "$NOTES" ]; then TRAILER="$TRAILER ($NOTES)"; fi ;; esac
+record_verdict "$TRAILER" "$([ "$RC" -eq 0 ] && echo 1 || echo 0)"
+[ "$CHECK_ONLY" -eq 1 ] || [ "$PROFILE" -eq 1 ] || write_shim
+printf '%s\n' "$OUT" | grep -v '^gstack: '
+say "total: $(( $(now) - T0 ))s"
+echo "GSTACK_LAUNCH: ${LAUNCH_DIR:+PATH=$LAUNCH_DIR:\$PATH }GSTACK_SESSION_KIND=unattended GSTACK_STATE_ROOT=$GSTACK_STATE_ROOT GSTACK_EPHEMERAL=${GSTACK_EPHEMERAL:-1} GSTACK_CAPY=1 GSTACK_INSTALL_VERDICT=$VERDICT"
+[ -n "$LAUNCH_DIR" ] && echo "GSTACK_LAUNCH_PATH: $LAUNCH_DIR"
+printf '%s\n' "$TRAILER"
+exit "$RC"

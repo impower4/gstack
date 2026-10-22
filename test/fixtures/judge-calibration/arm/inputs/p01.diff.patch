@@ -1,0 +1,37 @@
+diff --git a/app.js b/app.js
+index d211058..db1172e 100644
+--- a/app.js
++++ b/app.js
+@@ -15,6 +15,13 @@ function handleRequest(method, path, body) {
+     notes.set(note.id, note);
+     return { status: 201, body: note };
+   }
++  const deleteMatch = /^\/notes\/(\d+)$/.exec(path);
++  if (method === 'DELETE' && deleteMatch) {
++    if (!notes.delete(Number(deleteMatch[1]))) {
++      return { status: 404, body: { error: 'not found' } };
++    }
++    return { status: 204, body: undefined };
++  }
+   return { status: 404, body: { error: 'not found' } };
+ }
+ 
+diff --git a/run-tests.js b/run-tests.js
+index 3278093..bf22fb9 100644
+--- a/run-tests.js
++++ b/run-tests.js
+@@ -14,4 +14,14 @@ assert.strictEqual(listed.body.length, 1);
+ assert.strictEqual(handleRequest('POST', '/notes', {}).status, 400);
+ assert.strictEqual(handleRequest('GET', '/nope', null).status, 404);
+ 
++const doomed = handleRequest('POST', '/notes', { text: 'pack headlamp' });
++assert.deepStrictEqual(
++  handleRequest('DELETE', `/notes/${doomed.body.id}`, null),
++  { status: 204, body: undefined },
++);
++assert.strictEqual(handleRequest('GET', '/notes', null).body.length, 1);
++assert.strictEqual(handleRequest('DELETE', `/notes/${doomed.body.id}`, null).status, 404);
++assert.strictEqual(handleRequest('DELETE', '/notes/999', null).status, 404);
++assert.strictEqual(handleRequest('DELETE', '/notes/abc', null).status, 404);
++
+ console.log('all notes tests passed');

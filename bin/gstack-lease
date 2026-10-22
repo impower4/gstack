@@ -1,0 +1,198 @@
+#!/usr/bin/env bash
+# gstack-lease — the workflow lease on a shared gstack installation. Several
+# agents (eight Capy subagents, say) share one checkout; a session-start
+# fast-forward must not move it under a session mid-workflow. The state-root
+# session markers (bin/gstack-skill-start) differ per agent, so an updater
+# cannot see them; leases live in the installation's own git dir, beside
+# gstack-upgrade.pending, where every session and updater of this checkout
+# shares them.
+#
+# Usage:
+#   gstack-lease touch [--root <checkout>] [--pid <p> | --from <pid>]
+#       write <git dir>/gstack-leases/<pid> holding the pid's start identity;
+#       pid defaults to the harness pid behind this call
+#       (bin/gstack-harness-pid.sh, the same derivation the session marker
+#       uses), or behind --from (a caller whose own parent is short-lived
+#       passes its parent pid); leases older than 120 min are pruned. Exits 3
+#       and writes nothing when a live process holds the directory lock
+#   gstack-lease live [--root <checkout>] [--exclude-ancestry-of <pid>]
+#       print `<pid> <age>m <command>` per lease held by a live process that
+#       is neither the given pid nor one of its ancestors (the caller's own
+#       session); exit 0 when any live lease exists, 1 when none. A stale lease
+#       is reclaimed (deleted, one `gstack-lease: reclaimed …` line on stderr)
+#   gstack-lease list [--root <checkout>]
+#       print `<pid> <age>m alive|dead|stale` for every lease
+# A pid alone is not a holder: pids are reused after a reboot or a machine
+# wake. A lease records its process's start identity (Linux: boot id and
+# /proc start time; elsewhere `ps -o lstart`), and a lease whose pid now
+# belongs to another process is stale. A lease without an identity (written by
+# an older gstack) is stale once it is older than the 120-minute prune window.
+# <checkout> defaults to the source checkout behind this bin (an installed
+# runtime root's .source-path, else ../). A root that is not a git checkout
+# exits 2 and writes nothing. GSTACK_LEASE_DIR overrides the lease directory
+# (hermetic tests; a dev checkout's own tests must not lease it). Bash 3.2
+# plus git, ps, find, ln, readlink.
+set -u
+BIN="$(cd "$(dirname "$0")" && pwd -P)"
+# shellcheck source=bin/gstack-install-verdict.sh
+. "$BIN/gstack-install-verdict.sh" 2>/dev/null || gstack_source_root() { (cd "$1/.." && pwd -P); }
+# shellcheck source=bin/gstack-harness-pid.sh
+. "$BIN/gstack-harness-pid.sh" 2>/dev/null || gstack_harness_pid() { printf '%s\n' "$1"; }
+
+VERB="${1:-}"; [ $# -gt 0 ] && shift
+ROOT="" PID="" EXCLUDE="" FROM=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --root) ROOT="${2:-}"; shift ;;
+    --pid) PID="${2:-}"; shift ;;
+    --from) FROM="${2:-}"; shift ;;
+    --exclude-ancestry-of) EXCLUDE="${2:-}"; shift ;;
+    *) echo "gstack-lease: unknown argument '$1'" >&2; exit 2 ;;
+  esac
+  shift
+done
+case "$VERB" in
+  touch|live|list) ;;
+  -h|--help|'') sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+  *) echo "gstack-lease: unknown verb '$VERB'" >&2; exit 2 ;;
+esac
+[ -n "$ROOT" ] || ROOT=$(gstack_source_root "$BIN")
+GIT_DIR_ABS=$(git -C "$ROOT" rev-parse --absolute-git-dir 2>/dev/null) \
+  || { echo "gstack-lease: $ROOT is not a git checkout" >&2; exit 2; }
+DIR="${GSTACK_LEASE_DIR:-$GIT_DIR_ABS/gstack-leases}"
+
+alive() { kill -0 "$1" 2>/dev/null || ps -p "$1" >/dev/null 2>&1; }
+identity() { # PID — the process's start identity, empty when unknown
+  if [ -r "/proc/$1/stat" ] && [ -r /proc/sys/kernel/random/boot_id ]; then
+    _st=$(cat "/proc/$1/stat" 2>/dev/null) || return 0
+    _st=${_st##*) }
+    _id="linux $(cat /proc/sys/kernel/random/boot_id 2>/dev/null) $(printf '%s\n' "$_st" | awk '{print $20}')"
+  else
+    _id="ps $(LC_ALL=C TZ=UTC0 ps -o lstart= -p "$1" 2>/dev/null | sed 's/^ *//; s/ *$//')"
+  fi
+  valid_identity "$_id" && printf '%s\n' "$_id"
+  return 0
+}
+# valid_identity ID — a well-formed identity from either backend
+valid_identity() {
+  case "$1" in
+    "linux "*) printf '%s\n' "$1" | grep -Eq '^linux [0-9a-f-]{36} [0-9]+$' ;;
+    "ps "?*) case "$1" in "ps "*[!\ ]*) return 0 ;; esac; return 1 ;;
+    *) return 1 ;;
+  esac
+}
+# state PID RECORD AGE — alive | dead | stale for a lease whose record (first
+# line) and age were read once by the caller. Stale needs proof: two
+# well-formed identities from the same backend that differ. An identity that
+# cannot be read now, a malformed record or a backend change keeps the lease
+# (never reclaim a live session on missing evidence).
+state() {
+  alive "$1" || { echo dead; return; }
+  if [ -z "$2" ]; then
+    [ "$3" -ge 120 ] && echo stale || echo alive
+    return
+  fi
+  _now=$(identity "$1")
+  if valid_identity "$2" && [ -n "$_now" ] && [ "${2%% *}" = "${_now%% *}" ] && [ "$2" != "$_now" ]; then echo stale
+  else echo alive
+  fi
+}
+# The lease directory's lock: touch's publish and prune, and reclaim's
+# reread-and-delete, run under it, so a reclaim never deletes a renewal and a
+# lease never disappears while it is live. The lock is a symlink whose target
+# names its holder (`<pid> <start identity>`): ln -s creates it and its owner
+# in one atomic step. It is broken only when that holder is dead or its pid
+# now belongs to another process, never by age, and unlock removes only the
+# caller's own lock. A live holder makes lock() give up after
+# GSTACK_LEASE_LOCK_TRIES tries 0.1 s apart (default 300).
+LOCK="$DIR/.lock" TOKEN=""
+lock() {
+  [ -n "$TOKEN" ] || TOKEN="$$ $(identity $$)"
+  _tries=0
+  until ln -s "$TOKEN" "$LOCK" 2>/dev/null; do
+    _tries=$((_tries + 1))
+    LOCK_OWNER=$(readlink "$LOCK" 2>/dev/null)
+    [ -n "$LOCK_OWNER" ] && holder_gone "$LOCK_OWNER" && break_lock "$LOCK_OWNER" && continue
+    [ "$_tries" -ge "${GSTACK_LEASE_LOCK_TRIES:-300}" ] && return 1
+    sleep 0.1
+  done
+}
+holder_gone() { case "$(state "${1%% *}" "${1#* }" 0)" in dead|stale) return 0 ;; esac; return 1; }
+# break_lock OWNER — remove the lock only if it still names OWNER. Breakers
+# take a second symlink, .lock.break, and reread the lock under it, so a lock
+# taken since the verdict is never removed; a .lock.break whose holder is gone
+# is cleared. Returns 1 when another breaker holds .lock.break. Known limit:
+# that clear is not atomic, so two gstack-lease processes killed in a row (one
+# holding .lock, the next inside this function) can let a reclaim delete a
+# renewal; one crash is always safe.
+break_lock() {
+  if ! ln -s "$TOKEN" "$LOCK.break" 2>/dev/null; then
+    _b=$(readlink "$LOCK.break" 2>/dev/null)
+    [ -n "$_b" ] && holder_gone "$_b" && [ "$(readlink "$LOCK.break" 2>/dev/null)" = "$_b" ] && rm -f "$LOCK.break"
+    return 1
+  fi
+  [ "$(readlink "$LOCK" 2>/dev/null)" = "$1" ] && rm -f "$LOCK"
+  rm -f "$LOCK.break"
+  return 0
+}
+unlock() { [ "$(readlink "$LOCK" 2>/dev/null)" = "$TOKEN" ] && rm -f "$LOCK"; return 0; }
+# reclaim FILE RECORD — delete a stale lease only if, under the lock, it still
+# holds the record judged stale; a renewal since then keeps it.
+reclaim() {
+  lock || return 1
+  if [ "$(head -1 "$1" 2>/dev/null)" = "$2" ]; then rm -f "$1"; unlock; return 0; fi
+  unlock
+  return 1
+}
+age_min() { # FILE — minutes since its mtime
+  _m=$(stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null || echo 0)
+  echo $(( ( $(date +%s) - _m ) / 60 ))
+}
+
+case "$VERB" in
+  touch)
+    [ -n "$PID" ] || PID=$(gstack_harness_pid "${FROM:-$PPID}")
+    mkdir -p "$DIR" || exit 2
+    lock || { echo "gstack-lease: the lease directory is locked by live process ${LOCK_OWNER%% *}; lease $PID not renewed" >&2; exit 3; }
+    _tmp="$DIR/.$PID.$$"
+    identity "$PID" > "$_tmp" && mv -f "$_tmp" "$DIR/$PID" || { rm -f "$_tmp"; unlock; exit 2; }
+    find "$DIR" -mmin +120 -type f -exec rm -f {} + 2>/dev/null
+    unlock
+    exit 0 ;;
+  list)
+    for f in "$DIR"/*; do
+      [ -f "$f" ] || continue
+      p=${f##*/}
+      _age=$(age_min "$f")
+      echo "$p ${_age}m $(state "$p" "$(head -1 "$f" 2>/dev/null)" "$_age")"
+    done
+    exit 0 ;;
+esac
+
+# live: the caller's own chain (the pid and its ancestors, up to 64 hops) never counts.
+ANCESTRY=" "
+p="$EXCLUDE"; hops=0
+while [ -n "$p" ] && [ "$hops" -lt 64 ]; do
+  case "$p" in ''|*[!0-9]*|0|1) break ;; esac
+  ANCESTRY="$ANCESTRY$p "
+  p=$(ps -o ppid= -p "$p" 2>/dev/null | tr -d ' ')
+  hops=$((hops + 1))
+done
+FOUND=1
+for f in "$DIR"/*; do
+  [ -f "$f" ] || continue
+  p=${f##*/}
+  case "$ANCESTRY" in *" $p "*) continue ;; esac
+  _rec=$(head -1 "$f" 2>/dev/null) _age=$(age_min "$f")
+  case "$(state "$p" "$_rec" "$_age")" in
+    dead) continue ;;
+    stale)
+      if reclaim "$f" "$_rec"; then
+        echo "gstack-lease: reclaimed stale lease $p (${_age}m; recorded '$_rec', pid $p is now $(ps -o comm= -p "$p" 2>/dev/null | head -1) '$(identity "$p")')" >&2
+        continue
+      fi ;;
+  esac
+  echo "$p $(age_min "$f")m $(ps -o comm= -p "$p" 2>/dev/null | head -1 | sed 's|.*/||')"
+  FOUND=0
+done
+exit $FOUND

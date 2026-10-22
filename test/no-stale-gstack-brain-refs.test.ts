@@ -81,6 +81,7 @@ const SCAN_PATHS = [
   'bin/',
   'scripts/',
   'setup-gbrain/SKILL.md.tmpl',
+  'setup-gbrain/sections',
   'sync-gbrain/SKILL.md.tmpl',
   'health/SKILL.md.tmpl',
   'plan-eng-review/SKILL.md.tmpl',
@@ -88,11 +89,17 @@ const SCAN_PATHS = [
   'review/SKILL.md.tmpl',
   'ship/SKILL.md.tmpl',
   'test/',
+  // Fork port wave 2: docs were deliberately excluded and that exact gap let
+  // a dead command (gstack-brain-init) survive ~36 releases as a
+  // command-not-found instruction. Docs are user-facing surface; scan them.
+  'docs/',
+  'README.md',
+  'USING_GBRAIN_WITH_GSTACK.md',
 ];
 
 function grepRefs(pattern: string): string[] {
   const args = ['-rn', '--', pattern, ...SCAN_PATHS.map((p) => path.join(ROOT, p))];
-  const r = spawnSync('grep', args, { encoding: 'utf-8' });
+  const r = spawnSync('grep', args, { encoding: 'utf-8', timeout: 30_000 });
   // grep exits 1 when no matches — that's fine for our purposes.
   const lines = (r.stdout || '').split('\n').filter((l) => l.trim().length > 0);
   return lines

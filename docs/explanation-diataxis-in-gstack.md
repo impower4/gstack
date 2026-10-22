@@ -75,5 +75,5 @@ A coverage map written in Diataxis terms gives you a deterministic answer to "di
 - **Reference for the skill that implements this:** [`document-generate/SKILL.md`](../document-generate/SKILL.md)
 - **Reference for the audit that uses this taxonomy:** [`document-release/SKILL.md`](../document-release/SKILL.md)
 - **Tutorial for using `/document-generate`:** [`tutorial-document-generate.md`](./tutorial-document-generate.md)
-- **How-to: document a shipped feature:** [`howto-document-a-shipped-feature.md`](./howto-document-a-shipped-feature.md)
+- **How-to: document a feature before shipping:** [`howto-document-a-shipped-feature.md`](./howto-document-a-shipped-feature.md)
 - **Diataxis homepage:** https://diataxis.fr/ — Procida's canonical reference for the framework

@@ -1,0 +1,85 @@
+diff --git a/run-tests.js b/run-tests.js
+index b5c9a56..1ec24d3 100644
+--- a/run-tests.js
++++ b/run-tests.js
+@@ -4,5 +4,7 @@ const { formatPrice } = require('./src/format-price');
+ assert.strictEqual(formatPrice(1250), '$12.50');
+ assert.strictEqual(formatPrice(1005), '$10.05');
+ assert.strictEqual(formatPrice(999), '$9.99');
++assert.strictEqual(formatPrice(1005, { currency: 'EUR' }), '10,05 €');
++assert.strictEqual(formatPrice(1005, { currency: 'JPY' }), '¥1005');
+ 
+ console.log('all price tests passed');
+diff --git a/src/format-price.js b/src/format-price.js
+index 86851d8..3b105ce 100644
+--- a/src/format-price.js
++++ b/src/format-price.js
+@@ -1,8 +1,11 @@
+-// TODO: someday support all ISO currencies and locale-aware formatting.
+-function formatPrice(cents) {
+-  const dollars = Math.floor(cents / 100);
+-  const rem = cents % 100;
+-  return '$' + dollars + '.' + rem;
++const { getFormatter } = require('./formatters/registry');
++require('./formatters/builtin');
++
++const config = require('./config');
++
++function formatPrice(cents, options = {}) {
++  const currency = options.currency || config.currency;
++  return getFormatter(currency).format(cents, options);
+ }
+ 
+ module.exports = { formatPrice };
+diff --git a/src/formatters/builtin.js b/src/formatters/builtin.js
+new file mode 100644
+index 0000000..d5dbe01
+--- /dev/null
++++ b/src/formatters/builtin.js
+@@ -0,0 +1,5 @@
++const { PriceFormatter, registerFormatter } = require('./registry');
++
++registerFormatter('USD', new PriceFormatter({ symbol: '$' }));
++registerFormatter('EUR', new PriceFormatter({ symbol: '€', symbolPosition: 'suffix', separator: ',' }));
++registerFormatter('JPY', new PriceFormatter({ symbol: '¥', decimals: 0 }));
+diff --git a/src/formatters/registry.js b/src/formatters/registry.js
+new file mode 100644
+index 0000000..c7f37c9
+--- /dev/null
++++ b/src/formatters/registry.js
+@@ -0,0 +1,35 @@
++// Pluggable per-currency formatter registry. Third parties can register
++// additional currencies (and per-country tax display) without editing core.
++const formatters = new Map();
++
++class PriceFormatter {
++  constructor({ symbol, decimals = 2, symbolPosition = 'prefix', separator = '.' }) {
++    this.symbol = symbol;
++    this.decimals = decimals;
++    this.symbolPosition = symbolPosition;
++    this.separator = separator;
++  }
++
++  format(minorUnits) {
++    const factor = 10 ** this.decimals;
++    const major = Math.floor(minorUnits / factor);
++    const minor = String(minorUnits % factor).padStart(this.decimals, '0');
++    const amount = this.decimals ? `${major}${this.separator}${minor}` : String(major);
++    return this.symbolPosition === 'prefix' ? this.symbol + amount : `${amount} ${this.symbol}`;
++  }
++}
++
++function registerFormatter(code, formatter) {
++  if (!(formatter instanceof PriceFormatter)) {
++    throw new TypeError(`formatter for ${code} must extend PriceFormatter`);
++  }
++  formatters.set(code.toUpperCase(), formatter);
++}
++
++function getFormatter(code) {
++  const formatter = formatters.get(String(code).toUpperCase());
++  if (!formatter) throw new Error(`no price formatter registered for ${code}`);
++  return formatter;
++}
++
++module.exports = { PriceFormatter, registerFormatter, getFormatter };

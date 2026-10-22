@@ -1,0 +1,101 @@
+# Quality gate (fork port wave 2, adapted from time-attack/gstack GStack 2).
+#
+# Generic hygiene checks:
+#   1. Credential scan of the PR diff's ADDED lines through our own
+#      bin/gstack-redact (HIGH fails the check; MEDIUM is an advisory count —
+#      there is no human in CI to confirm, so it never fails here).
+#   2. ShellCheck (errors only) on the setup/build shell boundary.
+# Dependency advisories are gated by dependency-review.yml (PRs that change
+# the lockfile) and the weekly osv-scanner.yml sweep, not here: an unrelated
+# PR must not turn red because an advisory was published that morning.
+#
+# Trigger is `pull_request`, NEVER `pull_request_target`: fork PRs must not
+# get secret-bearing contexts. Diff excludes cover the planted-bug fixtures
+# and eval baselines that intentionally contain credential-shaped strings.
+name: Quality gate
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # PR-number keyed; pushes to main get their own run_id group so
+  # back-to-back merges never cancel each other's credential scan.
+  group: quality-gate-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    # A ~1-minute job: GitHub's free hosted runner (public repo), not a
+    # billed 8-vCPU Ubicloud machine.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      # Shallow checkout: fetch-depth:0 cost 74s of a 92s job for checks that
+      # take ~12s combined. The one history consumer (the added-lines diff)
+      # fetches its exact base/head SHAs below — an exact-SHA fetch, not a
+      # guessed depth, so long-lived branches and merge queues still resolve.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.4.2
+
+      - name: Install frozen dependencies
+        run: bun install --frozen-lockfile --ignore-scripts
+
+      # Advisory slop scan of branch-changed files. Lived inside `bun run
+      # test` before (silently appended, up to 240s invisible in the "~90s
+      # suite" claim); decoupling it from the pre-commit loop is only honest
+      # if a per-PR path still runs it — this is that path. || true: quality
+      # signal, never a gate (/review runs it interactively too).
+      - name: Slop scan (changed files, advisory)
+        run: bun run slop:diff || true
+
+      - name: Scan changed text for credentials (added lines, own redact engine)
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+          # Exact-SHA shallow fetches: the checkout above is depth-1 of the
+          # merge ref; the diff needs the PR head + base objects specifically.
+          git fetch --no-tags --depth=1 origin "$HEAD_SHA" 2>/dev/null || true
+          git cat-file -e "${BASE_SHA}^{commit}" 2>/dev/null \
+            || git fetch --no-tags --depth=1 origin "$BASE_SHA" 2>/dev/null || true
+          if ! git cat-file -e "${BASE_SHA}^{commit}" 2>/dev/null; then
+            # push with an unusable `before` (branch create / force push):
+            # deepen once so HEAD^ exists as the fallback base.
+            git fetch --no-tags --deepen=1 origin 2>/dev/null || true
+            BASE_SHA=$(git rev-parse HEAD^)
+          fi
+          git diff --unified=0 --no-color "$BASE_SHA" "$HEAD_SHA" -- \
+            . \
+            ':(exclude)test/fixtures/**' \
+            ':(exclude)browse/test/fixtures/**' \
+            ':(exclude)docs/evals/**' \
+            ':(exclude)test/helpers/security-bench*' \
+            | node .github/scripts/gate-secret-scan.mjs
+
+      - name: Install ShellCheck
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y shellcheck
+          shellcheck --version
+
+      - name: ShellCheck setup and build boundaries
+        run: >-
+          shellcheck --severity=error
+          setup
+          scripts/build.sh
+          scripts/build-app.sh
+          scripts/write-version-files.sh
+          browse/scripts/build-node-server.sh
+          scripts/ubicloud/ubi-runner.sh
+          scripts/ubicloud/setup-free-suite.sh
+          scripts/ubicloud/test-free.sh

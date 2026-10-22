@@ -1,0 +1,43 @@
+version: 2
+
+updates:
+  - package-ecosystem: "bun"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    groups:
+      production-dependencies:
+        dependency-type: "production"
+      development-dependencies:
+        dependency-type: "development"
+    # The windowsHide patch (package.json patchedDependencies, #2160/#1989) is
+    # keyed to one playwright-core version; a minor or major bump drops it and
+    # brings back Windows console flashes. Patch updates still flow. The 1.64
+    # migration (re-key the patch, the Dia/cookie qualification pins, the
+    # arm64 artifact name) is owned by Garry, revisit 2026-11-15 (#2923).
+    ignore:
+      - dependency-name: "playwright"
+        update-types: ["version-update:semver-minor", "version-update:semver-major"]
+      - dependency-name: "playwright-core"
+        update-types: ["version-update:semver-minor", "version-update:semver-major"]
+      # The eval harness pins the agent SDK exactly. Its 0.x breaking releases
+      # are semver-minor to dependabot: agent-sdk 0.2 -> 0.3 and sdk 0.78 ->
+      # 0.133 (#3228) break typecheck:test and overlay-sdk-cancel-eof. Patch
+      # updates still flow; the SDK migration lands as its own maintainer PR.
+      - dependency-name: "@anthropic-ai/claude-agent-sdk"
+        update-types: ["version-update:semver-minor", "version-update:semver-major"]
+      - dependency-name: "@anthropic-ai/sdk"
+        update-types: ["version-update:semver-minor", "version-update:semver-major"]
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    groups:
+      github-actions:
+        patterns:
+          - "*"
+    open-pull-requests-limit: 2

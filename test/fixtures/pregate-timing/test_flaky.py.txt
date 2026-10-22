@@ -1,0 +1,25 @@
+import time
+
+def test_wall_bound():
+    t0 = time.monotonic()
+    run()
+    elapsed = time.monotonic() - t0
+    assert elapsed < 0.5  # HIT wall-time-bound
+
+def test_cpu_bound():
+    c0 = time.process_time()
+    run()
+    assert time.process_time() - c0 < 0.2  # HIT cpu-time-bound
+
+def test_sleep_then_assert():
+    fire()
+    time.sleep(0.1)  # HIT sleep-then-assert
+    assert calls == 1
+
+def test_escaped():
+    t0 = time.monotonic()
+    # gstack-timing-ok: the watchdog contract is two seconds and the call is a no-op
+    assert time.monotonic() - t0 < 2  # ESCAPED wall-time-bound
+
+def test_clean():
+    assert len(rows) < 10  # CLEAN

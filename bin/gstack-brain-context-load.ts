@@ -1,4 +1,4 @@
-#!/usr/bin/env bun
+#!/usr/bin/env -S bun --no-env-file --config=/dev/null
 /**
  * gstack-brain-context-load — V1 retrieval surface (Lane C).
  *
@@ -7,7 +7,7 @@
  * salience block (Layer 1). Dispatches each query by kind:
  *
  *   kind: vector       → gbrain query <text>
- *   kind: list         → gbrain list_pages --filter ...
+ *   kind: list         → gbrain list --type/--tag/--updated-after/--sort ...
  *   kind: filesystem   → local glob
  *
  * Each MCP/CLI call has a 500ms hard timeout per Section 1C. On timeout or
@@ -34,10 +34,12 @@
  *   gstack-brain-context-load --quiet
  */
 
-import { existsSync, readFileSync, statSync, readdirSync } from "fs";
-import { join, dirname, basename, resolve } from "path";
-import { execFileSync, spawnSync } from "child_process";
+import { existsSync, readFileSync, statSync, readdirSync, accessSync, constants } from "fs";
+import { join, dirname, basename, resolve, delimiter } from "path";
+import { spawnSync } from "child_process";
 import { homedir } from "os";
+import { resolveStateRoot } from "../lib/state-root";
+import { gbrainConfigDir } from "../lib/gbrain-exec";
 
 import { parseSkillManifest, type GbrainManifest, type GbrainManifestQuery, withErrorContext } from "../lib/gstack-memory-helpers";
 
@@ -62,13 +64,17 @@ interface QueryResult {
   bytes: number;
   duration_ms: number;
   reason?: string;
+  /** A gbrain call or unsupported manifest field failed (not an empty result). */
+  failed?: boolean;
 }
 
 // ── Constants ──────────────────────────────────────────────────────────────
 
 const HOME = homedir();
-const GSTACK_HOME = process.env.GSTACK_HOME || join(HOME, ".gstack");
-const MCP_TIMEOUT_MS = 500;
+const GSTACK_HOME = resolveStateRoot();
+// 500ms hard cap per Section 1C; overridable for slow/loaded environments
+// (test harnesses under CI load, cold CLI starts).
+const MCP_TIMEOUT_MS = Math.max(1, parseInt(process.env.GSTACK_BRAIN_TIMEOUT_MS || "", 10) || 500);
 const PAGE_SIZE_CAP = 10 * 1024; // 10KB per query result before truncation
 
 // ── CLI ────────────────────────────────────────────────────────────────────
@@ -190,13 +196,28 @@ function resolveSkillFile(args: CliArgs): string | null {
 
 // ── Dispatchers ────────────────────────────────────────────────────────────
 
+let gbrainOnPath: boolean | null = null;
+
 function gbrainAvailable(): boolean {
-  try {
-    execFileSync("command", ["-v", "gbrain"], { stdio: "ignore" });
-    return true;
-  } catch {
-    return false;
-  }
+  // Stat-based PATH scan, memoized. Spawning `gbrain --version` under the
+  // 500ms budget misreported gbrain as missing whenever a cold process spawn
+  // exceeded the timeout (loaded machine, node-based CLI cold start), and
+  // re-probing per query burned 3x the budget before any real work.
+  if (gbrainOnPath !== null) return gbrainOnPath;
+  const exts = process.platform === "win32"
+    ? (process.env.PATHEXT || ".COM;.EXE;.BAT;.CMD").split(";")
+    : [""];
+  gbrainOnPath = (process.env.PATH || "").split(delimiter).some((dir) =>
+    dir !== "" && exts.some((ext) => {
+      try {
+        accessSync(join(dir, `gbrain${ext}`), constants.X_OK);
+        return true;
+      } catch {
+        return false;
+      }
+    })
+  );
+  return gbrainOnPath;
 }
 
 function dispatchVector(q: GbrainManifestQuery, args: CliArgs): QueryResult {
@@ -217,52 +238,99 @@ function dispatchVector(q: GbrainManifestQuery, args: CliArgs): QueryResult {
   }
 
   const limit = q.limit ?? args.limit;
-  const result = spawnSync("gbrain", ["query", query, "--limit", String(limit), "--format", "compact"], {
+  const result = spawnSync("gbrain", ["query", query, "--limit", String(limit)], {
     encoding: "utf-8",
     timeout: MCP_TIMEOUT_MS,
   });
 
-  if (result.status !== 0 || !result.stdout) {
+  if (result.status !== 0) {
+    const stderrLine = (result.stderr || "").trim().split("\n").pop()?.trim();
     return {
       query: q,
       ok: false,
+      failed: true,
       rendered: "",
       bytes: 0,
       duration_ms: Date.now() - t0,
-      reason: result.error?.message || `gbrain query exited ${result.status}`,
+      reason: result.error?.message || `gbrain query exited ${result.status}${stderrLine ? `: ${stderrLine}` : ""}`,
     };
+  }
+  if (!result.stdout.trim() || /^No results\./.test(result.stdout.trim())) {
+    return { query: q, ok: false, rendered: "", bytes: 0, duration_ms: Date.now() - t0, reason: "no matches" };
   }
 
   const rendered = wrapDatamarked(q.render_as, capBody(result.stdout));
   return { query: q, ok: true, rendered, bytes: rendered.length, duration_ms: Date.now() - t0 };
 }
 
+// `gbrain list` (the CLI verb behind the list_pages MCP tool) has no generic
+// --filter flag and rejects unknown flags (gbrain >= 0.42.76). Manifest filter
+// keys map onto its real flags; `content_contains` has no list flag, so it is
+// matched against the returned slug/type/title rows here.
+const LIST_FILTER_FLAGS: Record<string, string> = {
+  type: "--type",
+  tags_contains: "--tag",
+  updated_after: "--updated-after",
+};
+const LIST_SORTS: Record<string, string> = {
+  updated_at_desc: "updated_desc",
+  updated_at_asc: "updated_asc",
+  created_at_desc: "created_desc",
+  updated_desc: "updated_desc",
+  updated_asc: "updated_asc",
+  created_desc: "created_desc",
+  slug: "slug",
+};
+
+function listFilterValue(key: string, value: string): string {
+  if (key !== "updated_after") return value;
+  const relative = /^now-(\d+)d$/.exec(value);
+  if (!relative) return value;
+  return new Date(Date.now() - Number(relative[1]) * 86_400_000).toISOString().slice(0, 10);
+}
+
 function dispatchList(q: GbrainManifestQuery, args: CliArgs): QueryResult {
   const t0 = Date.now();
+  const fail = (reason: string): QueryResult =>
+    ({ query: q, ok: false, failed: true, rendered: "", bytes: 0, duration_ms: Date.now() - t0, reason });
   if (!gbrainAvailable()) {
     return { query: q, ok: false, rendered: "", bytes: 0, duration_ms: Date.now() - t0, reason: "gbrain CLI missing" };
   }
   const limit = q.limit ?? args.limit;
-  const cliArgs: string[] = ["list_pages", "--limit", String(limit)];
-  if (q.sort) cliArgs.push("--sort", q.sort);
-  if (q.filter) {
-    for (const [k, v] of Object.entries(q.filter)) {
-      const { resolved: rv } = substituteTemplateVars(String(v), args);
-      cliArgs.push("--filter", `${k}=${rv}`);
+  const cliArgs: string[] = ["list"];
+  let contentContains: string | undefined;
+  for (const [k, v] of Object.entries(q.filter ?? {})) {
+    const { resolved, unresolved } = substituteTemplateVars(String(v), args);
+    if (unresolved.length > 0) {
+      return { query: q, ok: false, rendered: "", bytes: 0, duration_ms: Date.now() - t0,
+        reason: `template vars unresolved: ${unresolved.join(",")}` };
     }
+    if (k === "content_contains") {
+      contentContains = resolved.toLowerCase();
+      continue;
+    }
+    const flag = LIST_FILTER_FLAGS[k];
+    if (!flag) return fail(`unsupported list filter: ${k}`);
+    cliArgs.push(flag, listFilterValue(k, resolved));
   }
+  if (q.sort) {
+    const sort = LIST_SORTS[q.sort];
+    if (!sort) return fail(`unsupported list sort: ${q.sort}`);
+    cliArgs.push("--sort", sort);
+  }
+  cliArgs.push("--limit", String(contentContains === undefined ? limit : Math.min(Math.max(limit * 10, 50), 200)));
   const result = spawnSync("gbrain", cliArgs, { encoding: "utf-8", timeout: MCP_TIMEOUT_MS });
-  if (result.status !== 0 || !result.stdout) {
-    return {
-      query: q,
-      ok: false,
-      rendered: "",
-      bytes: 0,
-      duration_ms: Date.now() - t0,
-      reason: result.error?.message || `gbrain list_pages exited ${result.status}`,
-    };
+  if (result.status !== 0) {
+    const stderrLine = (result.stderr || "").trim().split("\n").pop()?.trim();
+    return fail(result.error?.message || `gbrain list exited ${result.status}${stderrLine ? `: ${stderrLine}` : ""}`);
   }
-  const rendered = wrapDatamarked(q.render_as, capBody(result.stdout));
+  let rows = (result.stdout || "").split("\n").filter((line) => line.includes("\t"));
+  if (contentContains !== undefined) rows = rows.filter((line) => line.toLowerCase().includes(contentContains!));
+  rows = rows.slice(0, limit);
+  if (rows.length === 0) {
+    return { query: q, ok: false, rendered: "", bytes: 0, duration_ms: Date.now() - t0, reason: "no matches" };
+  }
+  const rendered = wrapDatamarked(q.render_as, capBody(rows.join("\n") + "\n"));
   return { query: q, ok: true, rendered, bytes: rendered.length, duration_ms: Date.now() - t0 };
 }
 
@@ -271,7 +339,11 @@ function dispatchFilesystem(q: GbrainManifestQuery, args: CliArgs): QueryResult 
   if (!q.glob) {
     return { query: q, ok: false, rendered: "", bytes: 0, duration_ms: Date.now() - t0, reason: "filesystem kind missing glob" };
   }
-  const { resolved: glob, unresolved } = substituteTemplateVars(q.glob, args);
+  // This named filesystem prefix denotes a literal configured directory, not
+  // glob text. Keep legacy ~ paths and all existing template variables intact.
+  const statePrefix = "{gstack_state_root}/";
+  const configured = q.glob.startsWith(statePrefix);
+  const { resolved: glob, unresolved } = substituteTemplateVars(configured ? q.glob.slice(statePrefix.length) : q.glob, args);
   if (unresolved.length > 0) {
     return {
       query: q,
@@ -286,7 +358,14 @@ function dispatchFilesystem(q: GbrainManifestQuery, args: CliArgs): QueryResult 
   const expanded = glob.replace(/^~/, HOME);
 
   // Simple glob: match against filesystem
-  const matches = simpleGlob(expanded);
+  let matches: string[];
+  if (configured) {
+    try { matches = configuredStateGlob(glob); }
+    catch (error) {
+      return { query: q, ok: false, rendered: "", bytes: 0, duration_ms: Date.now() - t0,
+        reason: error instanceof Error ? error.message : String(error) };
+    }
+  } else matches = simpleGlob(expanded);
   if (matches.length === 0) {
     return { query: q, ok: false, rendered: "", bytes: 0, duration_ms: Date.now() - t0, reason: "no matches" };
   }
@@ -311,6 +390,19 @@ function dispatchFilesystem(q: GbrainManifestQuery, args: CliArgs): QueryResult 
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────
+
+/** The configured root is literal; only the manifest's suffix is a glob. */
+function configuredStateGlob(pattern: string): string[] {
+  const parts = pattern.split("/");
+  if (parts.some(part => !part || part === "." || part === "..")) return [];
+  const result = spawnSync("bash", ["-c",
+    'context_paths=$(bash "$1") || exit; eval "$context_paths"; printf "%s" "$GSTACK_STATE_ROOT"',
+    "gstack-state-root", join(import.meta.dir, "gstack-paths")], { encoding: "utf8", timeout: 5000 });
+  if (result.error || result.status !== 0 || !result.stdout) throw new Error("Cannot resolve configured gstack state root: "
+    + JSON.stringify({ error: result.error?.message ?? null, status: result.status, signal: result.signal, stderr: result.stderr }));
+  if (!existsSync(result.stdout)) return [];
+  return [...new Bun.Glob(pattern).scanSync({ cwd: result.stdout, absolute: true, onlyFiles: true, followSymlinks: false })];
+}
 
 function simpleGlob(pattern: string): string[] {
   // Handle simple patterns: <dir>/*<glob>* or <dir>/file or <full-path-no-glob>
@@ -445,6 +537,12 @@ async function main(): Promise<void> {
 
   if (!args.quiet && rendered.length > 0) {
     console.log(rendered);
+  }
+
+  const failures = results.filter((r) => r.failed);
+  if (!args.quiet && failures.length > 0 && gbrainAvailable() && existsSync(join(gbrainConfigDir(), "config.json"))) {
+    const reasons = [...new Set(failures.map((r) => r.reason))].join("; ");
+    console.error(`brain context: ${failures.length}/${results.length} queries failed (${reasons})`);
   }
 
   if (args.explain) {
